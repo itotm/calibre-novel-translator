@@ -108,14 +108,17 @@ state, so nothing is shared with an installation of the official plugin:
 | Settings | `plugins/ebook_translator.json` | `plugins/ebook_translator_novel.json` |
 | Cache directory | `…EbookTranslator` | `…EbookTranslator.Novel` |
 
-Build the installable archive and add it to Calibre:
+This fork carries no CI: the release archive is built locally, by the
+same script used for day-to-day installs.
 
 ```sh
 ./build_plugin.sh
-calibre-customize -a ../ebook-translator-novel.zip
 ```
 
-Or, in the GUI: *Preferences → Plugins → Load plugin from file*.
+It writes `../ebook-translator-novel_v<version>.zip`, checks the archive
+is installable before handing it over, and prints the
+`calibre-customize -a …` line to run. In the GUI the equivalent is
+*Preferences → Plugins → Load plugin from file*.
 
 Because the two plugins keep separate settings, engine API keys have to be
 entered again in the fork the first time you use it.
