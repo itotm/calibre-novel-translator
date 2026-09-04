@@ -129,7 +129,7 @@ class Configuration:
 
 
 def get_config():
-    preferences = JSONConfig('plugins/ebook_translator')
+    preferences = JSONConfig('plugins/ebook_translator_novel')
     preferences.defaults = defaults
     return Configuration(preferences)
 
@@ -238,6 +238,15 @@ def ver205_upgrade(config):
 
 
 def ver240_upgrade():
+    """Move the pre-2.4.0 configuration to the current location.
+
+    Only the upstream plugin ever wrote to the legacy directory, and
+    the official plugin may well be installed next to this fork, so a
+    fork must leave that directory to its owner instead of renaming
+    it out from under the plugin that created it.
+    """
+    if EbookTranslator.identifier != 'ebook-translator':
+        return
     old_config_path = os.path.join(config_dir, EbookTranslator.author)
     new_config_path = os.path.join(plugin_dir, EbookTranslator.identifier)
     if os.path.exists(new_config_path) and os.path.exists(old_config_path):

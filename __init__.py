@@ -21,20 +21,22 @@ class EbookTranslator(InterfaceActionBase):
     - Calibre version: >= 5.0.0
     - Python version: >=3.8.5
     """
-    name = _z('Ebook Translator')
+    name = _z('Ebook Translator (Novel)')
     title = _(name)
     supported_platforms = ['windows', 'osx', 'linux']
-    identifier = 'ebook-translator'
+    identifier = 'ebook-translator-novel'
     author = 'bookfere.com'
     version = (2, 4, 2)
     __version__ = 'v' + '.'.join(map(str, version))
     description = _(
         'A Calibre plugin to translate ebook into a specified language '
-        '(optionally keeping the original content).')
+        '(optionally keeping the original content).') + _(
+        ' This fork adds Novel Mode and the OpenRouter engine.')
     # see: https://www.mobileread.com/forums/showthread.php?t=242223
     minimum_calibre_version = (5, 0, 0)
 
-    actual_plugin = 'calibre_plugins.ebook_translator.ui:EbookTranslatorGui'
+    actual_plugin = (
+        'calibre_plugins.ebook_translator_novel.ui:EbookTranslatorGui')
 
     # The DEBUG constant cannot be shared with new worker processes.
     # To ensure that it is available, add it to the OS environment.

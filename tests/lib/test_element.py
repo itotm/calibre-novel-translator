@@ -17,7 +17,7 @@ from ...engines import DeeplFreeTranslate
 from ...engines.base import Base
 
 
-module_name = 'calibre_plugins.ebook_translator.lib.element'
+module_name = 'calibre_plugins.ebook_translator_novel.lib.element'
 
 
 class TestFunction(unittest.TestCase):
@@ -41,7 +41,7 @@ class TestFunction(unittest.TestCase):
         xhtml = '<p xmlns="http://www.w3.org/1999/xhtml">a</p>'
         self.assertEqual('p', get_name(etree.XML(xhtml)))
 
-    @patch('calibre_plugins.ebook_translator.lib.element.open_file')
+    @patch('calibre_plugins.ebook_translator_novel.lib.element.open_file')
     def test_get_srt_elements(self, mock_open_file):
         mock_open_file.return_value = '01:00\n0\na\nb\n\n02:00\n1\nc\n\n'
         elements = get_srt_elements('/path/to/srt', 'utf-8')
@@ -50,7 +50,7 @@ class TestFunction(unittest.TestCase):
         self.assertEqual(['01:00', '0', 'a\nb'], elements[0].element)
         self.assertEqual(['02:00', '1', 'c'], elements[1].element)
 
-    @patch('calibre_plugins.ebook_translator.lib.element.open_file')
+    @patch('calibre_plugins.ebook_translator_novel.lib.element.open_file')
     def test_get_pgn_elements(self, mock_open_file):
         mock_open_file.return_value = '1\n2\n3\n\nabc{abc}abc\n\ndef{def}def'
         elements = get_pgn_elements('/path/to/pgn', 'utf-8')
@@ -1415,7 +1415,7 @@ class TestElementHandler(unittest.TestCase):
         self.handler.load_reserve_rules()
         self.assertIsNotNone(self.handler.reserve_pattern)
 
-    @patch('calibre_plugins.ebook_translator.lib.element.uid')
+    @patch('calibre_plugins.ebook_translator_novel.lib.element.uid')
     def test_prepare_original(self, mock_uid):
         self.handler.translation_lang = 'en'
         self.handler.original_color = 'red'
@@ -1442,7 +1442,7 @@ class TestElementHandler(unittest.TestCase):
                 self.assertEqual('green', element.translation_color)
                 self.assertEqual(('percentage', 20), element.column_gap)
 
-    @patch('calibre_plugins.ebook_translator.lib.element.uid')
+    @patch('calibre_plugins.ebook_translator_novel.lib.element.uid')
     def test_prepare_translation_contains_ignored_element(self, mock_uid):
         self.xhtml = etree.XML(b"""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
@@ -1645,7 +1645,7 @@ class TestElementHandlerMerge(unittest.TestCase):
             [('a', 'A\n\nB'), ('b', None), ('c', None)],
             self.handler.align_paragraph(paragraph))
 
-    @patch('calibre_plugins.ebook_translator.lib.element.uid')
+    @patch('calibre_plugins.ebook_translator_novel.lib.element.uid')
     def test_prepare_original_merge_separator(self, mock_uid):
         mock_uid.return_value = 'm1'
         self.handler.separator = Base.separator
@@ -1668,7 +1668,7 @@ class TestElementHandlerMerge(unittest.TestCase):
                 self.assertEqual('green', element.translation_color)
                 self.assertEqual(('percentage', 20), element.column_gap)
 
-    @patch('calibre_plugins.ebook_translator.lib.element.uid')
+    @patch('calibre_plugins.ebook_translator_novel.lib.element.uid')
     def test_prepare_original_merge_separator_multiple(self, mock_uid):
         mock_uid.side_effect = ['m1', 'm2', 'm3']
         self.handler.merge_length = 2

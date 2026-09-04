@@ -62,8 +62,8 @@ class EbookTranslatorGui(InterfaceAction):
 
         self.alert = AlertMessage(self.gui)
 
-        if not getattr(self.gui, 'bookfere_ebook_translator', False):
-            self.gui.bookfere_ebook_translator = self.Status()
+        if not getattr(self.gui, 'ebook_translator_novel', False):
+            self.gui.ebook_translator_novel = self.Status()
 
     def advanced_translation_window(self, ebook):
         name = 'advanced_' + uid(ebook.get_input_path())
@@ -215,7 +215,7 @@ class EbookTranslatorGui(InterfaceAction):
         if position:
             window.restoreGeometry(position)
 
-        windows = self.gui.bookfere_ebook_translator.windows
+        windows = self.gui.ebook_translator_novel.windows
         windows[name] = window
 
         def setup_window():
@@ -225,7 +225,7 @@ class EbookTranslatorGui(InterfaceAction):
         window.finished.connect(setup_window)
 
     def get_window(self, name):
-        return self.gui.bookfere_ebook_translator.windows.get(name)
+        return self.gui.ebook_translator_novel.windows.get(name)
 
     def show_window(self, name):
         window = self.get_window(name)
@@ -235,10 +235,10 @@ class EbookTranslatorGui(InterfaceAction):
         return True
 
     def has_running_jobs(self):
-        jobs = self.gui.bookfere_ebook_translator.jobs
+        jobs = self.gui.ebook_translator_novel.jobs
         if len(jobs) > 0:
             return True
-        windows = self.gui.bookfere_ebook_translator.windows
+        windows = self.gui.ebook_translator_novel.windows
         for name in windows:
             if name.startswith('advanced_') or name.startswith('novel_'):
                 return True

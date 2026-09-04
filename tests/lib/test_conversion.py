@@ -7,7 +7,7 @@ from ...lib.conversion import ConversionWorker
 from ...lib.ebook import Ebook
 
 
-module_name = 'calibre_plugins.ebook_translator.lib.conversion'
+module_name = 'calibre_plugins.ebook_translator_novel.lib.conversion'
 
 
 class TestConversionWorker(unittest.TestCase):

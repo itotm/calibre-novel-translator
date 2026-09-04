@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# build_plugin.sh — Crea lo zip installabile del plugin Ebook Translator.
+# build_plugin.sh - Build the installable zip of the Ebook Translator
+# (Novel) Calibre plugin.
 #
-# Uso:
-#   ./build_plugin.sh              # produce ebook-translator-calibre-plugin.zip
-#   ./build_plugin.sh mio-file.zip # produce mio-file.zip
+# Usage:
+#   ./build_plugin.sh              # produces ../ebook-translator-novel.zip
+#   ./build_plugin.sh my-file.zip  # produces my-file.zip
 #
-# Lo script deve essere eseguito dall'interno della directory del plugin
-# (quella che contiene __init__.py).
+# Run it from inside the plugin directory (the one holding __init__.py).
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEFAULT_OUTPUT="../ebook-translator-calibre-plugin.zip"
+DEFAULT_OUTPUT="../ebook-translator-novel.zip"
 OUTPUT="${1:-$DEFAULT_OUTPUT}"
 
-# Converti in percorso assoluto se relativo.
+# Turn a relative output path into an absolute one.
 if [[ "$OUTPUT" != /* ]]; then
     OUTPUT="$SCRIPT_DIR/$OUTPUT"
 fi
@@ -23,7 +23,7 @@ echo "Building plugin zip..."
 echo "  Source : $SCRIPT_DIR"
 echo "  Output : $OUTPUT"
 
-# Rimuovi eventuale zip precedente.
+# Drop any previous archive.
 rm -f "$OUTPUT"
 
 cd "$SCRIPT_DIR"
@@ -48,6 +48,6 @@ zip -r "$OUTPUT" . \
 SIZE=$(du -h "$OUTPUT" | cut -f1)
 echo "Done: $OUTPUT ($SIZE)"
 echo ""
-echo "Per installare in Calibre:"
-echo "  Preferenze → Plugin → Carica plugin da file → $OUTPUT"
-echo "  oppure: calibre-customize -a \"$OUTPUT\""
+echo "To install it in Calibre:"
+echo "  Preferences → Plugins → Load plugin from file → $OUTPUT"
+echo "  or: calibre-customize -a \"$OUTPUT\""

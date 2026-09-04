@@ -539,7 +539,7 @@ class ConversionWorker:
         self.config = get_config()
         self.db = gui.current_db
         self.api = self.db.new_api
-        self.working_jobs = self.gui.bookfere_ebook_translator.jobs
+        self.working_jobs = self.gui.ebook_translator_novel.jobs
 
     def translate_ebook(self, ebook, cache_only=False, is_batch=False):
         input_path = ebook.get_input_path()
@@ -558,7 +558,7 @@ class ConversionWorker:
             Dispatcher(self.translate_done),
             'arbitrary_n',
             args=(
-                'calibre_plugins.ebook_translator.lib.conversion',
+                'calibre_plugins.ebook_translator_novel.lib.conversion',
                 'convert_item',
                 (ebook.title, input_path, output_path, ebook.source_lang,
                  ebook.target_lang, cache_only, is_batch, ebook.input_format,
@@ -591,7 +591,7 @@ class ConversionWorker:
             Dispatcher(self.translate_done),
             'arbitrary_n',
             args=(
-                'calibre_plugins.ebook_translator.lib.conversion',
+                'calibre_plugins.ebook_translator_novel.lib.conversion',
                 'convert_item_novel',
                 (ebook.title, input_path, output_path, ebook.source_lang,
                  ebook.target_lang, cache_only, ebook.input_format,

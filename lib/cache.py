@@ -77,7 +77,7 @@ def default_cache_path():
                 local_appdata,
                 'calibre-cache',
                 'plugins',
-                'ebook-translator')
+                'ebook-translator-novel')
         else:
             # Fallback to user profile if LOCALAPPDATA is not available
             path = os.path.join(
@@ -86,11 +86,12 @@ def default_cache_path():
                 'Local',
                 'calibre-cache',
                 'plugins',
-                'ebook-translator')
+                'ebook-translator-novel')
     else:
         # For macOS and Linux, keep using temp directory
         path = os.path.join(
-            tempfile.gettempdir(), 'com.bookfere.Calibre.EbookTranslator')
+            tempfile.gettempdir(),
+            'com.bookfere.Calibre.EbookTranslator.Novel')
 
     if not os.path.exists(path):
         os.makedirs(path, exist_ok=True)

@@ -8,7 +8,7 @@ from ...engines.base import Base
 from ...engines.deepl import DeeplTranslate
 
 
-module_name = 'calibre_plugins.ebook_translator.lib.translation'
+module_name = 'calibre_plugins.ebook_translator_novel.lib.translation'
 
 
 class TestGlossary(unittest.TestCase):

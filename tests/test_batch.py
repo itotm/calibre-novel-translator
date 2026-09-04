@@ -8,7 +8,7 @@ from ..lib.conversion import ConversionWorker
 from ..lib.ebook import Ebooks
 
 
-module_name = 'calibre_plugins.ebook_translator.batch'
+module_name = 'calibre_plugins.ebook_translator_novel.batch'
 
 
 class TestBatchTranslation(unittest.TestCase):
