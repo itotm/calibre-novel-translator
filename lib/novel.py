@@ -420,7 +420,7 @@ class TokenBudget:
     REASON_OVERSIZED = 'oversized'
     REASON_END = 'end'
 
-    def __init__(self, budget=50000, max_paragraphs=100,
+    def __init__(self, budget=16000, max_paragraphs=100,
                  ratio_latin=4.0, ratio_cjk=2.0, cjk_threshold=0.30):
         if budget < 100:
             budget = 100
@@ -546,6 +546,26 @@ INFO_NOVEL_PROGRESS = 'novel_progress'
 INFO_NOVEL_CHAPTERS = 'novel_chapters_meta'
 
 
+# Words of a glossary key that are worth matching on their own. Four
+# characters keeps out the particles and articles ("of", "the", "van")
+# that would match every chapter ever written.
+_KEY_WORD_RE = re.compile(r'\w{4,}', re.UNICODE)
+
+
+def _mentions(haystack, name):
+    """Whether ``name`` (a glossary key) turns up in ``haystack``.
+
+    ``haystack`` must already be casefolded. See
+    :meth:`ContextManager.glossary_for` for why a multi-word name also
+    matches on its longest word alone.
+    """
+    folded = name.casefold()
+    if folded in haystack:
+        return True
+    words = _KEY_WORD_RE.findall(folded)
+    return len(words) > 1 and max(words, key=len) in haystack
+
+
 class ContextManager:
     """Persist and expose the running context for a novel translation.
 
@@ -627,6 +647,45 @@ class ContextManager:
 
     def get_glossary(self):
         return dict(self.glossary)
+
+    def glossary_for(self, text=None, limit=0):
+        """Return the glossary entries that ``text`` actually mentions.
+
+        The glossary grows with every chapter, while a chapter only needs
+        the names it contains. Sending all of them costs input tokens on
+        every request, and in the extraction call it does worse than
+        that: faced with a list of several hundred names to skip, models
+        have been observed copying the whole list back as "new" entries
+        until they hit their output limit.
+
+        Matching is a case-insensitive substring test, so inflected and
+        possessive forms ("Fidelma's") and scripts that do not separate
+        words still find their entry. A name of several words also
+        matches on its longest word alone, because that is the form the
+        prose actually uses: a chapter that never writes "Bishop
+        Gelasius" in full still needs the entry when it says "Gelasius".
+        The looser test can let an entry through that the chapter does
+        not really name, which costs one line of prompt; the strict one
+        would drop a name the chapter does use, which costs a
+        mistranslation.
+
+        :text: the chapter text -- source, translation, or both. ``None``
+            means no filtering, i.e. the whole glossary.
+        :limit: keep at most this many entries, the most recently learned
+            ones, since the older an entry is the more chapters the model
+            has already seen it in. 0 means no limit.
+        """
+        entries = self.glossary
+        if text:
+            haystack = text.casefold()
+            entries = {
+                source: entry for source, entry in entries.items()
+                if source and _mentions(haystack, source)}
+        limit = int(limit or 0)
+        if limit and len(entries) > limit:
+            entries = {
+                key: entries[key] for key in list(entries)[-limit:]}
+        return dict(entries)
 
     # -- mutation ----------------------------------------------------------
 
@@ -724,12 +783,20 @@ class ContextManager:
             lines.append('- %s -> %s%s' % (source, translation, suffix))
         return '\n'.join(lines)
 
-    def context_text(self, budget_tokens=8000, ratio=4.0):
+    def context_text(self, budget_tokens=4000, ratio=4.0,
+                     relevant_to=None, glossary_limit=0):
         """Return a formatted string containing the recent summaries and the
-        full glossary, truncated to fit ``budget_tokens`` (approximate).
+        glossary, truncated to fit ``budget_tokens`` (approximate).
 
         Priority when trimming (from most to least important, i.e. dropped
         last): glossary > most recent summaries > older summaries.
+
+        :relevant_to: when given, only the glossary entries this text
+            mentions are included (see :meth:`glossary_for`). Trimming by
+            budget drops glossary lines from the end, so a book long
+            enough to fill the budget would otherwise lose exactly the
+            names it learned most recently.
+        :glossary_limit: hard cap on the number of glossary entries.
         """
         max_chars = max(200, int(budget_tokens * ratio))
 
@@ -737,7 +804,8 @@ class ContextManager:
         if self.summaries_keep_last is not None:
             summaries = summaries[-int(self.summaries_keep_last):]
 
-        glossary_text = self._format_glossary(self.glossary)
+        glossary_text = self._format_glossary(
+            self.glossary_for(relevant_to, limit=glossary_limit))
         summaries_text = self._format_summaries(summaries)
 
         combined = (
@@ -859,7 +927,43 @@ DEFAULT_NOVEL_GLOSSARY_PROMPT = (
     '"notes": ""}\n'
     ']}\n\n'
     'If no new entities, reply exactly: {"entities": []}\n\n'
-    'Existing (skip these): {existing_keys}\n\n'
+    'Never list the same name twice, and never list a name that is '
+    'already known.\n\n'
+    'Already known (skip these): {existing_keys}\n\n'
+    'Source:\n{source_text}\n\n'
+    'Translation:\n{translated_text}')
+
+
+# Asks in one request for what DEFAULT_NOVEL_SUMMARY_PROMPT and
+# DEFAULT_NOVEL_GLOSSARY_PROMPT ask in two. Both need the chapter that
+# was just translated, so keeping them apart means sending it twice: on
+# a measured book the summary call carried 7000 to 8000 tokens of
+# chapter text that the glossary call was about to send again. The
+# summary comes first in the reply on purpose -- it is the field that
+# survives if the answer is cut short.
+DEFAULT_NOVEL_CONTEXT_PROMPT = (
+    'You have just translated a chapter of a novel. Report on it with a '
+    'single JSON object holding a summary and the named entities it '
+    'introduced.\n\n'
+    'Reply with ONLY that JSON object. No preamble, no explanation, no '
+    'markdown fences. Follow this exact schema:\n\n'
+    '{"summary": "...", "entities": [\n'
+    '  {"source": "Aslan", "translation": "Aslan", "type": "character", '
+    '"notes": "the lion"},\n'
+    '  {"source": "Narnia", "translation": "Narnia", "type": "place", '
+    '"notes": ""}\n'
+    ']}\n\n'
+    '"summary" is 150 to 350 words in <tlang>. Focus on plot events, '
+    'character introductions and developments, key locations, and '
+    'anything that will help translate the following chapters '
+    'consistently (relationships between characters, unresolved '
+    'threads). No preamble, no metacommentary.\n\n'
+    '"entities" lists only the NEW characters, places, unique objects '
+    'and organizations, each with the translation you used for it. '
+    'Never list the same name twice, and never list a name that is '
+    'already known. Use an empty list when there are none.\n\n'
+    'Chapter {chapter_num}: "{chapter_title}"\n\n'
+    'Already known (skip these): {existing_keys}\n\n'
     'Source:\n{source_text}\n\n'
     'Translation:\n{translated_text}')
 
@@ -1006,6 +1110,25 @@ def _extract_json_object(text):
                     except ValueError:
                         break  # try next candidate_text
     return None
+
+
+def _extract_json_string(text, key):
+    """Return the value of the string field ``key`` in a broken reply.
+
+    Used when the answer stopped before its closing braces: the object
+    cannot be decoded as a whole, but a field that was written in full
+    still decodes on its own.
+    """
+    if not text:
+        return ''
+    match = re.search(r'"%s"\s*:\s*"' % re.escape(key), text)
+    if not match:
+        return ''
+    try:
+        value, _end = json.JSONDecoder().raw_decode(text, match.end() - 1)
+    except ValueError:
+        return ''
+    return value.strip() if isinstance(value, str) else ''
 
 
 def _iter_json_objects(text):
@@ -1172,7 +1295,7 @@ class NovelTranslator:
 
     @property
     def chunk_tokens(self):
-        return int(self._cfg('novel_chunk_tokens', 50000))
+        return int(self._cfg('novel_chunk_tokens', 16000))
 
     @property
     def max_paragraphs_per_chunk(self):
@@ -1296,7 +1419,7 @@ class NovelTranslator:
 
     @property
     def context_tokens(self):
-        return int(self._cfg('novel_context_tokens', 8000))
+        return int(self._cfg('novel_context_tokens', 4000))
 
     @property
     def summary_tokens(self):
@@ -1309,6 +1432,58 @@ class NovelTranslator:
         matter (Copyright, Table of Contents, About the Author, ...).
         """
         return int(self._cfg('novel_min_chars_for_context', 300))
+
+    @property
+    def summary_max_chars(self):
+        """Length above which a chapter summary is truncated before it is
+        stored.
+
+        A summary is written once and then re-read in the prompt of every
+        chapter that follows, so a bad one is not a one-off cost: asked
+        for 150 to 350 words, a model was measured answering with the
+        whole translated chapter, 30960 characters, which alone fills the
+        entire context budget and pushes the glossary and the older
+        summaries out of it for the rest of the book.
+
+        Derived from ``novel_summary_tokens`` -- twice the target size,
+        so an ordinary summary is never touched -- unless
+        ``novel_summary_max_chars`` overrides it.
+        """
+        override = int(self._cfg('novel_summary_max_chars', 0) or 0)
+        if override > 0:
+            return override
+        return max(500, self.summary_tokens * 4 * 2)
+
+    @property
+    def context_max_tokens(self):
+        """Hard cap on what the summary and the glossary calls may write.
+
+        Both answers are short by nature -- a few hundred words, a list
+        of proper nouns -- but nothing in the request said so, and a
+        model that starts repeating itself keeps going until its own
+        output limit stops it: one glossary call was measured writing
+        131072 tokens over eight minutes, re-listing names it had been
+        told to skip. The cap costs nothing when the model behaves and
+        bounds the damage when it does not. Set to 0 to leave the
+        engine's own limit alone.
+        """
+        return int(self._cfg('novel_context_max_tokens', 4000))
+
+    @property
+    def glossary_relevant_only(self):
+        """Whether prompts carry only the glossary entries of the chapter
+        at hand, rather than the whole glossary.
+        """
+        return bool(self._cfg('novel_glossary_relevant_only', True))
+
+    @property
+    def glossary_prompt_max_entries(self):
+        """Hard cap on the glossary entries any single prompt carries.
+
+        Applied after the relevance filter, keeping the most recently
+        learned entries. 0 means no cap.
+        """
+        return int(self._cfg('novel_glossary_prompt_max_entries', 150))
 
     @property
     def context_reasoning(self):
@@ -1337,6 +1512,39 @@ class NovelTranslator:
     def glossary_prompt(self):
         value = self._cfg('novel_glossary_prompt', None)
         return value or DEFAULT_NOVEL_GLOSSARY_PROMPT
+
+    @property
+    def context_prompt(self):
+        value = self._cfg('novel_context_prompt', None)
+        return value or DEFAULT_NOVEL_CONTEXT_PROMPT
+
+    @property
+    def combined_context_call(self):
+        """Whether the summary and the glossary are asked for at once.
+
+        On by default: the two tasks read the same chapter, so keeping
+        them apart sends it twice. A prompt typed by the user in either
+        of the two separate fields wins over this -- that prompt would
+        otherwise be silently ignored -- unless a combined prompt of
+        their own is set in ``novel_context_prompt``.
+        """
+        if not bool(self._cfg('novel_combined_context_call', True)):
+            return False
+        if self._cfg('novel_context_prompt', None):
+            return True
+        return not (self._cfg('novel_summary_prompt', None)
+                    or self._cfg('novel_glossary_prompt', None))
+
+    @property
+    def skip_context_last_chapter(self):
+        """Whether the last chapter skips the summary and glossary call.
+
+        On by default: nothing ever reads them. The context of a chapter
+        is built for the chapters that follow it, and after the last one
+        there are none -- the call is one full copy of the chapter sent
+        for an answer that is stored and never looked at again.
+        """
+        return bool(self._cfg('novel_skip_context_last_chapter', True))
 
     # -- engine plumbing ---------------------------------------------------
 
@@ -1488,8 +1696,13 @@ class NovelTranslator:
             _('Novel mode: giving up after {} attempts. Last error: {}')
             .format(attempts, last_error))
 
-    def _translate_context_call(self, system_prompt, user_prompt, label):
+    def _translate_context_call(self, system_prompt, user_prompt, label,
+                                schema=None):
         """Run one auxiliary (summary / glossary) request.
+
+        :schema: when given and the engine supports structured output,
+            the reply is constrained to that JSON schema by the server
+            instead of being merely asked for in the prompt.
 
         Unless ``novel_context_reasoning`` says otherwise, the engine's
         chain of thought is turned down for the duration of the call and
@@ -1519,7 +1732,26 @@ class NovelTranslator:
                 self.log(_(
                     'Reasoning turned off for {} (novel_context_reasoning '
                     'is off).').format(label))
+        cap = self.context_max_tokens
+        if cap > 0 and hasattr(translator, 'max_tokens'):
+            try:
+                current = int(getattr(translator, 'max_tokens', 0) or 0)
+            except (TypeError, ValueError):
+                current = 0
+            # 0 means "no limit sent"; anything the user set that is
+            # already tighter than the cap is left as it is.
+            wanted = cap if current <= 0 else min(cap, current)
+            if wanted != current:
+                saved['max_tokens'] = translator.max_tokens
+                translator.max_tokens = wanted
+                self.log(_(
+                    'Reply for {} capped at {} tokens '
+                    '(novel_context_max_tokens).').format(label, wanted))
         try:
+            if schema is not None and self._structured_active():
+                return self._translate_with_retry_structured(
+                    system_prompt, user_prompt, schema=schema,
+                    attempts=2, label=label)
             return self._translate_with_retry(
                 system_prompt, user_prompt, attempts=2, label=label)
         finally:
@@ -1685,6 +1917,47 @@ class NovelTranslator:
         'required': ['paragraphs'],
     }
 
+    # Same idea as the translation schema, for the entity extraction
+    # call: a server that enforces the shape cannot answer with prose,
+    # cannot preface the JSON, and cannot drift into re-listing the
+    # names it was told to skip until it exhausts its output limit.
+    _GLOSSARY_RESPONSE_SCHEMA = {
+        'type': 'object',
+        'additionalProperties': False,
+        'properties': {
+            'entities': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'additionalProperties': False,
+                    'properties': {
+                        'source': {'type': 'string'},
+                        'translation': {'type': 'string'},
+                        'type': {'type': 'string'},
+                        'notes': {'type': 'string'},
+                    },
+                    'required': [
+                        'source', 'translation', 'type', 'notes'],
+                },
+            },
+        },
+        'required': ['entities'],
+    }
+
+    # The combined summary + glossary reply. "summary" is declared
+    # first so a model that follows the schema order writes it before
+    # the entity list: if the answer is cut short, the field that cannot
+    # be salvaged from a broken object is the one already finished.
+    _CONTEXT_RESPONSE_SCHEMA = {
+        'type': 'object',
+        'additionalProperties': False,
+        'properties': {
+            'summary': {'type': 'string'},
+            'entities': _GLOSSARY_RESPONSE_SCHEMA['properties']['entities'],
+        },
+        'required': ['summary', 'entities'],
+    }
+
     def _build_structured_payload(self, chunk_paragraphs, indices):
         """Return the JSON payload with source paragraphs to translate.
 
@@ -1748,13 +2021,16 @@ class NovelTranslator:
                 result[n] = translation
 
         if truncated:
+            missing = sorted(expected - set(result))
             self.log(_(
-                'Malformed or truncated JSON response ({} chars): '
-                'salvaged {}/{} paragraph(s). A response cut off in the '
-                'middle usually means the model hit its output token '
-                'limit; lower the paragraphs-per-chunk cap if this '
-                'repeats.').format(
-                    len(response), len(result), len(expected)), True)
+                'Incomplete JSON reply ({} chars): recovered {}/{} '
+                'paragraph(s), missing {}. They are requested again '
+                'right away, which costs one small extra call. Only if '
+                'whole chapters keep coming back short is the model '
+                'hitting its output limit -- lower the '
+                'paragraphs-per-chunk cap then.').format(
+                    len(response), len(result), len(expected),
+                    missing[:10]))
         return result
 
     def _translate_with_retry_structured(self, system_prompt, user_text,
@@ -2044,7 +2320,28 @@ class NovelTranslator:
         except TranslationFailed as e:
             self.log(_('Summary generation failed: {}').format(e), True)
             return ''
-        return response.strip()
+        return self._clip_summary(response.strip(), chapter)
+
+    def _clip_summary(self, summary, chapter):
+        """Keep a runaway summary out of the stored context.
+
+        See :attr:`summary_max_chars`. The cut is moved back to the last
+        sentence end so what is stored still reads as prose.
+        """
+        limit = self.summary_max_chars
+        if not limit or len(summary) <= limit:
+            return summary
+        clipped = summary[:limit]
+        stop = max(clipped.rfind('. '), clipped.rfind('.\n'))
+        if stop > limit // 2:
+            clipped = clipped[:stop + 1]
+        self.log(_(
+            'Summary of chapter {} came back {} chars long, well past the '
+            '{} it was asked for; stored the first {} chars so it does '
+            'not crowd out the context of the chapters that '
+            'follow.').format(
+                chapter.index, len(summary), limit, len(clipped)), True)
+        return clipped.strip()
 
     def _extract_glossary_updates(self, chapter, source_text, translated_text):
         if not source_text.strip() or not translated_text.strip():
@@ -2052,8 +2349,8 @@ class NovelTranslator:
         max_chars = self._summary_input_budget_chars()
         src_clipped = self._head_and_tail(source_text, max_chars)
         tgt_clipped = self._head_and_tail(translated_text, max_chars)
-        existing_keys = ', '.join(sorted(self.ctx.get_glossary().keys())) \
-            or model_text('(none)')
+        known, existing_keys = self._glossary_prompt_keys(
+            chapter, '%s\n%s' % (src_clipped, tgt_clipped))
         system_prompt = self._fill_placeholders(model_text(
             'You are a helpful assistant. Answer with strict JSON '
             'only.'))
@@ -2061,7 +2358,7 @@ class NovelTranslator:
             self.glossary_prompt,
             {
                 '{existing_keys}': (
-                    model_text('Existing entries (skip these):'),
+                    model_text('Already known (skip these):'),
                     existing_keys),
                 '{source_text}': (model_text('Source:'), src_clipped),
                 '{translated_text}': (
@@ -2072,29 +2369,62 @@ class NovelTranslator:
         try:
             response = self._translate_context_call(
                 system_prompt, user_prompt,
-                _('glossary of chapter {}').format(chapter.index))
+                _('glossary of chapter {}').format(chapter.index),
+                schema=self._GLOSSARY_RESPONSE_SCHEMA)
         except TranslationFailed as e:
             self.log(
                 _('Glossary extraction failed: {}').format(e), True)
             return []
 
+        return self._new_entities(
+            self._parse_entities(response, obj=None), known, chapter)
+
+    def _parse_entities(self, response, obj=None):
+        """Return the entities of a reply, deduplicated.
+
+        :obj: the already decoded JSON object, when the caller has one.
+            Otherwise the reply is decoded here, and if it never closed
+            its braces the entries that did complete are salvaged from
+            it rather than the whole answer being thrown away.
+        """
         entities = []
-        # Path 1: JSON parsing (preferred).
-        obj = _extract_json_object(response)
-        if obj and isinstance(obj.get('entities'), list):
-            for item in obj['entities']:
+        seen = set()
+
+        def collect(items):
+            for item in items:
                 if not isinstance(item, dict):
                     continue
                 src = (item.get('source') or '').strip()
                 tgt = (item.get('translation') or '').strip()
-                if not src or not tgt:
+                # A model that loops repeats the same entry over and
+                # over; the first spelling of each name is enough.
+                if not src or not tgt or src in seen:
                     continue
+                seen.add(src)
                 entities.append({
                     'source': src,
                     'translation': tgt,
                     'type': (item.get('type') or '').strip() or 'other',
                     'notes': (item.get('notes') or '').strip(),
                 })
+
+        # Path 1: JSON parsing (preferred).
+        if obj is None:
+            obj = _extract_json_object(response)
+        if obj and isinstance(obj.get('entities'), list):
+            collect(obj['entities'])
+        else:
+            # Path 1b: a reply the output cap cut off mid-object never
+            # closes its outermost brace, so the whole answer would be
+            # thrown away. Keep the entries that did complete.
+            salvaged = [
+                item for item in _iter_json_objects(response)
+                if item.get('source') and item.get('translation')]
+            if salvaged:
+                self.log(_(
+                    'Glossary extraction: reply not terminated, recovered '
+                    '{} complete entries.').format(len(salvaged)))
+                collect(salvaged)
 
         # Path 2: line-based regex fallback if JSON gave us nothing.
         if not entities:
@@ -2109,15 +2439,89 @@ class NovelTranslator:
                 self.log(
                     _('Glossary extraction: could not parse JSON, '
                       'skipping.'), True)
+        return entities
 
-        # Filter out entities already present (LLMs often repeat despite
-        # being told not to).
-        existing = set(self.ctx.get_glossary().keys())
+    def _new_entities(self, entities, known, chapter):
+        """Drop the entries already in the glossary (LLMs repeat them
+        despite being told not to) and report what was dropped."""
+        existing = set(known)
         filtered = [e for e in entities if e['source'] not in existing]
+        already_known = len(entities) - len(filtered)
+        if already_known:
+            self.log(_(
+                'Glossary: {} of the {} entries returned for chapter {} '
+                'were already known and were dropped.').format(
+                    already_known, len(entities), chapter.index))
         if filtered:
             self.log(_('Glossary: +{} new entries (chapter {}).').format(
                 len(filtered), chapter.index))
         return filtered
+
+    def _glossary_prompt_keys(self, chapter, text):
+        """Return the '(skip these)' list for an extraction prompt."""
+        known = self.ctx.get_glossary()
+        relevant = self.ctx.glossary_for(
+            text if self.glossary_relevant_only else None,
+            limit=self.glossary_prompt_max_entries)
+        if known and len(relevant) < len(known):
+            self.log(_(
+                'Glossary prompt: listing {} of {} known entries '
+                '(the ones chapter {} mentions).').format(
+                    len(relevant), len(known), chapter.index))
+        return known, ', '.join(sorted(relevant.keys())) \
+            or model_text('(none)')
+
+    def _generate_context(self, chapter, source_text, translated_text):
+        """Ask for the summary and the glossary of a chapter at once.
+
+        Returns ``(summary, new_entities)``, the same pair the two
+        separate calls produce. See :attr:`combined_context_call`.
+        """
+        if not translated_text.strip():
+            return '', []
+        max_chars = self._summary_input_budget_chars()
+        src_clipped = self._head_and_tail(source_text, max_chars)
+        tgt_clipped = self._head_and_tail(translated_text, max_chars)
+        known, existing_keys = self._glossary_prompt_keys(
+            chapter, '%s\n%s' % (src_clipped, tgt_clipped))
+        system_prompt = self._fill_placeholders(model_text(
+            'You are a helpful assistant. Answer with strict JSON '
+            'only.'))
+        user_prompt = self._compose_prompt(
+            self.context_prompt,
+            {
+                '{chapter_num}': (None, str(chapter.index)),
+                '{chapter_title}': (None, chapter.title or ''),
+                '{existing_keys}': (
+                    model_text('Already known (skip these):'),
+                    existing_keys),
+                '{source_text}': (model_text('Source:'), src_clipped),
+                '{translated_text}': (
+                    model_text('Translation:'), tgt_clipped),
+            },
+            required=(
+                '{existing_keys}', '{source_text}', '{translated_text}'))
+        try:
+            response = self._translate_context_call(
+                system_prompt, user_prompt,
+                _('summary + glossary of chapter {}').format(chapter.index),
+                schema=self._CONTEXT_RESPONSE_SCHEMA)
+        except TranslationFailed as e:
+            self.log(_(
+                'Summary + glossary extraction failed: {}').format(e), True)
+            return '', []
+
+        obj = _extract_json_object(response)
+        if obj and isinstance(obj.get('summary'), str):
+            summary = obj['summary'].strip()
+        else:
+            # The object never closed: the summary is written before the
+            # entity list, so it is usually there in full anyway.
+            summary = _extract_json_string(response, 'summary')
+            obj = None
+        entities = self._new_entities(
+            self._parse_entities(response, obj=obj), known, chapter)
+        return self._clip_summary(summary, chapter), entities
 
     # -- persistence -------------------------------------------------------
 
@@ -2245,8 +2649,15 @@ class NovelTranslator:
                 '(closed by: {}).').format(
                     i, total_chunks, visible, tok_est, reason))
 
+        # The glossary handed to the translation prompt is filtered to
+        # the names this chapter actually contains: the rest cannot be
+        # mistranslated here, and leaving them out keeps the block small
+        # enough that the budget never has to truncate it.
+        source_text = self._build_source_chapter_text(chapter.paragraphs)
         context_text = self.ctx.context_text(
-            budget_tokens=self.context_tokens)
+            budget_tokens=self.context_tokens,
+            relevant_to=source_text if self.glossary_relevant_only else None,
+            glossary_limit=self.glossary_prompt_max_entries)
 
         # Translate each chunk.
         translations = {}
@@ -2307,7 +2718,6 @@ class NovelTranslator:
                 overlap_translations = []
 
         # Summary + glossary.
-        source_text = self._build_source_chapter_text(chapter.paragraphs)
         translated_text = self._build_translated_chapter_text(
             chapter.paragraphs, translations)
 
@@ -2324,18 +2734,17 @@ class NovelTranslator:
                 'Chapter {}: {} chars translated, below threshold {}. '
                 'Skipping summary + glossary extraction.').format(
                     chapter.index, translated_len, threshold))
+        elif self._is_last_chapter(chapter) and self.skip_context_last_chapter:
+            self.log(_(
+                'Chapter {} is the last one: skipping summary + glossary, '
+                'nothing comes after them.').format(chapter.index))
+        elif self.combined_context_call:
+            summary, glossary_delta = self._generate_context(
+                chapter, source_text, translated_text)
+            self._log_summary(chapter, summary)
         else:
             summary = self._generate_summary(chapter, translated_text)
-            if summary:
-                preview = summary.strip().replace('\n', ' ')
-                if len(preview) > 160:
-                    preview = preview[:157] + '...'
-                self.log(_('Summary (chapter {}): {}').format(
-                    chapter.index, preview))
-            else:
-                self.log(_(
-                    'Summary (chapter {}): empty response.').format(
-                        chapter.index), True)
+            self._log_summary(chapter, summary)
             glossary_delta = self._extract_glossary_updates(
                 chapter, source_text, translated_text)
 
@@ -2344,6 +2753,22 @@ class NovelTranslator:
             chapter.index, chapter.title, summary, glossary_delta)
         self.chapter_done(chapter, summary, glossary_delta)
         self._report_progress()
+
+    def _is_last_chapter(self, chapter):
+        return bool(self.chapters) \
+            and chapter.index == self.chapters[-1].index
+
+    def _log_summary(self, chapter, summary):
+        if summary:
+            preview = summary.strip().replace('\n', ' ')
+            if len(preview) > 160:
+                preview = preview[:157] + '...'
+            self.log(_('Summary (chapter {}): {}').format(
+                chapter.index, preview))
+        else:
+            self.log(_(
+                'Summary (chapter {}): empty response.').format(
+                    chapter.index), True)
 
     def _report_progress(self):
         done = self.ctx.get_progress()

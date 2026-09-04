@@ -535,6 +535,51 @@ class TestChatgptTranslate(unittest.TestCase):
         self.assertEqual('你好世界！', result)
 
 
+class TestChatgptStreamParsing(unittest.TestCase):
+    """A stream that ends badly must not hang or pass for a full reply."""
+
+    def setUp(self):
+        ChatgptTranslate.set_config({'api_keys': ['a']})
+        self.translator = ChatgptTranslate()
+
+    def _stream(self, lines):
+        response = Mock()
+        response.readline.side_effect = list(lines)
+        return self.translator._parse_stream(response)
+
+    def test_stream_ends_without_the_done_marker(self):
+        # A provider that just closes the body: readline keeps handing
+        # back b'', which used to spin forever.
+        chunks = self._stream([
+            b'data: {"choices":[{"delta":{"content":"ciao"}}]}',
+            b'', b'', b''])
+        self.assertEqual('ciao', ''.join(chunks))
+
+    def test_an_error_sent_inside_the_stream_is_raised(self):
+        # OpenRouter reports an upstream failure as a regular event; it
+        # used to be dropped, leaving a half-written reply behind.
+        chunks = self._stream([
+            b'data: {"choices":[{"delta":{"content":"ciao"}}]}',
+            b'data: {"error":{"message":"upstream timed out"}}',
+            b'data: [DONE]'])
+        with self.assertRaises(Exception) as caught:
+            ''.join(chunks)
+        self.assertIn('upstream timed out', str(caught.exception))
+
+    def test_data_lines_without_a_space_are_read(self):
+        chunks = self._stream([
+            b'data:{"choices":[{"delta":{"content":"ciao"}}]}',
+            b'data: [DONE]'])
+        self.assertEqual('ciao', ''.join(chunks))
+
+    def test_the_payload_may_contain_the_separator(self):
+        payload = json.dumps(
+            {'choices': [{'delta': {'content': 'the data: point'}}]})
+        chunks = self._stream(
+            [('data: %s' % payload).encode(), b'data: [DONE]'])
+        self.assertEqual('the data: point', ''.join(chunks))
+
+
 class TestOpenRouterTranslate(unittest.TestCase):
     def setUp(self):
         OpenRouterTranslate.set_config({'api_keys': ['sk-or-v1-a']})

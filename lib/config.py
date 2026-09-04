@@ -52,7 +52,7 @@ defaults: dict[str, Any] = {
     # reply is about as long as the chunk, and output limits are far
     # lower than context windows (8k-32k tokens on most models). A
     # hundred paragraphs is a comfortable answer for any of them.
-    'novel_chunk_tokens': 50000,
+    'novel_chunk_tokens': 16000,
     'novel_max_paragraphs_per_chunk': 100,
     # Structured output policy for the novel translator.
     #   'auto'  -> use JSON structured output when the engine advertises
@@ -63,9 +63,38 @@ defaults: dict[str, Any] = {
     #              don't advertise it
     'novel_structured_output': 'auto',
     'novel_overlap_paragraphs': 3,
-    'novel_context_tokens': 8000,
+    'novel_context_tokens': 4000,
     'novel_summary_tokens': 600,
     'novel_glossary_max_entries': 500,
+    # Prompts carry only the glossary entries the chapter at hand
+    # mentions, capped to this many. A glossary that keeps growing
+    # otherwise ends up costing input tokens on every request and, in
+    # the extraction call, invites the model to copy the list of names
+    # it was told to skip back as new entries.
+    'novel_glossary_relevant_only': True,
+    'novel_glossary_prompt_max_entries': 150,
+    # Hard cap on what the summary and glossary calls may write. Both
+    # answers are short by nature, but a model that starts repeating
+    # itself only stops at its own output limit: one glossary call was
+    # measured writing 131072 tokens over eight minutes. 0 disables it.
+    'novel_context_max_tokens': 4000,
+    # Length above which a chapter summary is truncated before being
+    # stored. A summary is re-read in every later chapter's prompt, so a
+    # model that answers with the whole chapter instead of 150-350 words
+    # fills the context budget for the rest of the book. 0 derives the
+    # limit from novel_summary_tokens (twice the target size).
+    'novel_summary_max_chars': 0,
+    # Ask for the summary and the glossary in a single request. Both
+    # read the chapter that was just translated, so two calls send it
+    # twice: measured on a real book, the summary call carried 7000 to
+    # 8000 tokens of chapter text the glossary call was about to send
+    # again. A summary or glossary prompt typed by the user turns this
+    # off by itself, so that prompt is not silently ignored.
+    'novel_combined_context_call': True,
+    'novel_context_prompt': None,
+    # The last chapter's summary and glossary are read by nobody: the
+    # context of a chapter exists for the chapters that follow it.
+    'novel_skip_context_last_chapter': True,
     # Whether the summary and glossary calls may spend reasoning tokens.
     # Off by default: neither task is a reasoning task, and on a measured
     # chapter the glossary call spent three quarters of its output on

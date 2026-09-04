@@ -7,6 +7,7 @@ from ...lib.exception import TranslationCanceled, TranslationFailed
 from ...lib.novel import (
     Chapter, ChapterBuilder, TokenBudget, ContextManager, NovelTranslator,
     DEFAULT_NOVEL_TRANSLATION_PROMPT, DEFAULT_NOVEL_GLOSSARY_PROMPT,
+    DEFAULT_NOVEL_CONTEXT_PROMPT, _extract_json_string,
     tag_paragraphs, parse_tagged_response, _extract_json_object,
     _extract_entities_fallback,
     novel_cache_id, _href_to_page_id,
@@ -640,6 +641,56 @@ class TestContextManager(unittest.TestCase):
         # It should never be empty and always contain the header labels.
         self.assertTrue(text)
 
+    def test_glossary_for_keeps_only_the_names_in_the_text(self):
+        ctx = ContextManager(self.cache).load()
+        ctx.append_chapter(1, 't', 's', [
+            {'source': 'Fidelma', 'translation': 'Fidelma'},
+            {'source': 'Canterbury', 'translation': 'Canterbury'},
+            {'source': 'Wighard', 'translation': 'Wighard'},
+        ])
+        # Possessives and case differences still find their entry.
+        selected = ctx.glossary_for(
+            "fidelma's cell was next to Wighard's.")
+        self.assertEqual({'Fidelma', 'Wighard'}, set(selected))
+
+    def test_glossary_for_matches_a_shortened_name(self):
+        ctx = ContextManager(self.cache).load()
+        ctx.append_chapter(1, 't', 's', [
+            {'source': 'Bishop Gelasius', 'translation': 'Vescovo Gelasio'},
+            {'source': 'Abbess Wulfrun', 'translation': 'Badessa Wulfrun'},
+        ])
+        # The prose rarely repeats a title; the entry is still needed.
+        selected = ctx.glossary_for('Gelasius raised his hand.')
+        self.assertEqual({'Bishop Gelasius'}, set(selected))
+
+    def test_glossary_for_without_text_returns_everything(self):
+        ctx = ContextManager(self.cache).load()
+        ctx.append_chapter(1, 't', 's', [
+            {'source': 'A', 'translation': 'A'},
+            {'source': 'B', 'translation': 'B'},
+        ])
+        self.assertEqual({'A', 'B'}, set(ctx.glossary_for(None)))
+
+    def test_glossary_for_limit_keeps_the_most_recent(self):
+        ctx = ContextManager(self.cache).load()
+        ctx.append_chapter(1, 't', 's', [
+            {'source': 'A', 'translation': 'A'},
+            {'source': 'B', 'translation': 'B'},
+            {'source': 'C', 'translation': 'C'},
+        ])
+        self.assertEqual(['B', 'C'], list(ctx.glossary_for(None, limit=2)))
+
+    def test_context_text_carries_only_the_relevant_glossary(self):
+        ctx = ContextManager(self.cache).load()
+        ctx.append_chapter(1, 'Prologue', 'Something happens.', [
+            {'source': 'Bilbo', 'translation': 'Bilbo'},
+            {'source': 'Smaug', 'translation': 'Smaug'},
+        ])
+        text = ctx.context_text(
+            budget_tokens=2000, relevant_to='Bilbo walked home.')
+        self.assertIn('Bilbo', text)
+        self.assertNotIn('Smaug', text)
+
     def test_replace_glossary(self):
         ctx = ContextManager(self.cache).load()
         ctx.append_chapter(1, 't', 's', [
@@ -1113,6 +1164,25 @@ class TestNovelTranslator(unittest.TestCase):
         self.assertTrue(warning_seen)
 
     def test_summary_and_glossary_persisted(self):
+        # The default asks for both in one reply.
+        def side_effect(text, prompt):
+            if _is_translation_call(prompt):
+                return _echo_markers(text)
+            return ('Here is JSON: {"summary": "This chapter introduces '
+                    'Alpha.", "entities": ['
+                    '{"source": "Alpha", "translation": "Alfa", '
+                    '"type": "character"}]}')
+        engine = FakeEngine(translate_side_effect=side_effect)
+        translator = self._make_translator(engine)
+        translator.run()
+        summaries = self.ctx.get_summaries()
+        self.assertEqual(2, len(summaries))
+        self.assertIn('Alpha', summaries[0]['summary'])
+        glossary = self.ctx.get_glossary()
+        self.assertIn('Alpha', glossary)
+        self.assertEqual('Alfa', glossary['Alpha']['translation'])
+
+    def test_summary_and_glossary_persisted_in_two_calls(self):
         def side_effect(text, prompt):
             if _is_translation_call(prompt):
                 return _echo_markers(text)
@@ -1123,14 +1193,13 @@ class TestNovelTranslator(unittest.TestCase):
             # Summary path.
             return 'This chapter introduces Alpha.'
         engine = FakeEngine(translate_side_effect=side_effect)
-        translator = self._make_translator(engine)
+        translator = self._make_translator(
+            engine, {'novel_combined_context_call': False})
         translator.run()
         summaries = self.ctx.get_summaries()
-        self.assertEqual(2, len(summaries))
         self.assertIn('Alpha', summaries[0]['summary'])
-        glossary = self.ctx.get_glossary()
-        self.assertIn('Alpha', glossary)
-        self.assertEqual('Alfa', glossary['Alpha']['translation'])
+        self.assertEqual('Alfa', self.ctx.get_glossary()['Alpha'][
+            'translation'])
 
     def test_no_translatable_content_skips_chapter(self):
         # Chapter 1 contains only an ignored paragraph.
@@ -1657,8 +1726,11 @@ class TestStructuredOutputParser(unittest.TestCase):
             [1, 2])
         messages = [
             call.args[0] for call in translator.log.call_args_list]
+        # The message names what was lost, so a reader can tell a model
+        # that drops its last entry from one that runs out of output.
         self.assertTrue(
-            any('truncated' in message for message in messages), messages)
+            any('Incomplete JSON reply' in message and 'missing [2]' in message
+                for message in messages), messages)
 
 
 class TestStructuredDispatcher(unittest.TestCase):
@@ -1940,6 +2012,390 @@ class TestContextReasoning(unittest.TestCase):
         self.assertEqual(
             'user',
             translator._translate_context_call('system', 'user', 'summary'))
+
+
+class CappedEngine(FakeEngine):
+    """FakeEngine exposing an output limit, like the OpenRouter engine."""
+
+    def __init__(self, translate_side_effect=None, max_tokens=0):
+        super().__init__(translate_side_effect)
+        self.max_tokens = max_tokens
+        self.seen_caps = []
+
+    def translate(self, text):
+        self.seen_caps.append(self.max_tokens)
+        return super().translate(text)
+
+
+class TestGlossaryStaysSmall(unittest.TestCase):
+    """A glossary of hundreds of names must not bloat every request.
+
+    Two failures were observed on a real book once the glossary passed a
+    couple of hundred entries: the extraction prompt carried the whole
+    list of names to skip, and the model answered by copying that list
+    back as new entries until it hit its output limit -- 131072 tokens
+    on one call.
+    """
+
+    def _make_translator(self, engine, config=None, glossary=None):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        if glossary:
+            ctx.append_chapter(1, 't', 's', glossary)
+        cache.reset_mock()
+        base = {'novel_min_chars_for_context': 0}
+        base.update(config or {})
+        translator = NovelTranslator(engine, [], ctx, cache, config=base)
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        return translator
+
+    def test_prompt_lists_only_the_names_of_this_chapter(self):
+        engine = FakeEngine(
+            translate_side_effect=lambda text, prompt: '{"entities": []}')
+        translator = self._make_translator(engine, glossary=[
+            {'source': 'Fidelma', 'translation': 'Fidelma'},
+            {'source': 'Canterbury', 'translation': 'Canterbury'},
+        ])
+        translator._extract_glossary_updates(
+            Chapter(2, 'Two', ['b'], []),
+            'Fidelma crossed the courtyard.',
+            'Fidelma attraverso il cortile.')
+
+        sent = engine.translate_calls[-1]['text']
+        self.assertIn('Fidelma', sent)
+        self.assertNotIn('Canterbury', sent)
+
+    def test_the_whole_glossary_is_sent_when_the_filter_is_off(self):
+        engine = FakeEngine(
+            translate_side_effect=lambda text, prompt: '{"entities": []}')
+        translator = self._make_translator(
+            engine, {'novel_glossary_relevant_only': False}, glossary=[
+                {'source': 'Fidelma', 'translation': 'Fidelma'},
+                {'source': 'Canterbury', 'translation': 'Canterbury'},
+            ])
+        translator._extract_glossary_updates(
+            Chapter(2, 'Two', ['b'], []), 'Fidelma walked.', 'Fidelma.')
+
+        self.assertIn('Canterbury', engine.translate_calls[-1]['text'])
+
+    def test_prompt_entry_cap_is_enforced(self):
+        engine = FakeEngine(
+            translate_side_effect=lambda text, prompt: '{"entities": []}')
+        names = ['Name%02d' % i for i in range(10)]
+        translator = self._make_translator(
+            engine, {'novel_glossary_prompt_max_entries': 3}, glossary=[
+                {'source': n, 'translation': n} for n in names])
+        translator._extract_glossary_updates(
+            Chapter(2, 'Two', ['b'], []), ' '.join(names), ' '.join(names))
+
+        sent = engine.translate_calls[-1]['text']
+        listed = [n for n in names if n in sent.split('Source:')[0]]
+        self.assertEqual(names[-3:], listed)
+
+    def test_repeated_and_known_entries_are_dropped(self):
+        reply = json.dumps({'entities': [
+            {'source': 'Fidelma', 'translation': 'Fidelma'},
+            {'source': 'Eadulf', 'translation': 'Eadulf'},
+            {'source': 'Eadulf', 'translation': 'Eadulf'},
+        ]})
+        engine = FakeEngine(
+            translate_side_effect=lambda text, prompt: reply)
+        translator = self._make_translator(engine, glossary=[
+            {'source': 'Fidelma', 'translation': 'Fidelma'}])
+        updates = translator._extract_glossary_updates(
+            Chapter(2, 'Two', ['b'], []),
+            'Fidelma and Eadulf.', 'Fidelma ed Eadulf.')
+
+        self.assertEqual(['Eadulf'], [u['source'] for u in updates])
+
+    def test_a_reply_cut_off_mid_object_is_salvaged(self):
+        # What the output cap produces: complete entries, then a broken
+        # one and no closing brace.
+        reply = (
+            '{"entities": ['
+            '{"source": "Eadulf", "translation": "Eadulf", '
+            '"type": "character", "notes": ""}, '
+            '{"source": "Bieda", "translation": "Bieda", '
+            '"type": "character", "notes": ""}, '
+            '{"source": "Sebbi", "transl')
+        engine = FakeEngine(
+            translate_side_effect=lambda text, prompt: reply)
+        translator = self._make_translator(engine)
+        updates = translator._extract_glossary_updates(
+            Chapter(2, 'Two', ['b'], []), 'Source.', 'Traduzione.')
+
+        self.assertEqual(
+            ['Eadulf', 'Bieda'], [u['source'] for u in updates])
+
+    def test_context_calls_are_capped_and_the_engine_restored(self):
+        engine = CappedEngine()
+        translator = self._make_translator(engine)
+        translator._translate_context_call('system', 'user', 'glossary')
+
+        self.assertEqual([4000], engine.seen_caps)
+        self.assertEqual(0, engine.max_tokens)
+
+    def test_a_tighter_user_cap_is_left_alone(self):
+        engine = CappedEngine(max_tokens=512)
+        translator = self._make_translator(engine)
+        translator._translate_context_call('system', 'user', 'glossary')
+
+        self.assertEqual([512], engine.seen_caps)
+        self.assertEqual(512, engine.max_tokens)
+
+    def test_the_cap_can_be_disabled(self):
+        engine = CappedEngine()
+        translator = self._make_translator(
+            engine, {'novel_context_max_tokens': 0})
+        translator._translate_context_call('system', 'user', 'glossary')
+
+        self.assertEqual([0], engine.seen_caps)
+
+    def test_an_engine_without_an_output_limit_is_untouched(self):
+        engine = FakeEngine()
+        translator = self._make_translator(engine)
+        self.assertEqual(
+            'user',
+            translator._translate_context_call('system', 'user', 'glossary'))
+
+
+class TestSummaryClipping(unittest.TestCase):
+    """A summary is re-read in every later prompt, so it must stay short."""
+
+    def _make_translator(self, engine, config=None):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        base = {'novel_min_chars_for_context': 0}
+        base.update(config or {})
+        translator = NovelTranslator(engine, [], ctx, cache, config=base)
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        return translator
+
+    def test_a_normal_summary_is_stored_verbatim(self):
+        summary = 'Fidelma indaga. ' * 20
+        engine = FakeEngine(
+            translate_side_effect=lambda text, prompt: summary)
+        translator = self._make_translator(engine)
+        stored = translator._generate_summary(
+            Chapter(1, 'One', ['a'], []), 'Testo tradotto.')
+
+        self.assertEqual(summary.strip(), stored)
+
+    def test_a_runaway_summary_is_truncated_at_a_sentence(self):
+        # The failure seen on a real book: asked for 150-350 words, the
+        # model answered with the whole translated chapter.
+        engine = FakeEngine(
+            translate_side_effect=lambda text, prompt: 'Frase lunga. ' * 2000)
+        translator = self._make_translator(
+            engine, {'novel_summary_tokens': 100})
+        stored = translator._generate_summary(
+            Chapter(1, 'One', ['a'], []), 'Testo tradotto.')
+
+        self.assertLessEqual(len(stored), 800)  # 100 tokens * 4 * 2
+        self.assertTrue(stored.endswith('.'), stored[-40:])
+        self.assertTrue(
+            any('crowd out' in c.args[0]
+                for c in translator.log.call_args_list))
+
+    def test_the_limit_can_be_set_explicitly(self):
+        engine = FakeEngine(
+            translate_side_effect=lambda text, prompt: 'x' * 5000)
+        translator = self._make_translator(
+            engine, {'novel_summary_max_chars': 600})
+        stored = translator._generate_summary(
+            Chapter(1, 'One', ['a'], []), 'Testo tradotto.')
+
+        self.assertEqual(600, len(stored))
+
+
+class TestGlossarySchema(unittest.TestCase):
+    """The extraction call is constrained by the engine when it can be."""
+
+    class SchemaEngine(FakeEngine):
+        structured_output_mode = 'schema'
+
+    def _make_translator(self, engine, config=None):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        base = {'novel_min_chars_for_context': 0}
+        base.update(config or {})
+        translator = NovelTranslator(engine, [], ctx, cache, config=base)
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        return translator
+
+    def test_the_entities_schema_is_sent_to_a_capable_engine(self):
+        translator = self._make_translator(self.SchemaEngine())
+        with patch.object(
+                translator, '_translate_with_retry_structured',
+                return_value='{"entities": []}') as structured:
+            translator._extract_glossary_updates(
+                Chapter(1, 'One', ['a'], []), 'Source.', 'Traduzione.')
+
+        self.assertEqual(
+            NovelTranslator._GLOSSARY_RESPONSE_SCHEMA,
+            structured.call_args.kwargs['schema'])
+
+    def test_an_engine_without_structured_support_is_asked_in_prose(self):
+        translator = self._make_translator(FakeEngine())
+        with patch.object(
+                translator, '_translate_with_retry_structured') as structured:
+            with patch.object(
+                    translator, '_translate_with_retry',
+                    return_value='{"entities": []}') as plain:
+                translator._extract_glossary_updates(
+                    Chapter(1, 'One', ['a'], []), 'Source.', 'Traduzione.')
+
+        structured.assert_not_called()
+        plain.assert_called_once()
+
+
+class TestCombinedContextCall(unittest.TestCase):
+    """Summary and glossary in one request instead of two."""
+
+    def setUp(self):
+        self.cache = Mock()
+        self.cache.get_info.return_value = None
+        self.ctx = ContextManager(self.cache).load()
+        self.cache.reset_mock()
+        self.paragraphs = [
+            make_paragraph(0, 'Alpha walked home.', page='a'),
+            make_paragraph(1, 'Beta followed.', page='b'),
+        ]
+        self.chapters = [
+            Chapter(1, 'Chapter One', ['a'], self.paragraphs[:1]),
+            Chapter(2, 'Chapter Two', ['b'], self.paragraphs[1:]),
+        ]
+
+    def _make_translator(self, engine, config=None):
+        base = {'novel_min_chars_for_context': 0}
+        base.update(config or {})
+        translator = NovelTranslator(
+            engine, self.chapters, self.ctx, self.cache, config=base)
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        return translator
+
+    def _engine(self):
+        reply = json.dumps({
+            'summary': 'Alpha cammina.',
+            'entities': [{'source': 'Alpha', 'translation': 'Alpha',
+                          'type': 'character', 'notes': ''}]})
+
+        def side_effect(text, prompt):
+            if _is_translation_call(prompt):
+                return _echo_markers(text)
+            return reply
+        return FakeEngine(translate_side_effect=side_effect)
+
+    def _aux_calls(self, engine):
+        return [c for c in engine.translate_calls
+                if not _is_translation_call(c['prompt'])]
+
+    def test_one_chapter_costs_one_auxiliary_call(self):
+        engine = self._engine()
+        translator = self._make_translator(engine)
+        translator._translate_chapter(self.chapters[0])
+
+        self.assertEqual(1, len(self._aux_calls(engine)))
+        summary = self.ctx.get_summaries()[0]['summary']
+        self.assertEqual('Alpha cammina.', summary)
+        self.assertIn('Alpha', self.ctx.get_glossary())
+
+    def test_the_chapter_text_travels_once(self):
+        engine = self._engine()
+        translator = self._make_translator(engine)
+        translator._generate_context(
+            self.chapters[0], 'Alpha walked home.', 'Alpha cammina a casa.')
+
+        sent = self._aux_calls(engine)[0]['text']
+        # Source and translation, one copy each -- where the two
+        # separate calls sent the translation twice.
+        self.assertEqual(1, sent.count('Alpha walked home.'))
+        self.assertEqual(1, sent.count('Alpha cammina a casa.'))
+
+    def test_a_custom_summary_prompt_keeps_the_two_calls(self):
+        # Otherwise the prompt the user typed would never be used.
+        engine = self._engine()
+        translator = self._make_translator(
+            engine, {'novel_summary_prompt': 'Riassumi in due righe.'})
+        translator._translate_chapter(self.chapters[0])
+
+        aux = self._aux_calls(engine)
+        self.assertEqual(2, len(aux))
+        self.assertTrue(
+            any('Riassumi in due righe.' in c['text'] for c in aux))
+
+    def test_the_last_chapter_skips_the_call(self):
+        engine = self._engine()
+        translator = self._make_translator(engine)
+        translator._translate_chapter(self.chapters[-1])
+
+        self.assertEqual([], self._aux_calls(engine))
+        self.assertTrue(
+            any('last one' in c.args[0]
+                for c in translator.log.call_args_list))
+
+    def test_the_last_chapter_can_keep_its_context(self):
+        engine = self._engine()
+        translator = self._make_translator(
+            engine, {'novel_skip_context_last_chapter': False})
+        translator._translate_chapter(self.chapters[-1])
+
+        self.assertEqual(1, len(self._aux_calls(engine)))
+
+    def test_a_truncated_reply_keeps_the_summary_and_the_entries(self):
+        # The summary is written first, so it survives a reply cut off
+        # inside the entity list.
+        reply = (
+            '{"summary": "Alpha cammina fino a casa.", "entities": ['
+            '{"source": "Alpha", "translation": "Alpha", "type": '
+            '"character", "notes": ""}, {"source": "Bet')
+
+        def side_effect(text, prompt):
+            if _is_translation_call(prompt):
+                return _echo_markers(text)
+            return reply
+        engine = FakeEngine(translate_side_effect=side_effect)
+        translator = self._make_translator(engine)
+        summary, entities = translator._generate_context(
+            self.chapters[0], 'Alpha walked home.', 'Alpha cammina.')
+
+        self.assertEqual('Alpha cammina fino a casa.', summary)
+        self.assertEqual(['Alpha'], [e['source'] for e in entities])
+
+    def test_shipped_combined_prompt_is_literal(self):
+        self.assertNotIn('{{', DEFAULT_NOVEL_CONTEXT_PROMPT)
+        self.assertIn('{"summary"', DEFAULT_NOVEL_CONTEXT_PROMPT)
+
+
+class TestExtractJsonString(unittest.TestCase):
+    def test_a_field_of_a_broken_object_is_recovered(self):
+        self.assertEqual(
+            'Una frase.',
+            _extract_json_string('{"summary": "Una frase.", "entities": [{',
+                                 'summary'))
+
+    def test_escapes_are_decoded(self):
+        self.assertEqual(
+            'Dice "ciao".',
+            _extract_json_string('{"summary": "Dice \\"ciao\\".", "e',
+                                 'summary'))
+
+    def test_a_truncated_field_yields_nothing(self):
+        self.assertEqual(
+            '', _extract_json_string('{"summary": "Una fra', 'summary'))
+
+    def test_a_missing_field_yields_nothing(self):
+        self.assertEqual(
+            '', _extract_json_string('{"entities": []}', 'summary'))
 
 
 class TestRequestTimingLog(unittest.TestCase):

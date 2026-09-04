@@ -207,23 +207,54 @@ class ChatgptTranslate(GenAI):
                         else response, str(e)))
 
     def _parse_stream(self, response):
+        """Yield the text of a server-sent event stream.
+
+        Two things the loop must not do quietly, because both surface
+        upstream as a reply that simply stops in the middle of a
+        sentence -- or of a JSON object, which is how the novel
+        translator sees it:
+
+          * spin on an exhausted stream. ``readline`` returns ``b''``
+            once the body is over, and a provider that closes without
+            the closing ``data: [DONE]`` (or an ``IncompleteRead``)
+            would leave us reading empty lines forever.
+          * swallow an error the provider sent inside the stream.
+            OpenRouter reports an upstream failure mid-stream as a
+            regular event carrying an ``error`` object; ignoring it
+            turns a failed request into a silently truncated answer that
+            the caller then has to notice on its own.
+        """
         while True:
             try:
-                line = response.readline().decode('utf-8').strip()
+                raw = response.readline()
             except IncompleteRead:
-                continue
+                # The body ended before its declared length: whatever
+                # was yielded so far is all there is.
+                break
             except Exception as e:
                 raise Exception(
                     _('Can not parse returned response. Raw data: {}')
                     .format(str(e)))
+            if not raw:
+                break  # End of the stream.
+            line = raw.decode('utf-8').strip()
             if not line:
                 continue
             if line.startswith('data:'):
-                chunk = line.split('data: ')[1]
+                # Slice rather than split on 'data: ': the separator can
+                # occur inside the payload too, and a provider that
+                # omits the space would raise IndexError.
+                chunk = line[len('data:'):].strip()
                 if chunk == '[DONE]':
                     break
                 try:
                     data = json.loads(chunk)
+                    error = data.get('error') \
+                        if isinstance(data, dict) else None
+                    if error:
+                        raise Exception(_('Error: {}').format(
+                            error.get('message')
+                            if isinstance(error, dict) else error))
                     # Handle different streaming response schemas
                     if 'choices' in data and len(data['choices']) > 0:
                         choice = data['choices'][0]

@@ -1037,6 +1037,15 @@ class TranslationSetting(QDialog):
         novel_context_tokens = QSpinBox()
         novel_context_tokens.setRange(0, 100000)
         novel_context_tokens.setSingleStep(256)
+        novel_context_tokens.setToolTip(_(
+            'How much room the running context (summaries + glossary) '
+            'may take. It is both the size the context block is trimmed '
+            'to and the amount held back from the chunk budget.\n\n'
+            'The glossary sent with a chapter now holds only the names '
+            'that chapter uses, so this no longer has to cover a '
+            'glossary that grows with the book. Raise it if the log '
+            'shows the oldest summaries being dropped sooner than you '
+            'would like.'))
         novel_layout.addRow(
             _('Reserved for context (tokens)'), novel_context_tokens)
         self.disable_wheel_event(novel_context_tokens)
@@ -1044,6 +1053,15 @@ class TranslationSetting(QDialog):
         novel_summary_tokens = QSpinBox()
         novel_summary_tokens.setRange(50, 5000)
         novel_summary_tokens.setSingleStep(50)
+        novel_summary_tokens.setToolTip(_(
+            'How long a chapter summary is expected to be. The value is '
+            'reserved in the chunk budget, and it also bounds what gets '
+            'stored: a summary longer than twice this size is truncated '
+            'before being saved.\n\n'
+            'A summary is re-read in the prompt of every chapter that '
+            'follows, so a model that answers with the whole chapter '
+            'instead of a few hundred words would otherwise fill the '
+            'context budget for the rest of the book.'))
         novel_layout.addRow(
             _('Summary target size (tokens)'), novel_summary_tokens)
         self.disable_wheel_event(novel_summary_tokens)
@@ -1054,6 +1072,49 @@ class TranslationSetting(QDialog):
         novel_layout.addRow(
             _('Glossary max entries'), novel_glossary_max)
         self.disable_wheel_event(novel_glossary_max)
+
+        novel_glossary_relevant = QCheckBox(_('Only what the chapter uses'))
+        novel_glossary_relevant.setToolTip(_(
+            'Send the model only the glossary entries whose name appears '
+            'in the chapter being translated, instead of the whole '
+            'glossary.\n\n'
+            'On by default. A glossary keeps growing while a chapter '
+            'keeps needing the same handful of names: the entries a '
+            'chapter never mentions cannot be mistranslated in it, and '
+            'listing them costs input tokens on every request. In the '
+            'entity extraction call they cost more than that, since a '
+            'model handed hundreds of names to skip has been observed '
+            'copying the whole list back as new entries.'))
+        novel_layout.addRow(
+            _('Glossary sent to the model'), novel_glossary_relevant)
+
+        novel_glossary_prompt_max = QSpinBox()
+        novel_glossary_prompt_max.setRange(0, 5000)
+        novel_glossary_prompt_max.setSingleStep(10)
+        novel_glossary_prompt_max.setToolTip(_(
+            'Never put more than this many glossary entries in a single '
+            'prompt, keeping the most recently learned ones. Applied '
+            'after the filter above. Set to 0 for no limit.'))
+        novel_layout.addRow(
+            _('Glossary entries per prompt'), novel_glossary_prompt_max)
+        self.disable_wheel_event(novel_glossary_prompt_max)
+
+        novel_context_max_tokens = QSpinBox()
+        novel_context_max_tokens.setRange(0, 200000)
+        novel_context_max_tokens.setSingleStep(500)
+        novel_context_max_tokens.setToolTip(_(
+            'Hard limit on the length of the summary and glossary '
+            'replies. Both are short by nature, but nothing in the '
+            'request says so, and a model that starts repeating itself '
+            'stops only at its own output limit: one glossary call was '
+            'measured writing 131072 tokens over eight minutes, '
+            're-listing names it had been told to skip.\n\n'
+            'Only engines with a max tokens setting are affected, and a '
+            'tighter limit you set yourself is left alone. Set to 0 to '
+            'send no limit at all.'))
+        novel_layout.addRow(
+            _('Summary/glossary reply cap (tokens)'), novel_context_max_tokens)
+        self.disable_wheel_event(novel_context_max_tokens)
 
         novel_min_chars = QSpinBox()
         novel_min_chars.setRange(0, 100000)
@@ -1080,6 +1141,32 @@ class TranslationSetting(QDialog):
             'says.'))
         novel_layout.addRow(
             _('Reasoning on summary/glossary'), novel_context_reasoning)
+
+        novel_combined_context = QCheckBox(_('One request'))
+        novel_combined_context.setToolTip(_(
+            'Ask for the chapter summary and the new glossary entries in '
+            'a single request instead of two.\n\n'
+            'On by default. Both tasks read the chapter that was just '
+            'translated, so two calls send it twice: measured on a real '
+            'book the summary call carried 7000 to 8000 tokens of '
+            'chapter text that the glossary call was about to send '
+            'again.\n\n'
+            'A summary or glossary prompt of your own turns this off by '
+            'itself, so that prompt is not silently ignored.'))
+        novel_layout.addRow(
+            _('Summary and glossary'), novel_combined_context)
+
+        novel_skip_last = QCheckBox(_('Skip'))
+        novel_skip_last.setToolTip(_(
+            'Do not ask for the summary and glossary of the last '
+            'chapter. The context of a chapter is built for the '
+            'chapters that follow it, and after the last one there are '
+            'none: that call sends a full copy of the chapter for an '
+            'answer nothing ever reads.\n\n'
+            'Turn it off if you keep the glossary as a document in its '
+            'own right.'))
+        novel_layout.addRow(
+            _('Context of the last chapter'), novel_skip_last)
 
         novel_translation_prompt = QPlainTextEdit()
         novel_translation_prompt.setFixedHeight(90)
@@ -1132,7 +1219,7 @@ class TranslationSetting(QDialog):
             novel_front_matter_min.setValue(int(self.config.get(
                 'novel_front_matter_min_chars', 100) or 0))
             novel_chunk_tokens.setValue(int(self.config.get(
-                'novel_chunk_tokens', 50000) or 50000))
+                'novel_chunk_tokens', 16000) or 16000))
             novel_max_paragraphs.setValue(int(self.config.get(
                 'novel_max_paragraphs_per_chunk', 100) or 0))
             novel_overlap.setValue(int(self.config.get(
@@ -1143,15 +1230,25 @@ class TranslationSetting(QDialog):
             if idx >= 0:
                 novel_structured.setCurrentIndex(idx)
             novel_context_tokens.setValue(int(self.config.get(
-                'novel_context_tokens', 8000) or 8000))
+                'novel_context_tokens', 4000) or 4000))
             novel_summary_tokens.setValue(int(self.config.get(
                 'novel_summary_tokens', 600) or 600))
             novel_glossary_max.setValue(int(self.config.get(
                 'novel_glossary_max_entries', 500) or 500))
+            novel_glossary_relevant.setChecked(bool(self.config.get(
+                'novel_glossary_relevant_only', True)))
+            novel_glossary_prompt_max.setValue(int(self.config.get(
+                'novel_glossary_prompt_max_entries', 150) or 0))
+            novel_context_max_tokens.setValue(int(self.config.get(
+                'novel_context_max_tokens', 4000) or 0))
             novel_min_chars.setValue(int(self.config.get(
                 'novel_min_chars_for_context', 300) or 0))
             novel_context_reasoning.setChecked(bool(self.config.get(
                 'novel_context_reasoning', False)))
+            novel_combined_context.setChecked(bool(self.config.get(
+                'novel_combined_context_call', True)))
+            novel_skip_last.setChecked(bool(self.config.get(
+                'novel_skip_context_last_chapter', True)))
             novel_translation_prompt.setPlaceholderText(
                 DEFAULT_NOVEL_TRANSLATION_PROMPT)
             novel_translation_prompt.setPlainText(
@@ -1194,11 +1291,24 @@ class TranslationSetting(QDialog):
             _persist_novel('novel_summary_tokens', int))
         novel_glossary_max.valueChanged.connect(
             _persist_novel('novel_glossary_max_entries', int))
+        novel_glossary_relevant.toggled.connect(
+            lambda checked: self.config.update(
+                novel_glossary_relevant_only=bool(checked)))
+        novel_glossary_prompt_max.valueChanged.connect(
+            _persist_novel('novel_glossary_prompt_max_entries', int))
+        novel_context_max_tokens.valueChanged.connect(
+            _persist_novel('novel_context_max_tokens', int))
         novel_min_chars.valueChanged.connect(
             _persist_novel('novel_min_chars_for_context', int))
         novel_context_reasoning.toggled.connect(
             lambda checked: self.config.update(
                 novel_context_reasoning=bool(checked)))
+        novel_combined_context.toggled.connect(
+            lambda checked: self.config.update(
+                novel_combined_context_call=bool(checked)))
+        novel_skip_last.toggled.connect(
+            lambda checked: self.config.update(
+                novel_skip_context_last_chapter=bool(checked)))
 
         def _persist_prompt(widget, key):
             def _handler():

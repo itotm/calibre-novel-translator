@@ -434,7 +434,7 @@ def get_novel_config():
     """
     config = get_config()
     return {
-        'novel_chunk_tokens': config.get('novel_chunk_tokens', 50000),
+        'novel_chunk_tokens': config.get('novel_chunk_tokens', 16000),
         'novel_max_paragraphs_per_chunk': config.get(
             'novel_max_paragraphs_per_chunk', 100),
         'novel_overlap_paragraphs': config.get(
@@ -443,16 +443,29 @@ def get_novel_config():
             'novel_structured_output', 'auto'),
         'novel_front_matter_min_chars': config.get(
             'novel_front_matter_min_chars', 100),
-        'novel_context_tokens': config.get('novel_context_tokens', 8000),
+        'novel_context_tokens': config.get('novel_context_tokens', 4000),
         'novel_summary_tokens': config.get('novel_summary_tokens', 600),
         'novel_glossary_max_entries': config.get(
             'novel_glossary_max_entries', 500),
+        'novel_glossary_relevant_only': config.get(
+            'novel_glossary_relevant_only', True),
+        'novel_glossary_prompt_max_entries': config.get(
+            'novel_glossary_prompt_max_entries', 150),
+        'novel_context_max_tokens': config.get(
+            'novel_context_max_tokens', 4000),
         'novel_context_reasoning': config.get(
             'novel_context_reasoning', False),
         'novel_min_chars_for_context': config.get(
             'novel_min_chars_for_context', 300),
         'novel_summary_input_max_chars': config.get(
             'novel_summary_input_max_chars', 60000),
+        'novel_summary_max_chars': config.get(
+            'novel_summary_max_chars', 0),
+        'novel_combined_context_call': config.get(
+            'novel_combined_context_call', True),
+        'novel_context_prompt': config.get('novel_context_prompt', None),
+        'novel_skip_context_last_chapter': config.get(
+            'novel_skip_context_last_chapter', True),
         'novel_translation_prompt': config.get(
             'novel_translation_prompt', None),
         'novel_summary_prompt': config.get(
