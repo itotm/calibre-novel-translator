@@ -1538,6 +1538,7 @@ class NovelTranslator:
         original_get_body = translator.get_body
         original_timeout = getattr(translator, 'request_timeout', None)
         original_keepalive = getattr(translator, 'request_keepalive', False)
+        original_stream = getattr(translator, 'stream', False)
         # Raise timeout defensively; with streaming this only covers the
         # time until the first token arrives, not the total generation.
         min_structured_timeout = 300.0
@@ -1551,6 +1552,11 @@ class NovelTranslator:
         # after ~30s of idle, causing the Ollama-side "cancel task" we
         # observed in the logs.
         translator.request_keepalive = True
+        # The structured body always asks for `stream: true`, so the engine
+        # must read the response as a stream too. Without this an engine
+        # configured with streaming disabled would try to json.loads() a
+        # raw SSE payload.
+        translator.stream = True
 
         def structured_get_body(text):
             return translator.get_body_for_structured(text, schema)
@@ -1564,6 +1570,7 @@ class NovelTranslator:
             if original_timeout is not None:
                 translator.request_timeout = original_timeout
             translator.request_keepalive = original_keepalive
+            translator.stream = original_stream
 
         # If the engine returned a streaming generator (because stream:true
         # is set in the body), collect all chunks now so the JSON parser

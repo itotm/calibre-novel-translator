@@ -16,13 +16,14 @@ from ...lib.exception import UnexpectedResult, UnsupportedModel
 from ...engines.genai import GenAI
 from ...engines.deepl import DeeplTranslate
 from ...engines.openai import ChatgptTranslate, ChatgptBatchTranslate
+from ...engines.openrouter import OpenRouterTranslate
 from ...engines.microsoft import AzureChatgptTranslate
 from ...engines.anthropic import ClaudeTranslate
 from ...engines.custom import (
     create_engine_template, load_engine_data, CustomTranslate)
 
 
-module_name = 'calibre_plugins.ebook_translator.engines'
+module_name = 'calibre_plugins.ebook_translator_novel.engines'
 
 
 class MockEngine(Base):
@@ -201,7 +202,8 @@ class TestBase(unittest.TestCase):
             url='https://example.com/api', data='{"text": "Hello World"}',
             headers={
                 'Authorization': 'Bearer a', 'Content-Type': 'application/json'
-            }, method='POST', timeout=10.0, proxy_uri=None, raw_object=False)
+            }, method='POST', timeout=10.0, proxy_uri=None,
+            raw_object=False, keepalive=False)
 
     @patch(module_name + '.base.request')
     def test_translate_with_stream(self, mock_request):
@@ -215,7 +217,8 @@ class TestBase(unittest.TestCase):
             url='https://example.com/api', data='{"text": "Hello World"}',
             headers={
                 'Authorization': 'Bearer a', 'Content-Type': 'application/json'
-            }, method='POST', timeout=10.0, proxy_uri=None, raw_object=True)
+            }, method='POST', timeout=10.0, proxy_uri=None,
+            raw_object=True, keepalive=False)
 
     @patch(module_name + '.base.request')
     def test_translate_with_http_error(self, mock_request):
@@ -518,7 +521,7 @@ class TestChatgptTranslate(unittest.TestCase):
 
         mock_request.assert_called_with(
             url=url, data=data, headers=headers, method='POST', timeout=60.0,
-            proxy_uri=None, raw_object=True)
+            proxy_uri=None, raw_object=True, keepalive=False)
         self.assertIsInstance(result, GeneratorType)
         self.assertEqual('你好世界！', ''.join(result))
 
@@ -530,6 +533,148 @@ class TestChatgptTranslate(unittest.TestCase):
         result = self.translator.translate('Hello World!')
 
         self.assertEqual('你好世界！', result)
+
+
+class TestOpenRouterTranslate(unittest.TestCase):
+    def setUp(self):
+        OpenRouterTranslate.set_config({'api_keys': ['sk-or-v1-a']})
+        OpenRouterTranslate.lang_codes = {
+            'source': {'English': 'EN'}, 'target': {'Italian': 'IT'}}
+
+        self.translator = OpenRouterTranslate()
+        self.translator.set_source_lang('English')
+        self.translator.set_target_lang('Italian')
+
+    def reconfigure(self, **preferences):
+        """Rebuild the engine with the given engine preferences."""
+        preferences.setdefault('api_keys', ['sk-or-v1-a'])
+        OpenRouterTranslate.set_config(preferences)
+        translator = OpenRouterTranslate()
+        translator.set_source_lang('English')
+        translator.set_target_lang('Italian')
+        return translator
+
+    def test_created_engine(self):
+        self.assertIsInstance(self.translator, GenAI)
+        self.assertIsInstance(self.translator, ChatgptTranslate)
+        self.assertTrue(OpenRouterTranslate.supports_novel_mode)
+
+    @patch(module_name + '.openrouter.request')
+    def test_get_models(self, mock_request):
+        mock_request.return_value = json.dumps({'data': [
+            {'id': 'openai/gpt-5.1'},
+            {'id': 'deepseek/deepseek-v4-flash'}]})
+
+        self.assertEqual(
+            ['deepseek/deepseek-v4-flash', 'openai/gpt-5.1'],
+            self.translator.get_models())
+        mock_request.assert_called_once_with(
+            'https://openrouter.ai/api/v1/models',
+            headers=self.translator.get_headers(),
+            proxy_uri=self.translator.proxy_uri)
+
+    def test_get_headers(self):
+        translator = self.reconfigure(
+            app_referer='https://example.com', app_title='My Books',
+            extra_headers='{"X-Session-Id": "calibre-translation"}')
+        headers = translator.get_headers()
+
+        self.assertEqual('https://example.com', headers['HTTP-Referer'])
+        self.assertEqual('My Books', headers['X-Title'])
+        self.assertEqual('calibre-translation', headers['X-Session-Id'])
+        self.assertEqual('Bearer sk-or-v1-a', headers['Authorization'])
+
+    def test_get_body_default(self):
+        body = json.loads(self.translator.get_body('test content'))
+
+        self.assertEqual('deepseek/deepseek-v4-flash', body['model'])
+        self.assertEqual(
+            {'effort': 'minimal', 'exclude': True}, body['reasoning'])
+        self.assertNotIn('reasoning_effort', body)
+        self.assertNotIn('provider', body)
+        # Neutral values are omitted so the provider keeps its own default.
+        for key in ('top_k', 'min_p', 'top_a', 'seed', 'max_tokens',
+                    'frequency_penalty', 'presence_penalty',
+                    'repetition_penalty'):
+            self.assertNotIn(key, body)
+
+    def test_get_body_with_preferences(self):
+        translator = self.reconfigure(
+            model='deepseek/deepseek-v4-flash-0731', temperature=0.1,
+            top_k=40, min_p=0.05, top_a=0.1, seed=42, max_tokens=8192,
+            frequency_penalty=0.2, presence_penalty=0.1,
+            repetition_penalty=1.05, reasoning_effort='low',
+            reasoning_exclude=False, provider_only='baidu/fp8, deepinfra',
+            provider_ignore='novita', provider_quantizations='fp8',
+            provider_sort='throughput', provider_allow_fallbacks=False,
+            provider_require_parameters=True,
+            provider_data_collection='deny', provider_zdr=True,
+            extra_body='{"cache_control": {"type": "ephemeral"}}')
+        body = json.loads(translator.get_body('test content'))
+
+        self.assertEqual('deepseek/deepseek-v4-flash-0731', body['model'])
+        self.assertEqual(0.1, body['temperature'])
+        self.assertEqual(40, body['top_k'])
+        self.assertEqual(0.05, body['min_p'])
+        self.assertEqual(0.1, body['top_a'])
+        self.assertEqual(42, body['seed'])
+        self.assertEqual(8192, body['max_tokens'])
+        self.assertEqual(0.2, body['frequency_penalty'])
+        self.assertEqual(0.1, body['presence_penalty'])
+        self.assertEqual(1.05, body['repetition_penalty'])
+        self.assertEqual({'effort': 'low'}, body['reasoning'])
+        self.assertEqual({
+            'only': ['baidu/fp8', 'deepinfra'],
+            'ignore': ['novita'],
+            'quantizations': ['fp8'],
+            'sort': 'throughput',
+            'allow_fallbacks': False,
+            'require_parameters': True,
+            'data_collection': 'deny',
+            'zdr': True}, body['provider'])
+        self.assertEqual({'type': 'ephemeral'}, body['cache_control'])
+
+    def test_get_body_reasoning_disabled(self):
+        body = json.loads(
+            self.reconfigure(reasoning_effort='default').get_body('t'))
+        self.assertNotIn('reasoning', body)
+
+    def test_get_body_reasoning_budget_supersedes_effort(self):
+        body = json.loads(self.reconfigure(
+            reasoning_effort='high', reasoning_max_tokens=2048).get_body('t'))
+        self.assertEqual(
+            {'max_tokens': 2048, 'exclude': True}, body['reasoning'])
+
+    def test_get_body_for_structured_keeps_reasoning(self):
+        schema = {'type': 'object', 'properties': {'x': {'type': 'string'}}}
+        translator = self.reconfigure(provider_only='baidu/fp8')
+        body = json.loads(
+            translator.get_body_for_structured('test content', schema))
+
+        self.assertEqual('json_schema', body['response_format']['type'])
+        self.assertEqual(
+            schema, body['response_format']['json_schema']['schema'])
+        self.assertTrue(body['stream'])
+        self.assertEqual(
+            {'effort': 'minimal', 'exclude': True}, body['reasoning'])
+        self.assertEqual(['baidu/fp8'], body['provider']['only'])
+
+    def test_malformed_extra_data_is_ignored(self):
+        translator = self.reconfigure(
+            extra_body='not json', extra_headers='[1, 2]')
+
+        self.assertNotIn('X-Session-Id', translator.get_headers())
+        self.assertEqual(
+            sorted(['model', 'messages', 'stream', 'temperature',
+                    'reasoning']),
+            sorted(json.loads(translator.get_body('t')).keys()))
+
+    def test_get_result_with_error_body(self):
+        self.translator.stream = False
+        with self.assertRaises(Exception) as cm:
+            self.translator.get_result(json.dumps(
+                {'error': {'code': 402, 'message': 'Insufficient credits'}}))
+        self.assertIn('Insufficient credits', str(cm.exception))
 
 
 class TestChatgptBatchTranslate(unittest.TestCase):
@@ -866,7 +1011,7 @@ class TestAzureChatgptTranslate(unittest.TestCase):
 
         mock_request.assert_called_with(
             url=url, data=data, headers=headers, method='POST', timeout=60.0,
-            proxy_uri=None, raw_object=True)
+            proxy_uri=None, raw_object=True, keepalive=False)
         self.assertIsInstance(result, GeneratorType)
         self.assertEqual('你好世界！', ''.join(result))
 
@@ -945,7 +1090,7 @@ class TestClaudeTranslate(unittest.TestCase):
 
         mock_request.assert_called_with(
             url=url, data=data, headers=headers, method='POST', timeout=30.0,
-            proxy_uri=None, raw_object=False)
+            proxy_uri=None, raw_object=False, keepalive=False)
         self.assertEqual('你好世界！', result)
 
     @patch(module_name + '.anthropic.EbookTranslator')
@@ -1021,7 +1166,7 @@ data: {"type":"message_stop"}
 
         mock_request.assert_called_with(
             url=url, data=data, headers=headers, method='POST', timeout=30.0,
-            proxy_uri=None, raw_object=True)
+            proxy_uri=None, raw_object=True, keepalive=False)
         self.assertIsInstance(result, GeneratorType)
         self.assertEqual('你好世界！', ''.join(result))
 
@@ -1157,7 +1302,8 @@ class TestCustom(unittest.TestCase):
             url='https://example.api', data=b'{"source": "en", "target": "zh",'
             b' "text": "Hello \\"World\\""}',
             headers={'Content-Type': 'application/json'}, method='POST',
-            timeout=10.0, proxy_uri=None, raw_object=False)
+            timeout=10.0, proxy_uri=None, raw_object=False,
+            keepalive=False)
         # XML response
         translator.response = 'response.text'
         mock_request.return_value = '<test>你好世界</test>'

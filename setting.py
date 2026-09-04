@@ -1,5 +1,6 @@
 import re
 import os
+import json
 import os.path
 
 from qt.core import (  # type: ignore
@@ -17,7 +18,8 @@ from .lib.utils import (
     log, css, is_proxy_available, traceback_error, socks_proxy)
 from .lib.translation import get_engine_class, get_translator
 from .engines import (
-    builtin_engines, GeminiTranslate, ChatgptTranslate, AzureChatgptTranslate)
+    builtin_engines, GeminiTranslate, ChatgptTranslate, AzureChatgptTranslate,
+    OpenRouterTranslate)
 from .engines.genai import GenAI
 from .engines.custom import CustomTranslate
 from .components import (
@@ -560,6 +562,28 @@ class TranslationSetting(QDialog):
         stream_enabled = QCheckBox(_('Enable streaming response'))
         genai_layout.addRow(_('Stream'), stream_enabled)
 
+        reasoning_label = QLabel(_('Reasoning'))
+        reasoning_effort_list = QComboBox()
+        for effort in ChatgptTranslate.reasoning_efforts:
+            reasoning_effort_list.addItem(
+                _('Default') if effort == 'default' else effort, effort)
+        reasoning_effort_list.setToolTip(_(
+            'Chain-of-thought budget, sent as "reasoning_effort".\n\n'
+            '- Default: omit the field, which is what plain OpenAI models '
+            'and older gateways expect.\n'
+            '- none: suppress the reasoning tokens some servers emit '
+            'before every answer (Ollama 0.31+ with Gemma 4 spends '
+            'thousands of silent tokens that make requests look stalled).\n'
+            '- minimal/low/medium/high: spend reasoning tokens on purpose. '
+            'Models without reasoning support ignore the field.'))
+        genai_layout.addRow(reasoning_label, reasoning_effort_list)
+
+        self.disable_wheel_event(reasoning_effort_list)
+
+        reasoning_effort_list.currentIndexChanged.connect(
+            lambda: self.current_engine.config.update(
+                reasoning_effort=reasoning_effort_list.currentData()))
+
         sampling_btn_group = QButtonGroup(sampling_widget)
         sampling_btn_group.addButton(temperature, 0)
         sampling_btn_group.addButton(top_p, 1)
@@ -573,6 +597,293 @@ class TranslationSetting(QDialog):
             .update(sampling=labels[button]))
 
         layout.addWidget(genai_group)
+
+        # OpenRouter Setting (visible only for the OpenRouter engine).
+        openrouter_group = QGroupBox(_('OpenRouter'))
+        openrouter_group.setVisible(False)
+        openrouter_layout = QFormLayout(openrouter_group)
+        self.apply_form_layout_policy(openrouter_layout)
+
+        # Widgets register themselves here by preference key. Values are
+        # loaded in a single pass by show_openrouter_preferences() with
+        # `openrouter_loading` set so the change signals do not write
+        # back; that lets every signal be connected exactly once instead
+        # of being re-connected each time the engine changes.
+        openrouter_widgets = {}
+        openrouter_loading = []
+
+        def openrouter_save(key, value):
+            if openrouter_loading:
+                return
+            if issubclass(self.current_engine, OpenRouterTranslate):
+                self.current_engine.config.update({key: value})
+
+        def openrouter_spin(key, title, minimum, maximum, decimals=0,
+                            step=1, tooltip=None):
+            widget = QDoubleSpinBox() if decimals else QSpinBox()
+            if decimals:
+                widget.setDecimals(decimals)
+                widget.setRange(float(minimum), float(maximum))
+                widget.setSingleStep(float(step))
+                widget.valueChanged.connect(
+                    lambda value: openrouter_save(key, round(value, decimals)))
+            else:
+                widget.setRange(int(minimum), int(maximum))
+                widget.setSingleStep(int(step))
+                widget.valueChanged.connect(
+                    lambda value: openrouter_save(key, int(value)))
+            widget.setPrefix('%s: ' % title)
+            if tooltip is not None:
+                widget.setToolTip(tooltip)
+            self.disable_wheel_event(widget)
+            openrouter_widgets[key] = widget
+            return widget
+
+        def openrouter_combo(key, values, tooltip=None):
+            widget = QComboBox()
+            for value in values:
+                widget.addItem(
+                    _('Default') if value == 'default' else value, value)
+            if tooltip is not None:
+                widget.setToolTip(tooltip)
+            widget.currentIndexChanged.connect(
+                lambda: openrouter_save(key, widget.currentData()))
+            self.disable_wheel_event(widget)
+            openrouter_widgets[key] = widget
+            return widget
+
+        def openrouter_check(key, title, tooltip=None):
+            widget = QCheckBox(title)
+            if tooltip is not None:
+                widget.setToolTip(tooltip)
+            widget.toggled.connect(
+                lambda checked: openrouter_save(key, checked))
+            openrouter_widgets[key] = widget
+            return widget
+
+        def openrouter_edit(key, placeholder=None, tooltip=None):
+            widget = QLineEdit()
+            if placeholder is not None:
+                widget.setPlaceholderText(placeholder)
+            if tooltip is not None:
+                widget.setToolTip(tooltip)
+            widget.textChanged.connect(
+                lambda text: openrouter_save(key, text.strip()))
+            openrouter_widgets[key] = widget
+            return widget
+
+        def openrouter_json(key, placeholder=None, tooltip=None):
+            widget = QPlainTextEdit()
+            widget.setFixedHeight(60)
+            if placeholder is not None:
+                widget.setPlaceholderText(placeholder)
+            if tooltip is not None:
+                widget.setToolTip(tooltip)
+
+            def on_text_changed():
+                text = widget.toPlainText().strip()
+                valid = True
+                if text:
+                    try:
+                        valid = isinstance(json.loads(text), dict)
+                    except ValueError:
+                        valid = False
+                # Invalid snippets are ignored by the engine, so flag them
+                # here instead of silently dropping them at request time.
+                widget.setStyleSheet(
+                    '' if valid else 'border: 1px solid red;')
+                openrouter_save(key, text)
+            widget.textChanged.connect(on_text_changed)
+            openrouter_widgets[key] = widget
+            return widget
+
+        def openrouter_row(label, *widgets):
+            if len(widgets) == 1:
+                openrouter_layout.addRow(label, widgets[0])
+                return
+            container = QWidget()
+            container_layout = QHBoxLayout(container)
+            container_layout.setContentsMargins(0, 0, 0, 0)
+            for widget in widgets:
+                container_layout.addWidget(widget)
+            container_layout.addStretch(1)
+            openrouter_layout.addRow(label, container)
+
+        openrouter_row(
+            _('Reasoning'),
+            openrouter_combo(
+                'reasoning_effort', OpenRouterTranslate.reasoning_efforts,
+                _('How much thinking the model may do before answering, '
+                  'sent as "reasoning.effort". "Default" omits it and lets '
+                  'the model decide; "none" turns reasoning off. A short '
+                  'chain of thought ("minimal") noticeably helps literary '
+                  'translation without paying for full deliberation. '
+                  'Models without reasoning support ignore the field.')),
+            openrouter_spin(
+                'reasoning_max_tokens', 'max_tokens', 0, 128000, step=256,
+                tooltip=_(
+                    'An explicit reasoning budget ("reasoning.max_tokens"), '
+                    'used by Anthropic and Qwen models. Above 0 it replaces '
+                    'the effort level; 0 means "use the effort level".')),
+            openrouter_check(
+                'reasoning_exclude', 'exclude',
+                _('Reason internally but leave the chain of thought out of '
+                  'the response. Recommended: the plugin only reads the '
+                  'translated text, so returning it just costs bandwidth.')))
+
+        openrouter_row(
+            _('Sampling'),
+            openrouter_spin(
+                'top_k', 'top_k', 0, 200,
+                tooltip=_('Keep only the K most likely tokens. '
+                          '0 disables it.')),
+            openrouter_spin(
+                'min_p', 'min_p', 0, 1, decimals=2, step=0.05,
+                tooltip=_('Drop tokens less likely than this fraction of '
+                          'the top token. 0 disables it.')),
+            openrouter_spin(
+                'top_a', 'top_a', 0, 1, decimals=2, step=0.05,
+                tooltip=_('Dynamic filtering relative to the top token '
+                          'probability. 0 disables it.')))
+
+        openrouter_row(
+            _('Penalties'),
+            openrouter_spin(
+                'frequency_penalty', 'frequency', -2, 2,
+                decimals=1, step=0.1,
+                tooltip=_('Penalize tokens by how often they already '
+                          'appeared. 0 disables it.')),
+            openrouter_spin(
+                'presence_penalty', 'presence', -2, 2,
+                decimals=1, step=0.1,
+                tooltip=_('Penalize tokens that appeared at all. '
+                          '0 disables it.')),
+            openrouter_spin(
+                'repetition_penalty', 'repetition', 0, 2,
+                decimals=2, step=0.05,
+                tooltip=_('Scale down tokens already present in the input. '
+                          '1 disables it.')))
+
+        openrouter_row(
+            _('Limits'),
+            openrouter_spin(
+                'max_tokens', 'max_tokens', 0, 1000000, step=256,
+                tooltip=_('Cap the length of the answer. 0 lets the model '
+                          'use its own limit -- keep it at 0 for Novel '
+                          'Mode, where a whole chunk is translated in one '
+                          'answer.')),
+            openrouter_spin(
+                'seed', 'seed', 0, 2147483647,
+                tooltip=_('Ask for deterministic sampling. 0 disables it. '
+                          'Only some providers honor it.')))
+
+        openrouter_row(
+            _('Provider: only'),
+            openrouter_edit(
+                'provider_only', 'baidu/fp8, deepinfra',
+                _('Comma separated list of provider slugs that may serve '
+                  'the request. Pin it when one provider gives you the '
+                  'quality, price or quantization you want. Leave empty to '
+                  'let OpenRouter choose.')))
+        openrouter_row(
+            _('Provider: order'),
+            openrouter_edit(
+                'provider_order', 'deepinfra, together',
+                _('Comma separated providers to try in this order before '
+                  'falling back to the rest.')))
+        openrouter_row(
+            _('Provider: ignore'),
+            openrouter_edit(
+                'provider_ignore', 'novita, targon',
+                _('Comma separated providers that must never serve the '
+                  'request.')))
+        openrouter_row(
+            _('Provider: quantizations'),
+            openrouter_edit(
+                'provider_quantizations', 'fp8, bf16',
+                _('Comma separated quantization levels to accept '
+                  '(int4, int8, fp8, fp16, bf16, fp32). Useful to avoid '
+                  'heavily quantized endpoints that degrade long-form '
+                  'translation.')))
+
+        openrouter_row(
+            _('Provider: routing'),
+            openrouter_combo(
+                'provider_sort', OpenRouterTranslate.provider_sorts,
+                _('Pick the endpoint by price, throughput or latency '
+                  'instead of the default balanced order.')),
+            openrouter_combo(
+                'provider_data_collection',
+                OpenRouterTranslate.provider_data_collections,
+                _('"deny" only routes to providers that do not store your '
+                  'prompts.')))
+
+        openrouter_row(
+            _('Provider: policy'),
+            openrouter_check(
+                'provider_allow_fallbacks', 'allow_fallbacks',
+                _('Let OpenRouter fall back to another provider when the '
+                  'selected one fails. Turn it off to fail loudly instead '
+                  'of silently changing model quality mid-book.')),
+            openrouter_check(
+                'provider_require_parameters', 'require_parameters',
+                _('Only route to providers that support every parameter '
+                  'in the request. Turn it on when reasoning or '
+                  'structured output must not be silently dropped.')),
+            openrouter_check(
+                'provider_zdr', 'zdr',
+                _('Only route to Zero Data Retention endpoints.')))
+
+        openrouter_row(
+            _('Attribution'),
+            openrouter_edit(
+                'app_referer', 'https://example.com',
+                _('Sent as the HTTP-Referer header, used by the OpenRouter '
+                  'rankings. Optional.')),
+            openrouter_edit(
+                'app_title', 'Ebook Translator (Novel)',
+                _('Sent as the X-Title header, used by the OpenRouter '
+                  'rankings. Optional.')))
+
+        openrouter_row(
+            _('Extra headers'),
+            openrouter_json(
+                'extra_headers', '{"X-Session-Id": "calibre-translation"}',
+                _('A JSON object merged into the request headers, for '
+                  'anything not covered above.')))
+        openrouter_row(
+            _('Extra body'),
+            openrouter_json(
+                'extra_body',
+                '{"plugins": [{"id": "web"}], "usage": {"include": true}}',
+                _('A JSON object merged into the request body, applied '
+                  'last so it can override any field computed above. Use '
+                  'it for parameters the plugin does not expose '
+                  '(logit_bias, stop, transforms, plugins, ...).')))
+
+        layout.addWidget(openrouter_group)
+
+        def show_openrouter_preferences(config):
+            openrouter_loading.append(True)
+            try:
+                for key, widget in openrouter_widgets.items():
+                    value = config.get(
+                        key, getattr(OpenRouterTranslate, key))
+                    if isinstance(widget, QComboBox):
+                        widget.setCurrentIndex(max(widget.findData(value), 0))
+                    elif isinstance(widget, QCheckBox):
+                        widget.setChecked(bool(value))
+                    elif isinstance(widget, QDoubleSpinBox):
+                        widget.setValue(float(value or 0))
+                    elif isinstance(widget, QSpinBox):
+                        widget.setValue(int(value or 0))
+                    elif isinstance(widget, QPlainTextEdit):
+                        widget.setPlainText(str(value or ''))
+                    else:
+                        widget.setText(str(value or ''))
+                        widget.setCursorPosition(0)
+            finally:
+                openrouter_loading.clear()
 
         # Novel Mode settings (visible only for GenAI engines).
         novel_group = QGroupBox(_('Novel Mode'))
@@ -962,6 +1273,19 @@ class TranslationSetting(QDialog):
                 config.get('stream', self.current_engine.stream))
             stream_enabled.toggled.connect(
                 lambda checked: config.update(stream=checked))
+            # Reasoning: OpenRouter speaks a richer dialect and gets its
+            # own control in the section below, so hide the simple one.
+            show_reasoning = is_chatgpt and not issubclass(
+                self.current_engine, OpenRouterTranslate)
+            reasoning_label.setVisible(show_reasoning)
+            reasoning_effort_list.setVisible(show_reasoning)
+            if show_reasoning:
+                effort = config.get(
+                    'reasoning_effort', self.current_engine.reasoning_effort)
+                reasoning_effort_list.blockSignals(True)
+                reasoning_effort_list.setCurrentIndex(
+                    max(reasoning_effort_list.findData(effort), 0))
+                reasoning_effort_list.blockSignals(False)
             genai_group.setVisible(True)
 
         def choose_default_engine(index):
@@ -1020,10 +1344,14 @@ class TranslationSetting(QDialog):
             # Show GenAI preferences
             genai_group.setVisible(False)
             novel_group.setVisible(False)
+            openrouter_group.setVisible(False)
             if issubclass(self.current_engine, GenAI):
                 genai_group.setVisible(True)
                 novel_group.setVisible(True)
                 show_genai_preferences(config)
+            if issubclass(self.current_engine, OpenRouterTranslate):
+                openrouter_group.setVisible(True)
+                show_openrouter_preferences(config)
         choose_default_engine(engine_list.findData(self.current_engine.name))
         engine_list.currentIndexChanged.connect(choose_default_engine)
 

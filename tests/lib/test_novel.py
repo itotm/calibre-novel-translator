@@ -13,7 +13,7 @@ from ...lib.novel import (
     INFO_NOVEL_MODE)
 
 
-module_name = 'calibre_plugins.ebook_translator.lib.novel'
+module_name = 'calibre_plugins.ebook_translator_novel.lib.novel'
 
 
 def make_paragraph(pid, text, page='p1', ignored=False):
@@ -1614,7 +1614,7 @@ class TestStructuredEnginePayloads(unittest.TestCase):
     """Verify each engine builds the correct provider-specific body.
 
     These tests exercise the real engine classes and therefore need the
-    ``calibre_plugins.ebook_translator`` package to be importable. They
+    ``calibre_plugins.ebook_translator_novel`` package to be importable. They
     are skipped in isolated dev environments (where only ``lib/novel.py``
     is loaded standalone) but run normally under ``calibre-debug``.
     """
@@ -1622,8 +1622,8 @@ class TestStructuredEnginePayloads(unittest.TestCase):
     @classmethod
     def _can_import_engines(cls):
         try:
-            import calibre_plugins.ebook_translator.engines.openai  # noqa
-            import calibre_plugins.ebook_translator.engines.google  # noqa
+            import calibre_plugins.ebook_translator_novel.engines.openai  # noqa
+            import calibre_plugins.ebook_translator_novel.engines.google  # noqa
             return True
         except ImportError:
             return False
@@ -1635,12 +1635,12 @@ class TestStructuredEnginePayloads(unittest.TestCase):
 
     def test_openai_response_format_json_schema(self):
         # Import lazily to avoid loading engine chain at module scope.
-        from calibre_plugins.ebook_translator.engines.openai import (
+        from calibre_plugins.ebook_translator_novel.engines.openai import (
             ChatgptTranslate)
         engine = ChatgptTranslate.__new__(ChatgptTranslate)
         engine.model = 'gpt-x'
         engine.prompt = 'You translate.'
-        engine.stream = True  # must still be disabled in structured mode
+        engine.stream = True
         engine.samplings = ['temperature']
         engine.sampling = 'temperature'
         engine.temperature = 0.5
@@ -1662,11 +1662,14 @@ class TestStructuredEnginePayloads(unittest.TestCase):
             schema, body['response_format']['json_schema']['schema'])
         self.assertTrue(
             body['response_format']['json_schema'].get('strict'))
-        # Streaming is disabled for structured requests.
-        self.assertNotIn('stream', body)
+        # Streaming stays on so the SSE stream keeps the connection alive
+        # during the long prefill phase; the caller reassembles the chunks.
+        self.assertTrue(body['stream'])
+        # Reasoning is left to the engine preference, not forced off.
+        self.assertNotIn('reasoning_effort', body)
 
     def test_openai_response_format_json_object_when_no_schema(self):
-        from calibre_plugins.ebook_translator.engines.openai import (
+        from calibre_plugins.ebook_translator_novel.engines.openai import (
             ChatgptTranslate)
         engine = ChatgptTranslate.__new__(ChatgptTranslate)
         engine.model = 'gpt-x'
@@ -1685,8 +1688,30 @@ class TestStructuredEnginePayloads(unittest.TestCase):
         body = _json.loads(body_str)
         self.assertEqual('json_object', body['response_format']['type'])
 
+    def test_openai_structured_honors_reasoning_effort(self):
+        from calibre_plugins.ebook_translator_novel.engines.openai import (
+            ChatgptTranslate)
+        engine = ChatgptTranslate.__new__(ChatgptTranslate)
+        engine.model = 'gpt-x'
+        engine.prompt = 'You translate.'
+        engine.stream = False
+        engine.samplings = ['temperature']
+        engine.sampling = 'temperature'
+        engine.temperature = 0.5
+        engine.top_p = 1.0
+        engine.source_lang = 'English'
+        engine.target_lang = 'Italian'
+        engine.get_prompt = lambda: 'You translate.'
+        engine.reasoning_effort = 'low'
+
+        import json as _json
+        body = _json.loads(engine.get_body_for_structured('hi'))
+        self.assertEqual('low', body['reasoning_effort'])
+        body = _json.loads(engine.get_body('hi'))
+        self.assertEqual('low', body['reasoning_effort'])
+
     def test_gemini_response_mime_and_schema(self):
-        from calibre_plugins.ebook_translator.engines.google import (
+        from calibre_plugins.ebook_translator_novel.engines.google import (
             GeminiTranslate)
         engine = GeminiTranslate.__new__(GeminiTranslate)
         engine.model = 'gemini-x'

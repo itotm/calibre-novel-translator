@@ -51,6 +51,17 @@ class ChatgptTranslate(GenAI):
     top_p = 1.0
     stream = True
 
+    # Chain-of-thought control for OpenAI compatible endpoints.
+    # 'default' omits the field entirely, which is what plain OpenAI
+    # models and older gateways expect. 'none' suppresses the reasoning
+    # tokens that some servers emit by default (Ollama 0.31+ serving
+    # Gemma 4 spends thousands of silent tokens before the first word of
+    # the translation); the remaining levels spend reasoning tokens on
+    # purpose. Subclasses may pick another default, see OpenRouter.
+    reasoning_efforts = ['default', 'none', 'minimal', 'low', 'medium',
+                         'high']
+    reasoning_effort = 'default'
+
     models: list[str] = []
     # TODO: Handle the default model more appropriately.
     model: str | None = 'gpt-4o'
@@ -64,6 +75,8 @@ class ChatgptTranslate(GenAI):
         self.top_p = self.config.get('top_p', self.top_p)
         self.stream = self.config.get('stream', self.stream)
         self.model = self.config.get('model', self.model)
+        self.reasoning_effort = self.config.get(
+            'reasoning_effort', self.reasoning_effort)
 
     def get_models(self):
         domain_name = '://'.join(urlsplit(self.endpoint or '', 'https')[:2])
@@ -104,8 +117,19 @@ class ChatgptTranslate(GenAI):
             body.update(stream=True)
         sampling_value = getattr(self, self.sampling)
         body.update({self.sampling: sampling_value})
-        body['reasoning_effort'] = 'none'
+        self.apply_reasoning_effort(body)
         return json.dumps(body)
+
+    def apply_reasoning_effort(self, body):
+        """Add `reasoning_effort` unless it is left at 'default'.
+
+        Kept out of :meth:`get_body` so both the plain and the structured
+        payload share one rule, and so subclasses that speak a different
+        reasoning dialect (OpenRouter's `reasoning` object) can drop it.
+        """
+        if self.reasoning_effort and self.reasoning_effort != 'default':
+            body['reasoning_effort'] = self.reasoning_effort
+        return body
 
     def get_body_for_structured(self, text, schema=None):
         """Return the request body with structured (JSON) output enabled.
@@ -123,9 +147,9 @@ class ChatgptTranslate(GenAI):
         assembling the complete JSON string before parsing (see
         ``NovelTranslator._translate_with_retry_structured``).
 
-        ``reasoning_effort: none`` is set for the same reason as in
-        :meth:`get_body`: reasoning tokens make structured output
-        responses very slow and do not improve translation quality.
+        The `reasoning_effort` setting is honored here exactly as in
+        :meth:`get_body`, so a model can keep reasoning while still
+        being forced to answer with JSON.
         """
         body: dict[str, Any] = {
             'model': self.model,
@@ -134,10 +158,10 @@ class ChatgptTranslate(GenAI):
                 {'role': 'user', 'content': text}
             ],
             'stream': True,           # keep streaming to avoid client-timeout
-            'reasoning_effort': 'none',  # disable CoT reasoning tokens
         }
         sampling_value = getattr(self, self.sampling)
         body.update({self.sampling: sampling_value})
+        self.apply_reasoning_effort(body)
         if schema:
             body['response_format'] = {
                 'type': 'json_schema',
