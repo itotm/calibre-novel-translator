@@ -11,7 +11,13 @@ class GenAI(Base, ABC):
     model: str | None
     samplings: list
     sampling: str
-    temperature: float
+    # One default for every GenAI engine. 1.0 is the middle ground
+    # between the determinism a book-length job wants for names and
+    # terminology and the freedom literary prose wants to avoid reading
+    # like a calque. Per-engine guidance disagrees in both directions,
+    # so the value is left where each provider's own scale is neutral
+    # and easy to move from in the Fine-tuning section.
+    temperature: float = 1.0
     top_p: float
     top_k: int
 

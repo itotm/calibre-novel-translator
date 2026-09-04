@@ -588,7 +588,7 @@ class TestOpenRouterTranslate(unittest.TestCase):
         body = json.loads(self.translator.get_body('test content'))
 
         self.assertEqual('deepseek/deepseek-v4-flash', body['model'])
-        self.assertEqual(0.2, body['temperature'])
+        self.assertEqual(1.0, body['temperature'])
         self.assertEqual(
             {'effort': 'minimal', 'exclude': True}, body['reasoning'])
         self.assertNotIn('reasoning_effort', body)

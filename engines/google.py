@@ -342,7 +342,6 @@ class GeminiTranslate(GenAI):
         'Websites\' URLs/addresses should be preserved as is in the '
         'translation\'s output. Do not omit any part of the content, even if '
         'it seems unimportant. ')
-    temperature: float = 0.9
     top_p: float = 1.0
     top_k = 1
     stream = True

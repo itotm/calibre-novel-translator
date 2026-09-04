@@ -7,7 +7,6 @@ class DeepseekTranslate(ChatgptTranslate):
     name = 'DeepSeek'
     alias = 'DeepSeek (Chat)'
     endpoint = 'https://api.deepseek.com/v1/chat/completions'
-    temperature = 1.3
 
     concurrency_limit = 0
     request_interval = 0.0

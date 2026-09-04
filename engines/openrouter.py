@@ -79,13 +79,6 @@ class OpenRouterTranslate(ChatgptTranslate):
     models: list[str] = []
     model: str | None = 'deepseek/deepseek-v4-flash'
 
-    # A book-length job is worth more consistency than invention: a low
-    # temperature keeps names, terminology and register steady across
-    # chapters and makes structured output align more reliably. Note that
-    # DeepSeek's own guidance suggests a much higher value for one-off
-    # translation, so raise it if the prose comes out flat.
-    temperature = 0.2
-
     # -- extra sampling parameters -------------------------------------
     # Every value below is the neutral one: it is omitted from the request
     # so the upstream provider keeps applying its own default. OpenRouter
