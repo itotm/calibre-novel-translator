@@ -47,12 +47,13 @@ defaults: dict[str, Any] = {
     'ebook_metadata': {},
     'search_paths': [],
     'novel_mode_enabled': False,
-    # Sized for the context windows current models actually have.
-    # A typical novel chapter now fits in a single chunk, which
-    # removes the intra-chapter boundaries entirely. Lower both for
-    # a small local model, whose reply length is the real limit.
+    # Sized for the context windows current models actually have,
+    # but capped by what a model can *write* rather than read: the
+    # reply is about as long as the chunk, and output limits are far
+    # lower than context windows (8k-32k tokens on most models). A
+    # hundred paragraphs is a comfortable answer for any of them.
     'novel_chunk_tokens': 50000,
-    'novel_max_paragraphs_per_chunk': 400,
+    'novel_max_paragraphs_per_chunk': 100,
     # Structured output policy for the novel translator.
     #   'auto'  -> use JSON structured output when the engine advertises
     #              support (see engines.genai.GenAI.structured_output_mode),
@@ -65,6 +66,11 @@ defaults: dict[str, Any] = {
     'novel_context_tokens': 8000,
     'novel_summary_tokens': 600,
     'novel_glossary_max_entries': 500,
+    # Whether the summary and glossary calls may spend reasoning tokens.
+    # Off by default: neither task is a reasoning task, and on a measured
+    # chapter the glossary call spent three quarters of its output on
+    # deliberation. Only ever turns an engine's reasoning down, never on.
+    'novel_context_reasoning': False,
     # Chapters with fewer translated characters than this threshold are
     # translated normally but skip the summary + glossary extraction
     # LLM calls. Typical target: front/back matter (Copyright, Table of

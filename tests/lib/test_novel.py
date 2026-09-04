@@ -472,10 +472,11 @@ class TestTokenBudget(unittest.TestCase):
         self.assertEqual(200, len(chunks[0]))
 
     def test_chunk_default_max_paragraphs(self):
-        # Sized so that a whole chapter normally lands in one chunk on a
-        # current hosted model. Small and local models need it lowered.
+        # Sized on what a model can write, not on what it can read: the
+        # reply is about as long as the chunk, and output limits are far
+        # below context windows. Small and local models need it lowered.
         budget = TokenBudget(budget=8000)
-        self.assertEqual(400, budget.max_paragraphs)
+        self.assertEqual(100, budget.max_paragraphs)
 
     def test_chunk_with_stats_reports_reason(self):
         # 70 short paragraphs, generous token budget, cap=60.
@@ -1623,6 +1624,42 @@ class TestStructuredOutputParser(unittest.TestCase):
         parsed = translator._parse_structured_response(response, [1])
         self.assertIn('{id_00001}', parsed[1])
 
+    def test_parse_salvages_truncated_response(self):
+        # A response cut off at the model's output limit never closes its
+        # braces: the entries that did complete must still be kept, so
+        # only the tail has to be asked for again.
+        translator = self._make_translator()
+        response = ('{"paragraphs": ['
+                    '{"n": 1, "translation": "Primo."},'
+                    '{"n": 2, "translation": "Secondo."},'
+                    '{"n": 3, "transl')
+        parsed = translator._parse_structured_response(response, [1, 2, 3])
+        self.assertEqual({1: 'Primo.', 2: 'Secondo.'}, parsed)
+
+    def test_parse_salvage_ignores_echoed_source(self):
+        translator = self._make_translator()
+        response = ('{"paragraphs": ['
+                    '{"n": 1, "source": "First.", "translation": "Primo."},'
+                    '{"n": 2, "source": "Second.", "transl')
+        parsed = translator._parse_structured_response(response, [1, 2])
+        self.assertEqual({1: 'Primo.'}, parsed)
+
+    def test_parse_salvages_entries_under_an_unexpected_key(self):
+        translator = self._make_translator()
+        response = '{"items": [{"n": 1, "translation": "Primo."}]}'
+        parsed = translator._parse_structured_response(response, [1])
+        self.assertEqual({1: 'Primo.'}, parsed)
+
+    def test_parse_warns_when_response_is_not_a_clean_object(self):
+        translator = self._make_translator()
+        translator._parse_structured_response(
+            '{"paragraphs": [{"n": 1, "translation": "Primo."},{"n": 2',
+            [1, 2])
+        messages = [
+            call.args[0] for call in translator.log.call_args_list]
+        self.assertTrue(
+            any('truncated' in message for message in messages), messages)
+
 
 class TestStructuredDispatcher(unittest.TestCase):
     """The dispatcher routes to the structured path when active."""
@@ -1823,6 +1860,112 @@ class TestStructuredEnginePayloads(unittest.TestCase):
             body['generationConfig']['responseMimeType'])
         self.assertEqual(
             schema, body['generationConfig']['responseSchema'])
+
+
+class ReasoningEngine(FakeEngine):
+    """FakeEngine exposing the reasoning knobs of a GenAI engine."""
+
+    reasoning_efforts = ['default', 'none', 'minimal', 'low', 'high']
+
+    def __init__(self, translate_side_effect=None):
+        super().__init__(translate_side_effect)
+        self.reasoning_effort = 'minimal'
+        self.reasoning_max_tokens = 1024
+        # (effort, budget) as seen by each request, so a test can tell
+        # what was actually sent rather than what was restored after.
+        self.seen = []
+
+    def translate(self, text):
+        self.seen.append((self.reasoning_effort, self.reasoning_max_tokens))
+        return super().translate(text)
+
+
+class TestContextReasoning(unittest.TestCase):
+    """Reasoning is turned down for the summary and glossary calls."""
+
+    def _make_translator(self, engine, config=None):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        translator = NovelTranslator(
+            engine, [], ctx, cache, config=config or {})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        return translator
+
+    def test_reasoning_is_off_for_context_calls(self):
+        engine = ReasoningEngine()
+        translator = self._make_translator(engine)
+        translator._translate_context_call('system', 'user', 'summary')
+        self.assertEqual([('none', 0)], engine.seen)
+
+    def test_engine_settings_are_restored(self):
+        engine = ReasoningEngine()
+        translator = self._make_translator(engine)
+        translator._translate_context_call('system', 'user', 'summary')
+        self.assertEqual('minimal', engine.reasoning_effort)
+        self.assertEqual(1024, engine.reasoning_max_tokens)
+
+    def test_engine_settings_are_restored_after_a_failure(self):
+        engine = ReasoningEngine(
+            translate_side_effect=lambda text, prompt: RuntimeError('boom'))
+        translator = self._make_translator(engine)
+        with patch('time.sleep'):
+            with self.assertRaises(TranslationFailed):
+                translator._translate_context_call('system', 'user', 'summary')
+        self.assertEqual('minimal', engine.reasoning_effort)
+        self.assertEqual(1024, engine.reasoning_max_tokens)
+
+    def test_reasoning_is_kept_when_the_user_allows_it(self):
+        engine = ReasoningEngine()
+        translator = self._make_translator(
+            engine, {'novel_context_reasoning': True})
+        translator._translate_context_call('system', 'user', 'summary')
+        self.assertEqual([('minimal', 1024)], engine.seen)
+
+    def test_reasoning_is_never_introduced(self):
+        # An engine that sends no reasoning field must keep sending none:
+        # providers that reject the parameter would fail on it.
+        engine = ReasoningEngine()
+        engine.reasoning_effort = 'default'
+        engine.reasoning_max_tokens = 0
+        translator = self._make_translator(engine)
+        translator._translate_context_call('system', 'user', 'summary')
+        self.assertEqual([('default', 0)], engine.seen)
+
+    def test_engine_without_reasoning_support_is_untouched(self):
+        engine = FakeEngine()
+        translator = self._make_translator(engine)
+        self.assertEqual(
+            'user',
+            translator._translate_context_call('system', 'user', 'summary'))
+
+
+class TestRequestTimingLog(unittest.TestCase):
+    """Every request is bracketed by a sent/received log line."""
+
+    def _make_translator(self, engine):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        translator = NovelTranslator(engine, [], ctx, cache, config={})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        return translator
+
+    def test_request_and_response_are_logged_with_the_label(self):
+        translator = self._make_translator(FakeEngine())
+        translator._translate_with_retry(
+            'system', 'user text', label='chapter 3 chunk 1/2')
+        messages = [c.args[0] for c in translator.log.call_args_list]
+        self.assertTrue(
+            any('chapter 3 chunk 1/2' in m and 'sent' in m
+                for m in messages), messages)
+        self.assertTrue(
+            any('chapter 3 chunk 1/2' in m and 's.' in m
+                for m in messages), messages)
 
 
 if __name__ == '__main__':

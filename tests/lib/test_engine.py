@@ -588,11 +588,14 @@ class TestOpenRouterTranslate(unittest.TestCase):
         body = json.loads(self.translator.get_body('test content'))
 
         self.assertEqual('deepseek/deepseek-v4-flash', body['model'])
-        self.assertEqual(1.0, body['temperature'])
-        self.assertEqual(
-            {'effort': 'minimal', 'exclude': True}, body['reasoning'])
+        self.assertEqual(0.2, body['temperature'])
+        # Reasoning is off by default and routing asks for the fastest
+        # endpoint that honours every parameter we send.
+        self.assertEqual({'enabled': False}, body['reasoning'])
         self.assertNotIn('reasoning_effort', body)
-        self.assertNotIn('provider', body)
+        self.assertEqual(
+            {'sort': 'throughput', 'require_parameters': True},
+            body['provider'])
         # Neutral values are omitted so the provider keeps its own default.
         for key in ('top_k', 'min_p', 'top_a', 'seed', 'max_tokens',
                     'frequency_penalty', 'presence_penalty',
@@ -635,10 +638,23 @@ class TestOpenRouterTranslate(unittest.TestCase):
             'zdr': True}, body['provider'])
         self.assertEqual({'type': 'ephemeral'}, body['cache_control'])
 
-    def test_get_body_reasoning_disabled(self):
+    def test_get_body_reasoning_omitted(self):
         body = json.loads(
             self.reconfigure(reasoning_effort='default').get_body('t'))
         self.assertNotIn('reasoning', body)
+
+    def test_get_body_reasoning_disabled(self):
+        # 'none' is not an effort level of the unified API: it has to be
+        # sent as the documented off switch, and `exclude` would be
+        # meaningless next to it.
+        body = json.loads(
+            self.reconfigure(reasoning_effort='none').get_body('t'))
+        self.assertEqual({'enabled': False}, body['reasoning'])
+
+    def test_get_body_reasoning_disabled_ignores_the_budget(self):
+        body = json.loads(self.reconfigure(
+            reasoning_effort='none', reasoning_max_tokens=2048).get_body('t'))
+        self.assertEqual({'enabled': False}, body['reasoning'])
 
     def test_get_body_reasoning_budget_supersedes_effort(self):
         body = json.loads(self.reconfigure(
@@ -648,7 +664,8 @@ class TestOpenRouterTranslate(unittest.TestCase):
 
     def test_get_body_for_structured_keeps_reasoning(self):
         schema = {'type': 'object', 'properties': {'x': {'type': 'string'}}}
-        translator = self.reconfigure(provider_only='baidu/fp8')
+        translator = self.reconfigure(
+            provider_only='baidu/fp8', reasoning_effort='minimal')
         body = json.loads(
             translator.get_body_for_structured('test content', schema))
 
@@ -667,7 +684,7 @@ class TestOpenRouterTranslate(unittest.TestCase):
         self.assertNotIn('X-Session-Id', translator.get_headers())
         self.assertEqual(
             sorted(['model', 'messages', 'stream', 'temperature',
-                    'reasoning']),
+                    'reasoning', 'provider']),
             sorted(json.loads(translator.get_body('t')).keys()))
 
     def test_get_result_with_error_body(self):

@@ -719,12 +719,18 @@ class TranslationSetting(QDialog):
             _('Reasoning'),
             openrouter_combo(
                 'reasoning_effort', OpenRouterTranslate.reasoning_efforts,
-                _('How much thinking the model may do before answering, '
-                  'sent as "reasoning.effort". "Default" omits it and lets '
-                  'the model decide; "none" turns reasoning off. A short '
-                  'chain of thought ("minimal") noticeably helps literary '
-                  'translation without paying for full deliberation. '
-                  'Models without reasoning support ignore the field.')),
+                _('How much thinking the model may do before answering. '
+                  '"Default" omits the field and lets the model decide; '
+                  '"none", the default here, turns reasoning off with '
+                  '"reasoning.enabled: false"; the other levels are sent '
+                  'as "reasoning.effort".\n\n'
+                  'Reasoning is off because translation is not a '
+                  'reasoning task and the tokens are far from free: over '
+                  'one measured chapter they were a third of everything '
+                  'billed. They also cost time invisibly, since "exclude" '
+                  'keeps them out of the stream and nothing reaches the '
+                  'plugin while the model thinks. Raise it if a '
+                  'particular model needs it.')),
             openrouter_spin(
                 'reasoning_max_tokens', 'max_tokens', 0, 128000, step=256,
                 tooltip=_(
@@ -817,7 +823,11 @@ class TranslationSetting(QDialog):
             openrouter_combo(
                 'provider_sort', OpenRouterTranslate.provider_sorts,
                 _('Pick the endpoint by price, throughput or latency '
-                  'instead of the default balanced order.')),
+                  'instead of OpenRouter\'s balanced order. Defaults to '
+                  'throughput: a book is a long chain of large sequential '
+                  'requests, and the same model behind the same gateway '
+                  'has been measured at 200 tokens/s on one request and '
+                  '30 on another minutes later.')),
             openrouter_combo(
                 'provider_data_collection',
                 OpenRouterTranslate.provider_data_collections,
@@ -834,8 +844,12 @@ class TranslationSetting(QDialog):
             openrouter_check(
                 'provider_require_parameters', 'require_parameters',
                 _('Only route to providers that support every parameter '
-                  'in the request. Turn it on when reasoning or '
-                  'structured output must not be silently dropped.')),
+                  'in the request. On by default: a provider free to drop '
+                  '"response_format" is a provider that answers with the '
+                  'source text copied next to the translation, and one '
+                  'free to drop "reasoning" bills for thinking you asked '
+                  'it not to do. Turn it off if OpenRouter answers that '
+                  'no provider is available for your model.')),
             openrouter_check(
                 'provider_zdr', 'zdr',
                 _('Only route to Zero Data Retention endpoints.')))
@@ -958,13 +972,17 @@ class TranslationSetting(QDialog):
         novel_max_paragraphs.setSingleStep(10)
         novel_max_paragraphs.setToolTip(_(
             'Maximum number of paragraphs per translation chunk. '
-            'Prevents the LLM from losing track of the [N] alignment '
-            'markers when paragraphs are short (dialogue, TOC lists). '
             'The chunk is closed as soon as either the token budget or '
             'this paragraph cap is reached, whichever comes first.\n\n'
-            'On a novel this is usually the cap that fires first, so '
-            'raising the token budget alone changes nothing. The default '
-            'is set so that a whole chapter normally lands in one chunk. '
+            'On a novel this is the cap that fires first, and it is the '
+            'one that matters: the token budget above limits what the '
+            'model has to read, but the translation costs about as much '
+            'again to write, and a model that reads 200k tokens will '
+            'only write 8k to 32k of them. Too many paragraphs in one '
+            'chunk means a reply the model cannot finish, which arrives '
+            'truncated. It also keeps the LLM from losing track of the '
+            '[N] alignment markers when paragraphs are short (dialogue, '
+            'TOC lists).\n\n'
             'Lower it to 40-80 for a small or local model, which loses '
             'markers well before a hosted one does. '
             'Set to 0 to disable and use only the token budget.'))
@@ -1007,9 +1025,11 @@ class TranslationSetting(QDialog):
             'do not advertise support. Useful for custom OpenAI-compatible '
             'endpoints (Ollama exotics, LM Studio, vLLM) that accept '
             '"response_format" but are not recognised by the plugin.\n\n'
-            'With structured output active you can safely raise '
-            '"Max paragraphs per chunk" to 80+ without markers being '
-            'dropped by the model.'))
+            'Structured output removes the marker-dropping limit, but '
+            'not the model\'s output limit: however the response is '
+            'formatted, a chunk is only translatable if the model can '
+            'write the whole reply. Raise "Max paragraphs per chunk" '
+            'past 100 only if the log shows no truncated responses.'))
         novel_layout.addRow(
             _('Structured output'), novel_structured)
         self.disable_wheel_event(novel_structured)
@@ -1046,6 +1066,20 @@ class TranslationSetting(QDialog):
         novel_layout.addRow(
             _('Skip context under (chars)'), novel_min_chars)
         self.disable_wheel_event(novel_min_chars)
+
+        novel_context_reasoning = QCheckBox(_('Allow'))
+        novel_context_reasoning.setToolTip(_(
+            'Let the model think before writing the chapter summary and '
+            'the glossary. Off by default: neither is a reasoning task, '
+            'and on a measured chapter the glossary call spent three '
+            'quarters of its billed output deliberating before listing a '
+            'handful of proper nouns.\n\n'
+            'This only ever turns an engine\'s reasoning down for those '
+            'two calls, never on, and never touches the translation '
+            'itself: the engine keeps whatever the Fine-tuning section '
+            'says.'))
+        novel_layout.addRow(
+            _('Reasoning on summary/glossary'), novel_context_reasoning)
 
         novel_translation_prompt = QPlainTextEdit()
         novel_translation_prompt.setFixedHeight(90)
@@ -1100,7 +1134,7 @@ class TranslationSetting(QDialog):
             novel_chunk_tokens.setValue(int(self.config.get(
                 'novel_chunk_tokens', 50000) or 50000))
             novel_max_paragraphs.setValue(int(self.config.get(
-                'novel_max_paragraphs_per_chunk', 400) or 0))
+                'novel_max_paragraphs_per_chunk', 100) or 0))
             novel_overlap.setValue(int(self.config.get(
                 'novel_overlap_paragraphs', 3) or 0))
             structured_mode = self.config.get(
@@ -1116,6 +1150,8 @@ class TranslationSetting(QDialog):
                 'novel_glossary_max_entries', 500) or 500))
             novel_min_chars.setValue(int(self.config.get(
                 'novel_min_chars_for_context', 300) or 0))
+            novel_context_reasoning.setChecked(bool(self.config.get(
+                'novel_context_reasoning', False)))
             novel_translation_prompt.setPlaceholderText(
                 DEFAULT_NOVEL_TRANSLATION_PROMPT)
             novel_translation_prompt.setPlainText(
@@ -1160,6 +1196,9 @@ class TranslationSetting(QDialog):
             _persist_novel('novel_glossary_max_entries', int))
         novel_min_chars.valueChanged.connect(
             _persist_novel('novel_min_chars_for_context', int))
+        novel_context_reasoning.toggled.connect(
+            lambda checked: self.config.update(
+                novel_context_reasoning=bool(checked)))
 
         def _persist_prompt(widget, key):
             def _handler():

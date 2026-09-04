@@ -397,11 +397,17 @@ class TokenBudget:
       * ``budget``: maximum estimated tokens per chunk. Prevents overflowing
         the model's context window.
       * ``max_paragraphs``: maximum non-ignored paragraphs per chunk.
-        Prevents the LLM from being overwhelmed by too many ``<Pn>...</Pn>``
-        alignment markers when paragraphs are short (dialogue, TOC lists,
-        one-line stanzas). Empirically, medium-sized local models start
-        losing tags reliably above ~60-80 tags per chunk. Set to 0 to
-        disable this cap and fall back to token-only chunking.
+        This is the cap that stands in for the model's *output* limit,
+        which nothing else here measures: the translation of a chunk is
+        about as long as the chunk itself, while a model that reads
+        200k tokens will only write 8k to 32k of them. A chunk sized
+        purely by ``budget`` therefore asks for a reply the model
+        cannot finish, and the answer arrives truncated. It also keeps
+        the LLM from being overwhelmed by too many alignment markers
+        when paragraphs are short (dialogue, TOC lists, one-line
+        stanzas); medium-sized local models start losing markers
+        reliably above ~60-80 per chunk. Set to 0 to disable this cap
+        and fall back to token-only chunking.
 
     Paragraphs that alone exceed the per-chunk budget are still emitted as
     a single-paragraph chunk (with a warning) rather than being split
@@ -414,7 +420,7 @@ class TokenBudget:
     REASON_OVERSIZED = 'oversized'
     REASON_END = 'end'
 
-    def __init__(self, budget=50000, max_paragraphs=400,
+    def __init__(self, budget=50000, max_paragraphs=100,
                  ratio_latin=4.0, ratio_cjk=2.0, cjk_threshold=0.30):
         if budget < 100:
             budget = 100
@@ -1002,6 +1008,44 @@ def _extract_json_object(text):
     return None
 
 
+def _iter_json_objects(text):
+    """Yield every complete JSON object found anywhere in ``text``.
+
+    Salvage path for a reply the model did not finish: when the answer is
+    cut off mid-object the outermost braces never balance, so
+    :func:`_extract_json_object` returns nothing and a whole chunk is
+    thrown away even though most of its paragraphs arrived intact. Here we
+    walk the text and let the decoder consume whatever parses from each
+    ``{``, so the paragraphs that did complete are kept and only the tail
+    has to be asked for again.
+    """
+    if not text:
+        return
+    decoder = json.JSONDecoder()
+    index = 0
+    length = len(text)
+    while index < length:
+        index = text.find('{', index)
+        if index < 0:
+            return
+        try:
+            obj, end = decoder.raw_decode(text, index)
+        except ValueError:
+            index += 1
+            continue
+        if isinstance(obj, dict):
+            # A wrapper that did close (``{"paragraphs": [...]}`` under
+            # an unexpected key, say) is yielded together with the entries
+            # it holds, so the caller finds them either way.
+            yield obj
+            for value in obj.values():
+                if isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict):
+                            yield item
+        index = max(end, index + 1)
+
+
 # Fallback pattern for line-based entity extraction when JSON parsing fails.
 # The separator between source and translation is restricted to arrow-like
 # symbols (``->``, ``=>``, ``→``) which are unambiguous entity mappings;
@@ -1134,13 +1178,19 @@ class NovelTranslator:
     def max_paragraphs_per_chunk(self):
         """Maximum number of translatable paragraphs per chunk.
 
-        Prevents the LLM from being overwhelmed by too many ``[N]``
-        alignment markers when paragraphs are short (dialogue, TOC lists,
-        one-line stanzas). The chunk is closed as soon as either the token
-        budget or this paragraph cap is reached -- whichever comes first.
+        The chunk is closed as soon as either the token budget or this
+        paragraph cap is reached -- whichever comes first. This cap is
+        what keeps the *reply* within reach: a chunk is budgeted on the
+        tokens it costs to read, but the translation costs about as much
+        again to write, and output limits (8k-32k tokens) are an order of
+        magnitude below the context windows the token budget targets.
+        It also prevents the LLM from losing track of the ``[N]``
+        alignment markers when paragraphs are short (dialogue, TOC
+        lists, one-line stanzas).
+
         Set to 0 to disable the cap and use only the token budget.
         """
-        return int(self._cfg('novel_max_paragraphs_per_chunk', 400))
+        return int(self._cfg('novel_max_paragraphs_per_chunk', 100))
 
     @property
     def overlap_paragraphs(self):
@@ -1261,6 +1311,19 @@ class NovelTranslator:
         return int(self._cfg('novel_min_chars_for_context', 300))
 
     @property
+    def context_reasoning(self):
+        """Whether the summary and the glossary calls may spend reasoning
+        tokens.
+
+        Off by default. Neither task is a reasoning task -- one condenses
+        a chapter that has just been translated, the other lists the
+        proper nouns in it -- and measured against a real chapter the
+        glossary call spent three quarters of its output on deliberation
+        before writing a short JSON list.
+        """
+        return bool(self._cfg('novel_context_reasoning', False))
+
+    @property
     def translation_prompt(self):
         value = self._cfg('novel_translation_prompt', None)
         return value or DEFAULT_NOVEL_TRANSLATION_PROMPT
@@ -1365,33 +1428,103 @@ class NovelTranslator:
                 pass
         return result or ''
 
-    def _translate_with_retry(self, system_prompt, user_text, attempts=None):
+    def _estimate_tokens(self, text):
+        """Approximate token count, using the chunker's own estimator so
+        the sizes in the log are comparable to the caps in the settings.
+        """
+        if getattr(self, '_token_estimator', None) is None:
+            self._token_estimator = TokenBudget()
+        return self._token_estimator.estimate(text or '')
+
+    def _translate_with_retry(self, system_prompt, user_text, attempts=None,
+                              label=None):
         """Send ``system_prompt`` + ``user_text`` to the LLM with retries.
 
         Retries here are for total failures of the request (network,
         parsing, ...). Alignment-level retries are handled separately by
         ``_translate_chunk``.
+
+        Every attempt is bracketed by a log line naming ``label`` and the
+        size of what is being sent and received, and the answer's line
+        carries how long it took. Without them a slow request and a hung
+        one look identical from the outside, which is a real risk here: a
+        reasoning model whose chain of thought is excluded from the
+        stream sends no bytes at all while it thinks, and a single chunk
+        has been observed taking a quarter of an hour with nothing at all
+        printed in between.
         """
         attempts = attempts or getattr(
             self.translator, 'request_attempt', 3) or 3
+        label = label or _('request')
         last_error = None
         for attempt in range(1, attempts + 1):
             if self.cancel_request():
                 raise TranslationCanceled(_('Translation canceled.'))
+            started = time.time()
+            self.log(_(
+                '  -> {}: sent {} chars (~{} tokens), waiting for the '
+                'model...').format(
+                    label, len(user_text),
+                    self._estimate_tokens(user_text)))
             try:
                 self._apply_prompt(system_prompt)
-                return self._run_translation_call(user_text)
+                result = self._run_translation_call(user_text)
+                self.log(_(
+                    '  <- {}: {} chars (~{} tokens) in {}s.').format(
+                        label, len(result), self._estimate_tokens(result),
+                        round(time.time() - started, 1)))
+                return result
             except Exception as e:
                 last_error = e
                 self.log(
-                    _('Novel mode request failed (attempt {}/{}): {}').format(
-                        attempt, attempts, e), True)
+                    _('Novel mode request failed after {}s '
+                      '(attempt {}/{}): {}').format(
+                          round(time.time() - started, 1),
+                          attempt, attempts, e), True)
                 time.sleep(min(30, 5 * attempt))
             finally:
                 self._restore_prompt()
         raise TranslationFailed(
             _('Novel mode: giving up after {} attempts. Last error: {}')
             .format(attempts, last_error))
+
+    def _translate_context_call(self, system_prompt, user_prompt, label):
+        """Run one auxiliary (summary / glossary) request.
+
+        Unless ``novel_context_reasoning`` says otherwise, the engine's
+        chain of thought is turned down for the duration of the call and
+        restored afterwards. The adjustment only ever turns reasoning
+        *down*: an engine that sends no reasoning field keeps sending
+        none, so providers that would reject the parameter are left
+        alone.
+        """
+        translator = self.translator
+        saved = {}
+        if not self.context_reasoning:
+            effort = getattr(translator, 'reasoning_effort', None)
+            supported = getattr(translator, 'reasoning_efforts', ())
+            if effort and effort not in ('default', 'none') \
+                    and 'none' in supported:
+                saved['reasoning_effort'] = effort
+                translator.reasoning_effort = 'none'
+            try:
+                budget = int(getattr(translator, 'reasoning_max_tokens', 0)
+                             or 0)
+            except (TypeError, ValueError):
+                budget = 0
+            if budget > 0:
+                saved['reasoning_max_tokens'] = translator.reasoning_max_tokens
+                translator.reasoning_max_tokens = 0
+            if saved:
+                self.log(_(
+                    'Reasoning turned off for {} (novel_context_reasoning '
+                    'is off).').format(label))
+        try:
+            return self._translate_with_retry(
+                system_prompt, user_prompt, attempts=2, label=label)
+        finally:
+            for key, value in saved.items():
+                setattr(translator, key, value)
 
     # -- chunk-level translation with alignment retry ---------------------
 
@@ -1468,7 +1601,10 @@ class NovelTranslator:
             DEFAULT_NOVEL_FORMAT_INSTRUCTIONS, extra={'{text}': tagged})
         user_text = '%s%s\n\n%s' % (header, overlap_block, format_body)
 
-        response = self._translate_with_retry(system_prompt, user_text)
+        chunk_label = _('chapter {} chunk {}/{}').format(
+            chapter_num, chunk_num, total_chunks)
+        response = self._translate_with_retry(
+            system_prompt, user_text, label=chunk_label)
         parsed = parse_tagged_response(response, indices)
         missing = [i for i in indices if i not in parsed]
 
@@ -1496,7 +1632,10 @@ class NovelTranslator:
                   'Source paragraphs:\n\n{text}'),
                 extra={'{text}': fixup_tagged})
             user_text = fixup_body
-            response = self._translate_with_retry(system_prompt, user_text)
+            response = self._translate_with_retry(
+                system_prompt, user_text,
+                label=_('{}, alignment retry {}').format(
+                    chunk_label, retry + 1))
             fixup_parsed = parse_tagged_response(response, missing)
             parsed.update(fixup_parsed)
             missing = [i for i in indices if i not in parsed]
@@ -1549,8 +1688,11 @@ class NovelTranslator:
     def _build_structured_payload(self, chunk_paragraphs, indices):
         """Return the JSON payload with source paragraphs to translate.
 
-        The response must mirror this shape but with ``translation``
-        replacing (or accompanying) the ``source`` field.
+        The reply must carry ``n`` and ``translation`` only. Echoing
+        ``source`` back doubles the billed output tokens for nothing --
+        ``n`` is what aligns a translation with its paragraph -- and on a
+        full chapter it is what pushes the answer past the model's output
+        limit, truncating the JSON mid-object.
         """
         return {
             'paragraphs': [
@@ -1571,16 +1713,27 @@ class NovelTranslator:
           * extra fields inside each paragraph object;
           * ``n`` values as strings instead of integers;
           * missing paragraphs (caller handles via alignment retry);
-          * hallucinated indices not in ``expected_indices``.
+          * hallucinated indices not in ``expected_indices``;
+          * a reply cut off at the model's output limit, whose braces
+            never balance: the entries that did complete are salvaged
+            (see :func:`_iter_json_objects`) so only the tail is retried.
         """
         if not response:
             return {}
         obj = _extract_json_object(response)
-        if not obj or not isinstance(obj.get('paragraphs'), list):
-            return {}
+        if obj and isinstance(obj.get('paragraphs'), list):
+            items = obj['paragraphs']
+            truncated = False
+        else:
+            # The reply never closed its braces (almost always an answer
+            # cut off at the model's output limit). Recover the entries
+            # that did complete instead of discarding the whole chunk.
+            items = list(_iter_json_objects(response))
+            truncated = True
+
         expected = set(expected_indices)
         result = {}
-        for item in obj['paragraphs']:
+        for item in items:
             if not isinstance(item, dict):
                 continue
             raw_n = item.get('n')
@@ -1593,10 +1746,20 @@ class NovelTranslator:
             translation = (item.get('translation') or '').strip()
             if translation:
                 result[n] = translation
+
+        if truncated:
+            self.log(_(
+                'Malformed or truncated JSON response ({} chars): '
+                'salvaged {}/{} paragraph(s). A response cut off in the '
+                'middle usually means the model hit its output token '
+                'limit; lower the paragraphs-per-chunk cap if this '
+                'repeats.').format(
+                    len(response), len(result), len(expected)), True)
         return result
 
     def _translate_with_retry_structured(self, system_prompt, user_text,
-                                         schema=None, attempts=None):
+                                         schema=None, attempts=None,
+                                         label=None):
         """Same retry loop as :meth:`_translate_with_retry` but the
         request body is built via ``engine.get_body_for_structured`` so
         the server enforces the JSON response.
@@ -1658,7 +1821,7 @@ class NovelTranslator:
         translator.get_body = structured_get_body
         try:
             result = self._translate_with_retry(
-                system_prompt, user_text, attempts=attempts)
+                system_prompt, user_text, attempts=attempts, label=label)
         finally:
             translator.get_body = original_get_body
             if original_timeout is not None:
@@ -1720,21 +1883,28 @@ class NovelTranslator:
         payload_json = json.dumps(payload, ensure_ascii=False, indent=2)
 
         instructions = model_text(
-            'You will receive a JSON object with a list of numbered '
-            'source paragraphs. Reply with a JSON object of the same '
-            'shape, where each paragraph carries a "translation" field '
-            'containing your translation of "source". Preserve the "n" '
-            'field verbatim. Preserve any inline placeholder like '
-            '{id_XXXXX}. Do not add, drop, or renumber paragraphs. '
-            'Return ONLY the JSON object, no preamble.')
+            'You will receive a JSON object listing numbered source '
+            'paragraphs. Reply with a JSON object holding one entry per '
+            'paragraph, in this exact shape:\n'
+            '{"paragraphs": [{"n": 1, "translation": "..."}, '
+            '{"n": 2, "translation": "..."}]}\n'
+            'Each entry carries exactly two fields: "n", copied verbatim '
+            'from the input, and "translation", your translation of that '
+            'paragraph\'s "source". Do NOT repeat the "source" text and '
+            'do not add any other field: the number is what pairs a '
+            'translation with its paragraph. Preserve any inline '
+            'placeholder like {id_XXXXX}. Do not add, drop, or renumber '
+            'paragraphs. Return ONLY the JSON object, no preamble.')
 
         user_text = (
             '%s%s\n\n%s\n\nInput:\n%s'
             % (header, overlap_block, instructions, payload_json))
 
+        chunk_label = _('chapter {} chunk {}/{}').format(
+            chapter_num, chunk_num, total_chunks)
         response = self._translate_with_retry_structured(
             system_prompt, user_text,
-            schema=self._STRUCTURED_RESPONSE_SCHEMA)
+            schema=self._STRUCTURED_RESPONSE_SCHEMA, label=chunk_label)
         parsed = self._parse_structured_response(response, indices)
         missing = [i for i in indices if i not in parsed]
 
@@ -1756,13 +1926,16 @@ class NovelTranslator:
             fixup_body = (
                 model_text(
                     'The previous JSON response was incomplete. Reply '
-                  'with a JSON object translating ONLY the paragraphs '
-                  'below. Same shape as before: "paragraphs" array of '
-                  '{"n": int, "translation": string}. Return JSON only.')
+                    'with a JSON object translating ONLY the paragraphs '
+                    'below. Same shape as before: "paragraphs" array of '
+                    '{"n": int, "translation": string}, with no "source" '
+                    'field and nothing else. Return JSON only.')
                 + '\n\nInput:\n' + fixup_json)
             response = self._translate_with_retry_structured(
                 system_prompt, fixup_body,
-                schema=self._STRUCTURED_RESPONSE_SCHEMA)
+                schema=self._STRUCTURED_RESPONSE_SCHEMA,
+                label=_('{}, JSON retry {}').format(
+                    chunk_label, retry + 1))
             fixup_parsed = self._parse_structured_response(
                 response, fixup_indices)
             parsed.update(fixup_parsed)
@@ -1865,8 +2038,9 @@ class NovelTranslator:
             },
             required=('{text}',))
         try:
-            response = self._translate_with_retry(
-                system_prompt, user_prompt, attempts=2)
+            response = self._translate_context_call(
+                system_prompt, user_prompt,
+                _('summary of chapter {}').format(chapter.index))
         except TranslationFailed as e:
             self.log(_('Summary generation failed: {}').format(e), True)
             return ''
@@ -1896,8 +2070,9 @@ class NovelTranslator:
             required=(
                 '{existing_keys}', '{source_text}', '{translated_text}'))
         try:
-            response = self._translate_with_retry(
-                system_prompt, user_prompt, attempts=2)
+            response = self._translate_context_call(
+                system_prompt, user_prompt,
+                _('glossary of chapter {}').format(chapter.index))
         except TranslationFailed as e:
             self.log(
                 _('Glossary extraction failed: {}').format(e), True)

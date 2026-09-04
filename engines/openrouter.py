@@ -79,6 +79,16 @@ class OpenRouterTranslate(ChatgptTranslate):
     models: list[str] = []
     model: str | None = 'deepseek/deepseek-v4-flash'
 
+    # The one place where a GenAI engine departs from the shared default
+    # of 1.0. OpenRouter is the gateway through which Novel Mode reaches
+    # models whose provider does not enforce `response_format`, so the
+    # requested JSON shape rests on the prompt alone -- and a model at
+    # 1.0 wanders off that shape far more readily than one at 0.2. Over a
+    # book, a drifting name or an invented detail also costs more than
+    # the flatness a low temperature brings. Raise it in the Fine-tuning
+    # section if the prose comes out lifeless.
+    temperature = 0.2
+
     # -- extra sampling parameters -------------------------------------
     # Every value below is the neutral one: it is omitted from the request
     # so the upstream provider keeps applying its own default. OpenRouter
@@ -93,15 +103,22 @@ class OpenRouterTranslate(ChatgptTranslate):
     seed = 0
 
     # -- reasoning ------------------------------------------------------
-    # 'default' omits the field and lets the model decide. 'minimal' is
-    # the shipped default: it keeps a short chain of thought (which
-    # measurably helps with idiomatic literary translation) without
-    # paying for the long deliberation a reasoning model would do on its
-    # own. 'none' disables reasoning entirely, which is what local models
-    # served through Ollama usually want.
+    # 'default' omits the field and lets the model decide, 'none' turns
+    # reasoning off, the rest ask for progressively more of it.
+    #
+    # 'none' is the shipped default. A chain of thought does not help a
+    # translation the way it helps a maths problem -- the model is
+    # rewriting prose it has already read, not deriving anything -- and
+    # measured on a real chapter it dominated the bill: a third of all
+    # the tokens billed over one chapter, up to three quarters of them
+    # on the glossary call, which only has to list proper nouns. It also
+    # costs wall-clock time invisibly, because `exclude` keeps those
+    # tokens out of the stream: nothing at all reaches the plugin while
+    # the model deliberates. Raise it per engine in the OpenRouter
+    # section if a particular model needs it.
     reasoning_efforts = [
         'default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh']
-    reasoning_effort = 'minimal'
+    reasoning_effort = 'none'
     # An explicit token budget (Anthropic, Qwen) takes precedence over
     # the qualitative effort level. 0 means "use the effort level".
     reasoning_max_tokens = 0
@@ -115,9 +132,19 @@ class OpenRouterTranslate(ChatgptTranslate):
     provider_ignore = ''
     provider_quantizations = ''
     provider_sorts = ['default', 'price', 'throughput', 'latency']
-    provider_sort = 'default'
+    # A book is a long sequence of large, strictly sequential requests,
+    # so the endpoint's speed is felt end to end: the same model behind
+    # the same gateway was measured at 200 tokens/s on one request and
+    # 30 on another a few minutes later. 'throughput' asks OpenRouter for
+    # the fastest endpoint rather than its balanced default.
+    provider_sort = 'throughput'
     provider_allow_fallbacks = True
-    provider_require_parameters = False
+    # Novel Mode asks for JSON with `response_format` and for reasoning
+    # to be off; a provider that supports neither is free to ignore both
+    # unless this is set, which is how the model ends up echoing the
+    # source text back and burning thinking tokens anyway. Turn it off
+    # if OpenRouter answers that no provider is available.
+    provider_require_parameters = True
     provider_data_collections = ['allow', 'deny']
     provider_data_collection = 'allow'
     provider_zdr = False
@@ -175,6 +202,11 @@ class OpenRouterTranslate(ChatgptTranslate):
         https://openrouter.ai/docs/use-cases/reasoning-tokens
         """
         reasoning: dict[str, Any] = {}
+        # The unified API turns reasoning off with `enabled: false`; there
+        # is no effort level named 'none' to send, and `exclude` alone
+        # would only hide the tokens while still paying for them.
+        if self.reasoning_effort == 'none':
+            return {'enabled': False}
         if int(self.reasoning_max_tokens or 0) > 0:
             reasoning['max_tokens'] = int(self.reasoning_max_tokens)
         elif self.reasoning_effort and self.reasoning_effort != 'default':
