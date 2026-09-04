@@ -6,6 +6,7 @@ from ...lib.cache import Paragraph
 from ...lib.exception import TranslationCanceled, TranslationFailed
 from ...lib.novel import (
     Chapter, ChapterBuilder, TokenBudget, ContextManager, NovelTranslator,
+    DEFAULT_NOVEL_TRANSLATION_PROMPT, DEFAULT_NOVEL_GLOSSARY_PROMPT,
     tag_paragraphs, parse_tagged_response, _extract_json_object,
     _extract_entities_fallback,
     novel_cache_id, _href_to_page_id,
@@ -471,11 +472,10 @@ class TestTokenBudget(unittest.TestCase):
         self.assertEqual(200, len(chunks[0]))
 
     def test_chunk_default_max_paragraphs(self):
-        # Default is 80: with structured JSON output the model reliably
-        # follows alignment markers at this count, making it the appropriate
-        # default for capable engines (ChatGPT, Gemini, Ollama 0.31+).
+        # Sized so that a whole chapter normally lands in one chunk on a
+        # current hosted model. Small and local models need it lowered.
         budget = TokenBudget(budget=8000)
-        self.assertEqual(80, budget.max_paragraphs)
+        self.assertEqual(400, budget.max_paragraphs)
 
     def test_chunk_with_stats_reports_reason(self):
         # 70 short paragraphs, generous token budget, cap=60.
@@ -919,6 +919,96 @@ class FakeEngine:
                 raise value
             return value
         return text
+
+
+class TestPromptComposition(unittest.TestCase):
+    """A prompt typed in the settings dialog must work as plain prose.
+
+    No placeholder may be mandatory, and a stray brace -- which any
+    hand-written prompt is likely to contain -- must not break the run.
+    """
+
+    def setUp(self):
+        self.cache = Mock()
+        self.cache.get_info.return_value = None
+        self.ctx = ContextManager(self.cache).load()
+
+    def _translator(self, config=None):
+        translator = NovelTranslator(
+            FakeEngine(), [], self.ctx, self.cache, config=config or {})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        return translator
+
+    def test_shipped_prompts_are_literal(self):
+        # The glossary prompt used to be filled with str.format(), which
+        # forced its JSON example to double every brace. It is filled by
+        # literal substitution now, so the braces must reach the model
+        # exactly as the model has to reproduce them.
+        self.assertNotIn('{{', DEFAULT_NOVEL_GLOSSARY_PROMPT)
+        self.assertIn('{"entities": []}', DEFAULT_NOVEL_GLOSSARY_PROMPT)
+        # The context block belongs last: everything before it is
+        # identical from one chapter to the next, and so stays reusable
+        # from the provider's prefix cache.
+        self.assertTrue(
+            DEFAULT_NOVEL_TRANSLATION_PROMPT.rstrip().endswith('{context}'))
+
+    def test_plain_prose_prompt_still_receives_context(self):
+        translator = self._translator(
+            {'novel_translation_prompt': 'Translate plainly and drily.'})
+        prompt = translator._translation_system_prompt('SUMMARY + GLOSSARY')
+
+        self.assertIn('Translate plainly and drily.', prompt)
+        self.assertIn('SUMMARY + GLOSSARY', prompt)
+        # The languages are supplied too, since the prompt named neither.
+        self.assertIn('English', prompt)
+        self.assertIn('Italian', prompt)
+
+    def test_placed_context_is_not_appended_twice(self):
+        translator = self._translator({
+            'novel_translation_prompt':
+                'From <slang> to <tlang>.\n\n{context}\n\nBe brief.'})
+        prompt = translator._translation_system_prompt('RUNNING CONTEXT')
+
+        self.assertEqual(1, prompt.count('RUNNING CONTEXT'))
+        # The prompt named the languages itself, so no directive is added.
+        self.assertTrue(prompt.startswith('From English to Italian.'))
+        self.assertTrue(prompt.rstrip().endswith('Be brief.'))
+
+    def test_stray_braces_survive(self):
+        translator = self._translator()
+        composed = translator._compose_prompt(
+            'Summarise. Keep {names} and {{quirks}} intact.',
+            {'{text}': ('Chapter text:', 'CHAPTER BODY')},
+            required=('{text}',))
+
+        self.assertIn('{names}', composed)
+        self.assertIn('{{quirks}}', composed)
+        self.assertIn('CHAPTER BODY', composed)
+
+    def test_missing_values_are_appended_with_their_label(self):
+        translator = self._translator()
+        composed = translator._compose_prompt(
+            'List the named entities as JSON.',
+            {
+                '{existing_keys}': ('Existing entries:', 'Aslan, Narnia'),
+                '{source_text}': ('Source:', 'THE SOURCE'),
+                '{translated_text}': ('Translation:', 'THE TRANSLATION'),
+            },
+            required=(
+                '{existing_keys}', '{source_text}', '{translated_text}'))
+
+        self.assertIn('Existing entries:\nAslan, Narnia', composed)
+        self.assertIn('Source:\nTHE SOURCE', composed)
+        self.assertIn('Translation:\nTHE TRANSLATION', composed)
+
+    def test_empty_values_are_not_appended(self):
+        translator = self._translator()
+        composed = translator._compose_prompt(
+            'Summarise.', {'{text}': ('Chapter text:', '')},
+            required=('{text}',))
+
+        self.assertEqual('Summarise.', composed)
 
 
 class TestNovelTranslator(unittest.TestCase):

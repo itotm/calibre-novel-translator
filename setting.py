@@ -506,6 +506,12 @@ class TranslationSetting(QDialog):
 
         self.genai_prompt = QPlainTextEdit()
         self.genai_prompt.setFixedHeight(100)
+        self.genai_prompt.setToolTip(_(
+            'System prompt used by Advanced Mode and Batch Mode.\n\n'
+            'Novel Mode ignores it and uses the "Translation prompt" of '
+            'the Novel Mode section below instead, so the two can be '
+            'written for what they actually do: one paragraph at a time '
+            'here, a whole chapter with its running context there.'))
         genai_layout.addRow(_('Prompt'), self.genai_prompt)
         self.genai_endpoint = QLineEdit()
         genai_layout.addRow(_('Endpoint'), self.genai_endpoint)
@@ -931,18 +937,24 @@ class TranslationSetting(QDialog):
         self.disable_wheel_event(novel_front_matter_min)
 
         novel_chunk_tokens = QSpinBox()
-        novel_chunk_tokens.setRange(1024, 200000)
+        novel_chunk_tokens.setRange(1024, 1000000)
         novel_chunk_tokens.setSingleStep(1024)
         novel_chunk_tokens.setToolTip(_(
             'Maximum estimated tokens per translation chunk. Together '
             'with "Max paragraphs per chunk" it forms a dual-cap: the '
-            'chunk is closed as soon as either limit is reached.'))
+            'chunk is closed as soon as either limit is reached.\n\n'
+            'The limit that bites is not the context window but how much '
+            'the model may write in one reply: it has to emit the whole '
+            'chunk translated, which is as long as the chunk itself or '
+            'longer. Recent hosted models allow 64k output tokens and up, '
+            'while smaller and local ones often stop at 8k-16k and would '
+            'truncate a large chunk mid-chapter.'))
         novel_layout.addRow(
             _('Max tokens per chunk'), novel_chunk_tokens)
         self.disable_wheel_event(novel_chunk_tokens)
 
         novel_max_paragraphs = QSpinBox()
-        novel_max_paragraphs.setRange(0, 500)
+        novel_max_paragraphs.setRange(0, 5000)
         novel_max_paragraphs.setSingleStep(10)
         novel_max_paragraphs.setToolTip(_(
             'Maximum number of paragraphs per translation chunk. '
@@ -950,8 +962,11 @@ class TranslationSetting(QDialog):
             'markers when paragraphs are short (dialogue, TOC lists). '
             'The chunk is closed as soon as either the token budget or '
             'this paragraph cap is reached, whichever comes first.\n\n'
-            'Recommended: 40 for small models (7B), 80 for medium (26B '
-            'like gemma), 100+ for large models (Claude, GPT-4). '
+            'On a novel this is usually the cap that fires first, so '
+            'raising the token budget alone changes nothing. The default '
+            'is set so that a whole chapter normally lands in one chunk. '
+            'Lower it to 40-80 for a small or local model, which loses '
+            'markers well before a hosted one does. '
             'Set to 0 to disable and use only the token budget.'))
         novel_layout.addRow(
             _('Max paragraphs per chunk'), novel_max_paragraphs)
@@ -1034,14 +1049,36 @@ class TranslationSetting(QDialog):
 
         novel_translation_prompt = QPlainTextEdit()
         novel_translation_prompt.setFixedHeight(90)
+        novel_translation_prompt.setToolTip(_(
+            'System prompt for Novel Mode. It replaces the engine prompt '
+            'of the Fine-tuning section entirely; leave it empty to use '
+            'the shipped one, shown greyed out.\n\n'
+            'Write it in plain prose: no placeholder is required. The '
+            'languages and the running summary and glossary are added on '
+            'their own when you do not mention them. Should you want to '
+            'place them yourself, <slang> and <tlang> are the languages '
+            'and {context} is the summary and glossary block, which is '
+            'best kept last so the rest of the prompt stays reusable '
+            'from the provider cache chapter after chapter.'))
         novel_layout.addRow(
             _('Translation prompt'), novel_translation_prompt)
         novel_summary_prompt = QPlainTextEdit()
         novel_summary_prompt.setFixedHeight(70)
+        novel_summary_prompt.setToolTip(_(
+            'Prompt asking the model to summarise a finished chapter. '
+            'Plain prose is enough: the chapter text is appended when '
+            'the prompt does not place it with {text}, and '
+            '{chapter_num} and {chapter_title} name the chapter.'))
         novel_layout.addRow(
             _('Summary prompt'), novel_summary_prompt)
         novel_glossary_prompt = QPlainTextEdit()
         novel_glossary_prompt.setFixedHeight(70)
+        novel_glossary_prompt.setToolTip(_(
+            'Prompt asking the model for the named entities of a '
+            'finished chapter, as JSON. Source, translation and the '
+            'entries already known are appended when the prompt does '
+            'not place them with {source_text}, {translated_text} and '
+            '{existing_keys}.'))
         novel_layout.addRow(
             _('Glossary prompt'), novel_glossary_prompt)
 
@@ -1061,9 +1098,9 @@ class TranslationSetting(QDialog):
             novel_front_matter_min.setValue(int(self.config.get(
                 'novel_front_matter_min_chars', 100) or 0))
             novel_chunk_tokens.setValue(int(self.config.get(
-                'novel_chunk_tokens', 12000) or 12000))
+                'novel_chunk_tokens', 50000) or 50000))
             novel_max_paragraphs.setValue(int(self.config.get(
-                'novel_max_paragraphs_per_chunk', 80) or 0))
+                'novel_max_paragraphs_per_chunk', 400) or 0))
             novel_overlap.setValue(int(self.config.get(
                 'novel_overlap_paragraphs', 3) or 0))
             structured_mode = self.config.get(
@@ -1072,11 +1109,11 @@ class TranslationSetting(QDialog):
             if idx >= 0:
                 novel_structured.setCurrentIndex(idx)
             novel_context_tokens.setValue(int(self.config.get(
-                'novel_context_tokens', 1500) or 1500))
+                'novel_context_tokens', 8000) or 8000))
             novel_summary_tokens.setValue(int(self.config.get(
-                'novel_summary_tokens', 400) or 400))
+                'novel_summary_tokens', 600) or 600))
             novel_glossary_max.setValue(int(self.config.get(
-                'novel_glossary_max_entries', 200) or 200))
+                'novel_glossary_max_entries', 500) or 500))
             novel_min_chars.setValue(int(self.config.get(
                 'novel_min_chars_for_context', 300) or 0))
             novel_translation_prompt.setPlaceholderText(

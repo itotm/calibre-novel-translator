@@ -47,8 +47,12 @@ defaults: dict[str, Any] = {
     'ebook_metadata': {},
     'search_paths': [],
     'novel_mode_enabled': False,
-    'novel_chunk_tokens': 12000,
-    'novel_max_paragraphs_per_chunk': 80,
+    # Sized for the context windows current models actually have.
+    # A typical novel chapter now fits in a single chunk, which
+    # removes the intra-chapter boundaries entirely. Lower both for
+    # a small local model, whose reply length is the real limit.
+    'novel_chunk_tokens': 50000,
+    'novel_max_paragraphs_per_chunk': 400,
     # Structured output policy for the novel translator.
     #   'auto'  -> use JSON structured output when the engine advertises
     #              support (see engines.genai.GenAI.structured_output_mode),
@@ -58,9 +62,9 @@ defaults: dict[str, Any] = {
     #              don't advertise it
     'novel_structured_output': 'auto',
     'novel_overlap_paragraphs': 3,
-    'novel_context_tokens': 1500,
-    'novel_summary_tokens': 400,
-    'novel_glossary_max_entries': 200,
+    'novel_context_tokens': 8000,
+    'novel_summary_tokens': 600,
+    'novel_glossary_max_entries': 500,
     # Chapters with fewer translated characters than this threshold are
     # translated normally but skip the summary + glossary extraction
     # LLM calls. Typical target: front/back matter (Copyright, Table of

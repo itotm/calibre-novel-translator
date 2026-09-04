@@ -284,7 +284,7 @@ class NovelTranslationWorker(QObject):
         ctx = ContextManager(
             cache,
             glossary_max_entries=int(
-                get_config().get('novel_glossary_max_entries', 200) or 0),
+                get_config().get('novel_glossary_max_entries', 500) or 0),
         ).load()
 
         novel_config = get_novel_config()

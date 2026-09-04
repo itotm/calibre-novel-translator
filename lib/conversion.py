@@ -194,7 +194,7 @@ def convert_book_novel(
                 cache,
                 glossary_max_entries=int(
                     (novel_config or {}).get(
-                        'novel_glossary_max_entries', 200) or 0),
+                        'novel_glossary_max_entries', 500) or 0),
             ).load()
 
             # 5. Non-chapter paragraphs (metadata, TOC titles): translate
@@ -434,23 +434,23 @@ def get_novel_config():
     """
     config = get_config()
     return {
-        'novel_chunk_tokens': config.get('novel_chunk_tokens', 12000),
+        'novel_chunk_tokens': config.get('novel_chunk_tokens', 50000),
         'novel_max_paragraphs_per_chunk': config.get(
-            'novel_max_paragraphs_per_chunk', 80),
+            'novel_max_paragraphs_per_chunk', 400),
         'novel_overlap_paragraphs': config.get(
             'novel_overlap_paragraphs', 3),
         'novel_structured_output': config.get(
             'novel_structured_output', 'auto'),
         'novel_front_matter_min_chars': config.get(
             'novel_front_matter_min_chars', 100),
-        'novel_context_tokens': config.get('novel_context_tokens', 1500),
-        'novel_summary_tokens': config.get('novel_summary_tokens', 400),
+        'novel_context_tokens': config.get('novel_context_tokens', 8000),
+        'novel_summary_tokens': config.get('novel_summary_tokens', 600),
         'novel_glossary_max_entries': config.get(
-            'novel_glossary_max_entries', 200),
+            'novel_glossary_max_entries', 500),
         'novel_min_chars_for_context': config.get(
             'novel_min_chars_for_context', 300),
         'novel_summary_input_max_chars': config.get(
-            'novel_summary_input_max_chars', 12000),
+            'novel_summary_input_max_chars', 60000),
         'novel_translation_prompt': config.get(
             'novel_translation_prompt', None),
         'novel_summary_prompt': config.get(

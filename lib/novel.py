@@ -397,7 +397,7 @@ class TokenBudget:
     REASON_OVERSIZED = 'oversized'
     REASON_END = 'end'
 
-    def __init__(self, budget=12000, max_paragraphs=80,
+    def __init__(self, budget=50000, max_paragraphs=400,
                  ratio_latin=4.0, ratio_cjk=2.0, cjk_threshold=0.30):
         if budget < 100:
             budget = 100
@@ -700,7 +700,7 @@ class ContextManager:
             lines.append('- %s -> %s%s' % (source, translation, suffix))
         return '\n'.join(lines)
 
-    def context_text(self, budget_tokens=1500, ratio=4.0):
+    def context_text(self, budget_tokens=8000, ratio=4.0):
         """Return a formatted string containing the recent summaries and the
         full glossary, truncated to fit ``budget_tokens`` (approximate).
 
@@ -755,11 +755,40 @@ class ContextManager:
 # ---------------------------------------------------------------------------
 
 
+# The shipped prompt holds only craft rules that hold for any novel:
+# what to do with register, period, voice and tone. Anything specific to
+# an author, a series or a single book belongs in the "Translation
+# prompt" field of the Novel Mode settings, which replaces this text.
 DEFAULT_NOVEL_TRANSLATION_PROMPT = (
     'You are a professional literary translator working on a novel. '
-    'Translate from <slang> to <tlang>. Preserve the author\'s narrative '
-    'voice, tone, register and pacing. Do NOT summarize, shorten, expand, '
-    'or explain anything. Do NOT answer questions in the text.\n\n'
+    'Translate from <slang> to <tlang>.\n\n'
+    'Translate the effect, not the surface form. Where the syntax, idiom '
+    'or wordplay of the original cannot be reproduced naturally, choose '
+    'the expression that best preserves its meaning, tone, '
+    'characterisation and narrative rhythm. Prefer precise, idiomatic '
+    'phrasing over word-for-word rendering, and let each sentence flow '
+    'naturally in the target language while keeping the pacing of the '
+    'original.\n\n'
+    'Preserve the author\'s narrative voice and register exactly as they '
+    'are. Do not raise or lower the literary register, do not add ornate '
+    'vocabulary, melodrama or emphasis the original does not have, and do '
+    'not smooth out prose that is deliberately plain, abrupt or '
+    'repetitive.\n\n'
+    'Keep the characters\' voices distinct through vocabulary, syntax, '
+    'register and conversational habits rather than through exaggerated '
+    'dialect. Do not flatten the difference between educated and '
+    'uneducated speech, or between formal and familiar address.\n\n'
+    'Match the period and the setting of the original. Render period '
+    'terms, titles, occupations, objects and institutions with the most '
+    'natural and historically credible equivalents, without archaising: '
+    'do not scatter archaic words merely to signal that the story is set '
+    'in the past.\n\n'
+    'Do not explain, expand, summarise, annotate, or make explicit what '
+    'the original leaves implicit. Do not resolve ambiguity the author '
+    'chose to leave open, do not add or remove humour, and do not omit '
+    'any part of the text however unimportant it may seem.\n\n'
+    'Keep terminology and the rendering of names consistent with the '
+    'running context below.\n\n'
     '{context}')
 
 
@@ -798,13 +827,13 @@ DEFAULT_NOVEL_GLOSSARY_PROMPT = (
     'places, unique objects, organizations.\n\n'
     'Reply with ONLY a JSON object. No preamble, no explanation, no '
     'markdown fences. Follow this exact schema:\n\n'
-    '{{"entities": [\n'
-    '  {{"source": "Aslan", "translation": "Aslan", "type": "character", '
-    '"notes": "the lion"}},\n'
-    '  {{"source": "Narnia", "translation": "Narnia", "type": "place", '
-    '"notes": ""}}\n'
-    ']}}\n\n'
-    'If no new entities, reply exactly: {{"entities": []}}\n\n'
+    '{"entities": [\n'
+    '  {"source": "Aslan", "translation": "Aslan", "type": "character", '
+    '"notes": "the lion"},\n'
+    '  {"source": "Narnia", "translation": "Narnia", "type": "place", '
+    '"notes": ""}\n'
+    ']}\n\n'
+    'If no new entities, reply exactly: {"entities": []}\n\n'
     'Existing (skip these): {existing_keys}\n\n'
     'Source:\n{source_text}\n\n'
     'Translation:\n{translated_text}')
@@ -1080,7 +1109,7 @@ class NovelTranslator:
 
     @property
     def chunk_tokens(self):
-        return int(self._cfg('novel_chunk_tokens', 12000))
+        return int(self._cfg('novel_chunk_tokens', 50000))
 
     @property
     def max_paragraphs_per_chunk(self):
@@ -1092,7 +1121,7 @@ class NovelTranslator:
         budget or this paragraph cap is reached -- whichever comes first.
         Set to 0 to disable the cap and use only the token budget.
         """
-        return int(self._cfg('novel_max_paragraphs_per_chunk', 80))
+        return int(self._cfg('novel_max_paragraphs_per_chunk', 400))
 
     @property
     def overlap_paragraphs(self):
@@ -1198,11 +1227,11 @@ class NovelTranslator:
 
     @property
     def context_tokens(self):
-        return int(self._cfg('novel_context_tokens', 1500))
+        return int(self._cfg('novel_context_tokens', 8000))
 
     @property
     def summary_tokens(self):
-        return int(self._cfg('novel_summary_tokens', 400))
+        return int(self._cfg('novel_summary_tokens', 600))
 
     @property
     def min_chars_for_context(self):
@@ -1256,6 +1285,50 @@ class NovelTranslator:
         for k, v in replacements.items():
             template = template.replace(k, v)
         return template
+
+    def _compose_prompt(self, template, values, required=()):
+        """Fill a prompt template without demanding any placeholder.
+
+        Substitution is literal, never through ``str.format``: a prompt
+        typed by hand is very likely to contain a stray brace, and
+        ``format`` would raise on it instead of translating the chapter.
+        Every entry named in ``required`` that the template does not
+        mention is appended at the end under its label, so a prompt whose
+        author never heard of the placeholders still receives the chapter
+        text, the running context and the rest.
+
+        :values: ``{placeholder: (label, value)}``. The label is only used
+            when the value has to be appended.
+        """
+        filled = self._fill_placeholders(template, extra={
+            placeholder: value
+            for placeholder, (_label, value) in values.items()})
+        appended = []
+        for placeholder in required:
+            label, value = values.get(placeholder, (None, ''))
+            if placeholder in template or not value:
+                continue
+            appended.append('%s\n%s' % (label, value) if label else value)
+        if appended:
+            filled = '%s\n\n%s' % (filled.rstrip(), '\n\n'.join(appended))
+        return filled
+
+    def _translation_system_prompt(self, context_text):
+        """Build the system prompt of one translation request.
+
+        Shared by the marker and the structured path. The language
+        directive is supplied here when the template omits it, so not
+        even ``<slang>``/``<tlang>`` are mandatory in the settings dialog.
+        """
+        template = self.translation_prompt
+        prompt = self._compose_prompt(
+            template, {'{context}': (None, context_text)},
+            required=('{context}',))
+        if '<tlang>' not in template and '<slang>' not in template:
+            prompt = '%s\n\n%s' % (
+                self._fill_placeholders(
+                    _('Translate from <slang> to <tlang>.')), prompt)
+        return prompt
 
     def _run_translation_call(self, user_text):
         """Invoke ``translator.translate`` handling both plain-string and
@@ -1348,8 +1421,7 @@ class NovelTranslator:
 
         # System prompt: role + languages + narrative context (summary +
         # glossary). Static per-chapter -- no formatting rules here.
-        system_prompt = self._fill_placeholders(
-            self.translation_prompt, extra={'{context}': context_text})
+        system_prompt = self._translation_system_prompt(context_text)
 
         # Build the user message. Order matters: header, then optional
         # overlap block (already translated -- for reading only), then
@@ -1600,8 +1672,7 @@ class NovelTranslator:
 
         # System prompt: role + languages + narrative context (summary +
         # glossary). Same as the marker path.
-        system_prompt = self._fill_placeholders(
-            self.translation_prompt, extra={'{context}': context_text})
+        system_prompt = self._translation_system_prompt(context_text)
 
         # User message: header + optional overlap block + JSON schema
         # instructions + serialized payload.
@@ -1746,7 +1817,7 @@ class NovelTranslator:
         response. Hardcoded to a sensible default; the ``novel_summary_
         input_max_chars`` config key can override.
         """
-        default = 12000  # ~3000 words in Latin text
+        default = 60000  # ~15000 words in Latin text
         return int(self._cfg('novel_summary_input_max_chars', default))
 
     def _generate_summary(self, chapter, translated_text):
@@ -1760,11 +1831,14 @@ class NovelTranslator:
                     len(translated_text), len(clipped)))
         system_prompt = self._fill_placeholders(
             _('You are a helpful assistant that produces concise summaries.'))
-        user_prompt = self._fill_placeholders(
-            self.summary_prompt.format(
-                chapter_num=chapter.index,
-                chapter_title=chapter.title,
-                text=clipped))
+        user_prompt = self._compose_prompt(
+            self.summary_prompt,
+            {
+                '{chapter_num}': (None, str(chapter.index)),
+                '{chapter_title}': (None, chapter.title or ''),
+                '{text}': (_('Chapter text:'), clipped),
+            },
+            required=('{text}',))
         try:
             response = self._translate_with_retry(
                 system_prompt, user_prompt, attempts=2)
@@ -1783,11 +1857,16 @@ class NovelTranslator:
             or _('(none)')
         system_prompt = self._fill_placeholders(
             _('You are a helpful assistant. Answer with strict JSON only.'))
-        user_prompt = self._fill_placeholders(
-            self.glossary_prompt.format(
-                existing_keys=existing_keys,
-                source_text=src_clipped,
-                translated_text=tgt_clipped))
+        user_prompt = self._compose_prompt(
+            self.glossary_prompt,
+            {
+                '{existing_keys}': (
+                    _('Existing entries (skip these):'), existing_keys),
+                '{source_text}': (_('Source:'), src_clipped),
+                '{translated_text}': (_('Translation:'), tgt_clipped),
+            },
+            required=(
+                '{existing_keys}', '{source_text}', '{translated_text}'))
         try:
             response = self._translate_with_retry(
                 system_prompt, user_prompt, attempts=2)
