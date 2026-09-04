@@ -40,6 +40,22 @@ from .exception import TranslationCanceled, TranslationFailed
 load_translations()  # type: ignore
 
 
+def model_text(message):
+    """Mark text that is sent to the model rather than shown to the user.
+
+    It is a no-op at runtime; what it does is keep the string out of the
+    translation catalogs. Prompt scaffolding must stay in one language,
+    and it is not the language of the interface: a translator meeting
+    these strings in a .po file has no way of telling them apart from
+    labels, and translating them would hand the model instructions in
+    one language wrapped around a prompt written in another.
+
+    User-facing text -- log lines, progress, errors -- keeps using
+    ``_()`` as usual.
+    """
+    return message
+
+
 # ---------------------------------------------------------------------------
 # Chapter model
 # ---------------------------------------------------------------------------
@@ -259,7 +275,7 @@ class ChapterBuilder:
                 continue
             by_page.setdefault(p.page, []).append(p)
         for i, pid in enumerate(self.ordered_page_ids, start=1):
-            title = _('Chapter {}').format(i)
+            title = model_text('Chapter {}').format(i)
             content_ps = [p for p in by_page.get(pid, []) if not p.ignored]
             if content_ps:
                 first = (content_ps[0].original or '').strip()
@@ -282,7 +298,8 @@ class ChapterBuilder:
             boundaries = self._boundaries_from_files()
         if not boundaries and self.ordered_page_ids:
             # Extreme fallback: single chapter with everything.
-            boundaries = [(self.ordered_page_ids[0], _('Chapter 1'))]
+            boundaries = [
+                (self.ordered_page_ids[0], model_text('Chapter 1'))]
         return boundaries
 
     # -- assembly ----------------------------------------------------------
@@ -305,7 +322,7 @@ class ChapterBuilder:
         for chap_i, (_pos, bid, title) in enumerate(
                 boundary_positions, start=1):
             chapter_titles[chap_i] = (
-                title or _('Chapter {}').format(chap_i))
+                title or model_text('Chapter {}').format(chap_i))
 
         for idx, pid in enumerate(self.ordered_page_ids):
             # Find which chapter this page belongs to: the greatest chapter
@@ -669,11 +686,12 @@ class ContextManager:
 
     def _format_summaries(self, summaries):
         if not summaries:
-            return _('(none)')
+            return model_text('(none)')
         lines = []
         for s in summaries:
             title = s.get('title') or ''
-            head = _('Chapter {n}').format(n=s.get('chapter', '?'))
+            head = model_text('Chapter {n}').format(
+                n=s.get('chapter', '?'))
             if title:
                 head = '%s - %s' % (head, title)
             body = (s.get('summary') or '').strip()
@@ -685,7 +703,7 @@ class ContextManager:
 
     def _format_glossary(self, glossary):
         if not glossary:
-            return _('(empty)')
+            return model_text('(empty)')
         lines = []
         for source, entry in glossary.items():
             translation = entry.get('translation', '')
@@ -717,9 +735,9 @@ class ContextManager:
         summaries_text = self._format_summaries(summaries)
 
         combined = (
-            _('Story so far (previous chapters summary):') + '\n'
+            model_text('Story so far (previous chapters summary):') + '\n'
             + summaries_text + '\n\n'
-            + _('Glossary (use these exact translations):') + '\n'
+            + model_text('Glossary (use these exact translations):') + '\n'
             + glossary_text)
 
         if len(combined) <= max_chars:
@@ -730,9 +748,9 @@ class ContextManager:
             summaries = summaries[1:]
             summaries_text = self._format_summaries(summaries)
             combined = (
-                _('Story so far (previous chapters summary):') + '\n'
+                model_text('Story so far (previous chapters summary):') + '\n'
                 + summaries_text + '\n\n'
-                + _('Glossary (use these exact translations):') + '\n'
+                + model_text('Glossary (use these exact translations):') + '\n'
                 + glossary_text)
             if len(combined) <= max_chars:
                 return combined
@@ -741,11 +759,12 @@ class ContextManager:
         glossary_lines = glossary_text.split('\n')
         while glossary_lines and len(combined) > max_chars:
             glossary_lines.pop()
-            glossary_text = '\n'.join(glossary_lines) or _('(truncated)')
+            glossary_text = '\n'.join(glossary_lines) \
+                or model_text('(truncated)')
             combined = (
-                _('Story so far (previous chapters summary):') + '\n'
+                model_text('Story so far (previous chapters summary):') + '\n'
                 + summaries_text + '\n\n'
-                + _('Glossary (use these exact translations):') + '\n'
+                + model_text('Glossary (use these exact translations):') + '\n'
                 + glossary_text)
         return combined
 
@@ -1327,7 +1346,8 @@ class NovelTranslator:
         if '<tlang>' not in template and '<slang>' not in template:
             prompt = '%s\n\n%s' % (
                 self._fill_placeholders(
-                    _('Translate from <slang> to <tlang>.')), prompt)
+                    model_text('Translate from <slang> to <tlang>.')),
+                prompt)
         return prompt
 
     def _run_translation_call(self, user_text):
@@ -1426,7 +1446,7 @@ class NovelTranslator:
         # Build the user message. Order matters: header, then optional
         # overlap block (already translated -- for reading only), then
         # format instructions + the tagged source paragraphs.
-        header = _('Chapter {n}: "{title}" (chunk {c}/{t})').format(
+        header = model_text('Chapter {n}: "{title}" (chunk {c}/{t})').format(
             n=chapter_num, title=chapter_title,
             c=chunk_num, t=total_chunks)
 
@@ -1437,11 +1457,12 @@ class NovelTranslator:
             if joined:
                 overlap_block = (
                     '\n\n'
-                    + _('--- Context from previous paragraphs '
+                    + model_text(
+                        '--- Context from previous paragraphs '
                         '(already translated -- do NOT modify or '
                         'retranslate this section) ---')
                     + '\n' + joined + '\n'
-                    + _('--- End of context ---'))
+                    + model_text('--- End of context ---'))
 
         format_body = self._fill_placeholders(
             DEFAULT_NOVEL_FORMAT_INSTRUCTIONS, extra={'{text}': tagged})
@@ -1467,7 +1488,8 @@ class NovelTranslator:
             # consistent.
             fixup_tagged = self._retag(fixup_paras, missing)
             fixup_body = self._fill_placeholders(
-                _('The previous response was incomplete. Translate only '
+                model_text(
+                    'The previous response was incomplete. Translate only '
                   'the numbered paragraphs below, keeping the exact same '
                   '[N] markers with the same numbers, in the same order. '
                   'Reply with the numbered paragraphs only.\n\n'
@@ -1676,7 +1698,7 @@ class NovelTranslator:
 
         # User message: header + optional overlap block + JSON schema
         # instructions + serialized payload.
-        header = _('Chapter {n}: "{title}" (chunk {c}/{t})').format(
+        header = model_text('Chapter {n}: "{title}" (chunk {c}/{t})').format(
             n=chapter_num, title=chapter_title,
             c=chunk_num, t=total_chunks)
 
@@ -1687,16 +1709,17 @@ class NovelTranslator:
             if joined:
                 overlap_block = (
                     '\n\n'
-                    + _('--- Context from previous paragraphs '
+                    + model_text(
+                        '--- Context from previous paragraphs '
                         '(already translated -- do NOT modify or '
                         'retranslate this section) ---')
                     + '\n' + joined + '\n'
-                    + _('--- End of context ---'))
+                    + model_text('--- End of context ---'))
 
         payload = self._build_structured_payload(chunk_paragraphs, indices)
         payload_json = json.dumps(payload, ensure_ascii=False, indent=2)
 
-        instructions = _(
+        instructions = model_text(
             'You will receive a JSON object with a list of numbered '
             'source paragraphs. Reply with a JSON object of the same '
             'shape, where each paragraph carries a "translation" field '
@@ -1731,7 +1754,8 @@ class NovelTranslator:
             fixup_json = json.dumps(
                 fixup_payload, ensure_ascii=False, indent=2)
             fixup_body = (
-                _('The previous JSON response was incomplete. Reply '
+                model_text(
+                    'The previous JSON response was incomplete. Reply '
                   'with a JSON object translating ONLY the paragraphs '
                   'below. Same shape as before: "paragraphs" array of '
                   '{"n": int, "translation": string}. Return JSON only.')
@@ -1829,14 +1853,15 @@ class NovelTranslator:
             self.log(_(
                 'Summary input truncated: {} -> {} chars.').format(
                     len(translated_text), len(clipped)))
-        system_prompt = self._fill_placeholders(
-            _('You are a helpful assistant that produces concise summaries.'))
+        system_prompt = self._fill_placeholders(model_text(
+            'You are a helpful assistant that produces concise '
+            'summaries.'))
         user_prompt = self._compose_prompt(
             self.summary_prompt,
             {
                 '{chapter_num}': (None, str(chapter.index)),
                 '{chapter_title}': (None, chapter.title or ''),
-                '{text}': (_('Chapter text:'), clipped),
+                '{text}': (model_text('Chapter text:'), clipped),
             },
             required=('{text}',))
         try:
@@ -1854,16 +1879,19 @@ class NovelTranslator:
         src_clipped = self._head_and_tail(source_text, max_chars)
         tgt_clipped = self._head_and_tail(translated_text, max_chars)
         existing_keys = ', '.join(sorted(self.ctx.get_glossary().keys())) \
-            or _('(none)')
-        system_prompt = self._fill_placeholders(
-            _('You are a helpful assistant. Answer with strict JSON only.'))
+            or model_text('(none)')
+        system_prompt = self._fill_placeholders(model_text(
+            'You are a helpful assistant. Answer with strict JSON '
+            'only.'))
         user_prompt = self._compose_prompt(
             self.glossary_prompt,
             {
                 '{existing_keys}': (
-                    _('Existing entries (skip these):'), existing_keys),
-                '{source_text}': (_('Source:'), src_clipped),
-                '{translated_text}': (_('Translation:'), tgt_clipped),
+                    model_text('Existing entries (skip these):'),
+                    existing_keys),
+                '{source_text}': (model_text('Source:'), src_clipped),
+                '{translated_text}': (
+                    model_text('Translation:'), tgt_clipped),
             },
             required=(
                 '{existing_keys}', '{source_text}', '{translated_text}'))
