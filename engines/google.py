@@ -333,6 +333,10 @@ class GeminiTranslate(GenAI):
 
     structured_output_mode = 'schema'
 
+    # Google Search grounding, used once per book by Novel Mode to
+    # research how the author writes.
+    web_search_mode = 'tool'
+
     prompt = (
         'You are a meticulous translator who translates any given content. '
         'Translate the given content from <slang> to <tlang> only. Do not '
@@ -444,11 +448,21 @@ class GeminiTranslate(GenAI):
         body['generationConfig'] = gen_config
         return json.dumps(body)
 
+    def get_body_for_search(self, text):
+        """Attach Google Search grounding to an otherwise normal body.
+
+        https://ai.google.dev/gemini-api/docs/google-search
+        """
+        body = json.loads(self.get_body(text))
+        body['tools'] = [{'google_search': {}}]
+        return json.dumps(body)
+
     def get_result(self, response):
         if self.stream:
             return self._parse_stream(response)
         parts = json.loads(response)['candidates'][0]['content']['parts']
-        return ''.join([part['text'] for part in parts])
+        # A grounded reply mixes in parts that carry no text of their own.
+        return ''.join([part['text'] for part in parts if 'text' in part])
 
     def _parse_stream(self, response):
         while True:
@@ -466,6 +480,7 @@ class GeminiTranslate(GenAI):
                 content = candidate['content']
                 if 'parts' in content.keys():
                     for part in content['parts']:
-                        yield part['text']
+                        if 'text' in part:
+                            yield part['text']
                 if candidate.get('finishReason') == 'STOP':
                     break

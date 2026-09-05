@@ -544,6 +544,7 @@ INFO_NOVEL_SUMMARIES = 'novel_summaries'
 INFO_NOVEL_GLOSSARY = 'novel_glossary'
 INFO_NOVEL_PROGRESS = 'novel_progress'
 INFO_NOVEL_CHAPTERS = 'novel_chapters_meta'
+INFO_NOVEL_STYLE = 'novel_author_style'
 
 
 # Words of a glossary key that are worth matching on their own. Four
@@ -574,6 +575,11 @@ class ContextManager:
       * ``summaries``: an ordered list of dicts
         ``{"chapter": int, "title": str, "summary": str}``, one per chapter
         that has already been translated.
+      * ``style``: a translator's brief on how the book is written,
+        researched once before the first chapter (see
+        ``NovelTranslator._ensure_author_style``) and reused for every
+        chapter afterwards. Empty when the research is off, impossible
+        or came back with nothing.
       * ``glossary``: a dict mapping the original name (source language) to
         a dict ``{"translation": str, "type": str, "notes": str}``. The type
         is a free-form label (character/place/object/other/...); the notes
@@ -598,6 +604,7 @@ class ContextManager:
         self.summaries_keep_last = summaries_keep_last
         self.summaries = []
         self.glossary = {}
+        self.style = ''
         self.progress = 0
 
     # -- persistence -------------------------------------------------------
@@ -619,6 +626,9 @@ class ContextManager:
         except (ValueError, TypeError):
             self.glossary = {}
 
+        raw = self.cache.get_info(INFO_NOVEL_STYLE)
+        self.style = raw if isinstance(raw, str) else ''
+
         raw = self.cache.get_info(INFO_NOVEL_PROGRESS)
         try:
             self.progress = int(raw) if raw else 0
@@ -635,6 +645,7 @@ class ContextManager:
         self.cache.set_info(
             INFO_NOVEL_GLOSSARY, json.dumps(
                 self.glossary, ensure_ascii=False))
+        self.cache.set_info(INFO_NOVEL_STYLE, self.style or '')
         self.cache.set_info(INFO_NOVEL_PROGRESS, str(self.progress))
 
     # -- getters -----------------------------------------------------------
@@ -647,6 +658,17 @@ class ContextManager:
 
     def get_glossary(self):
         return dict(self.glossary)
+
+    def get_style(self):
+        return self.style or ''
+
+    def set_style(self, text):
+        """Store the author brief. Persisted like the rest of the context,
+        so a resumed run reuses it instead of paying for the research
+        again."""
+        self.style = (text or '').strip()
+        self._persist()
+        return self.style
 
     def glossary_for(self, text=None, limit=0):
         """Return the glossary entries that ``text`` actually mentions.
@@ -744,6 +766,7 @@ class ContextManager:
     def reset(self):
         self.summaries = []
         self.glossary = {}
+        self.style = ''
         self.progress = 0
         self._persist()
 
@@ -852,36 +875,83 @@ class ContextManager:
 # what to do with register, period, voice and tone. Anything specific to
 # an author, a series or a single book belongs in the "Translation
 # prompt" field of the Novel Mode settings, which replaces this text.
+#
+# The three placeholders at the end are filled by
+# NovelTranslator._translation_system_prompt and are ordered by how often
+# they change: the dialogue rules and the author brief are computed once
+# for the whole book, the running context changes with every chapter. A
+# provider's prefix cache can only reuse what comes before the first byte
+# that differs, so anything constant has to sit above {context}.
 DEFAULT_NOVEL_TRANSLATION_PROMPT = (
-    'You are a professional literary translator working on a novel. '
-    'Translate from <slang> to <tlang>.\n\n'
-    'Translate the effect, not the surface form. Where the syntax, idiom '
-    'or wordplay of the original cannot be reproduced naturally, choose '
-    'the expression that best preserves its meaning, tone, '
-    'characterisation and narrative rhythm. Prefer precise, idiomatic '
-    'phrasing over word-for-word rendering, and let each sentence flow '
-    'naturally in the target language while keeping the pacing of the '
+    'You are a professional literary translator. You are translating a '
+    'novel from <slang> to <tlang>, chapter by chapter, and the result '
+    'has to read like a book published in <tlang>: real prose in the '
+    'target language that still says exactly what the author said, no '
+    'more and no less.\n\n'
+
+    'Meaning over form. Translate the effect, not the surface. Where the '
+    'syntax, idiom, wordplay or sound of the original cannot be '
+    'reproduced naturally, choose the expression that best preserves its '
+    'meaning, tone, characterisation and narrative rhythm. Prefer '
+    'precise, idiomatic phrasing over word-for-word rendering, and let '
+    'each sentence flow naturally in <tlang> while keeping the pacing, '
+    'the sentence lengths and the paragraph movement of the '
     'original.\n\n'
-    'Preserve the author\'s narrative voice and register exactly as they '
-    'are. Do not raise or lower the literary register, do not add ornate '
-    'vocabulary, melodrama or emphasis the original does not have, and do '
-    'not smooth out prose that is deliberately plain, abrupt or '
-    'repetitive.\n\n'
-    'Keep the characters\' voices distinct through vocabulary, syntax, '
-    'register and conversational habits rather than through exaggerated '
-    'dialect. Do not flatten the difference between educated and '
-    'uneducated speech, or between formal and familiar address.\n\n'
-    'Match the period and the setting of the original. Render period '
-    'terms, titles, occupations, objects and institutions with the most '
-    'natural and historically credible equivalents, without archaising: '
-    'do not scatter archaic words merely to signal that the story is set '
-    'in the past.\n\n'
-    'Do not explain, expand, summarise, annotate, or make explicit what '
-    'the original leaves implicit. Do not resolve ambiguity the author '
-    'chose to leave open, do not add or remove humour, and do not omit '
-    'any part of the text however unimportant it may seem.\n\n'
-    'Keep terminology and the rendering of names consistent with the '
-    'running context below.\n\n'
+
+    'Voice and register. Preserve the author\'s narrative voice and '
+    'register exactly as they are. Do not raise or lower the literary '
+    'register, do not add ornate vocabulary, melodrama or emphasis the '
+    'original does not have, and do not smooth out prose that is '
+    'deliberately plain, abrupt, dense or repetitive. When the author '
+    'repeats a word, repeat it: a deliberate repetition is not a mistake '
+    'to be varied away. Keep the same person, the same tense and the '
+    'same distance between narrator and reader, unless <tlang> makes '
+    'that impossible.\n\n'
+
+    'Characters. Keep the characters\' voices distinct through '
+    'vocabulary, syntax, register and conversational habits rather than '
+    'through exaggerated dialect. Do not flatten the difference between '
+    'educated and uneducated speech, or between formal and familiar '
+    'address. Where <tlang> distinguishes formal from familiar address, '
+    'choose the form the relationship between the two characters implies '
+    'and keep it stable for that pair until the story itself changes '
+    'it.\n\n'
+
+    'Nothing invented, nothing lost. Do not explain, expand, summarise, '
+    'annotate, or make explicit what the original leaves implicit. Do '
+    'not resolve ambiguity the author chose to leave open, do not add or '
+    'remove humour, and do not omit any part of the text however '
+    'unimportant it may seem. Invent nothing: not a detail, not a '
+    'clarifying subject, not a connective the text does not imply. When '
+    'a passage is obscure, elliptical or looks damaged, translate it as '
+    'it stands instead of repairing it, and never leave a note, a '
+    'bracket or a remark of your own inside the text.\n\n'
+
+    'Period and setting. Match the period and the setting of the '
+    'original. Render period terms, titles, occupations, objects, '
+    'currencies, institutions and units of measure with the most natural '
+    'and historically credible equivalents, without archaising: do not '
+    'scatter archaic words merely to signal that the story is set in the '
+    'past, and do not modernise an idiom into something that could only '
+    'be said today. Leave units, dates and measurements as the author '
+    'wrote them; do not convert them.\n\n'
+
+    'Names and terms. Keep names, places and recurring terms exactly as '
+    'the running context below renders them, and consistent with '
+    'themselves from one chapter to the next. Leave a proper name in its '
+    'original form unless the glossary gives another rendering or <tlang> '
+    'has a long-established equivalent. Whatever the author left in a '
+    'foreign language stays in that language.\n\n'
+
+    'Typography. Reproduce the punctuation and the typography of the '
+    'source as closely as <tlang> allows: paragraph breaks, italics, '
+    'capitals, ellipses, dashes and the way emphasis is marked. Change '
+    'only what would be plainly wrong in <tlang>.\n\n'
+
+    '{dialogue}\n\n'
+
+    '{style}\n\n'
+
     '{context}')
 
 
@@ -974,6 +1044,195 @@ DEFAULT_NOVEL_CONTEXT_PROMPT = (
     'Already known (skip these): {existing_keys}\n\n'
     'Source:\n{source_text}\n\n'
     'Translation:\n{translated_text}')
+
+
+# Asked once per book, before the first chapter, when
+# ``novel_author_style`` allows it. The answer is a translator's brief on
+# how the book is written; it is stored with the summaries and the
+# glossary and prepended to the system prompt of every chapter.
+#
+# The escape hatch matters more than the brief: a model that has never
+# heard of the author will happily invent a manner for them, and a made
+# up brief would steer every paragraph of the book. Hence the exact
+# ``NO INFORMATION`` reply, which the pipeline recognises and discards.
+NO_AUTHOR_INFORMATION = 'NO INFORMATION'
+
+DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT = (
+    'You are preparing a brief for the translator of a novel. Describe '
+    'how this particular book is written, so that its manner can be '
+    'reproduced in <tlang>.\n\n'
+    'Search the web and rely on what is actually documented about this '
+    'author and this book: criticism, reviews, translators\' notes, '
+    'encyclopaedia entries, publisher copy. Prefer sources that discuss '
+    'the prose itself rather than the plot.\n\n'
+    'Cover, in this order and only where the sources support it: the '
+    'genre and the period the book belongs to; the narrative voice and '
+    'the point of view; the texture of the sentences (long or short, '
+    'plain or ornate, paratactic or heavily subordinated); the level of '
+    'the vocabulary; how dialogue is written and how much of the book is '
+    'dialogue; the use of humour, irony, dialect, slang or period '
+    'language; recurring stylistic habits worth preserving; and anything '
+    'translators of this author are known to get wrong.\n\n'
+    'Write 150 to 300 words of plain prose in <tlang>. Describe only '
+    'what you can support. Do not summarise the plot, do not review or '
+    'praise the book, do not give advice that would apply to any novel, '
+    'and invent nothing. If you cannot find reliable information about '
+    'this author and this book, reply with exactly: %s\n\n'
+    'Reply with the brief itself and nothing else: no preamble, no '
+    'headings, no lists, no citations, no closing remarks.\n\n'
+    'Author: {author}\n'
+    'Book: {title}\n'
+    'Original language: <slang>\n'
+    'Translation language: <tlang>') % NO_AUTHOR_INFORMATION
+
+
+# ---------------------------------------------------------------------------
+# Dialogue punctuation
+# ---------------------------------------------------------------------------
+#
+# A chapter is translated by a handful of independent requests, and
+# nothing in them says how direct speech is punctuated. Left to itself a
+# model picks whatever its target language usually does -- and picks it
+# again, differently, three chapters later: the same book came back with
+# guillemets in one chapter and straight quotes in the next.
+#
+# The source already answers the question, so it is answered once for the
+# whole book by counting marks over every source paragraph, and the
+# answer is stated in the system prompt of every single request. It is
+# deliberately not persisted: the same book yields the same counts, so
+# recomputing on a resumed run gives the same rule.
+
+# Opening mark -> how to describe the pair to the model. Only the opening
+# mark is counted: a closing one that is also an apostrophe would count
+# every contraction in the book.
+DIALOGUE_MARKS = (
+    ('«', '«…»', 'guillemets'),
+    ('“', '“…”', 'curly double quotation marks'),
+    ('„', '„…“', 'low-high double quotation marks'),
+    ('"', '"…"', 'straight double quotation marks'),
+    ('‘', '‘…’', 'curly single quotation marks'),
+    ('‹', '‹…›', 'single guillemets'),
+    ('「', '「…」', 'corner brackets'),
+    ('『', '『…』', 'white corner brackets'),
+)
+
+# Dashes that open a line of dialogue when they open a paragraph. Only
+# that position is counted: the same characters in the middle of a
+# sentence are parenthetical, not speech.
+DIALOGUE_DASHES = ('—', '–', '―', '-')
+
+# Below this many occurrences a mark is noise -- a stray quotation in an
+# epigraph, a measurement in inches -- rather than the book's convention.
+_DIALOGUE_MIN_COUNT = 6
+# A second mark is reported as the nested one only when it is common
+# enough to be a convention of its own rather than an accident.
+_DIALOGUE_NESTED_RATIO = 0.05
+# Share of paragraphs that must open with a dash before dash dialogue is
+# reported. Real dash dialogue runs through whole conversations.
+_DIALOGUE_DASH_RATIO = 0.03
+
+
+def detect_dialogue_style(texts):
+    """Return how the source punctuates direct speech.
+
+    :texts: an iterable of source paragraph strings.
+
+    The result is a dict with ``primary`` and ``nested`` (the opening
+    mark of the most and second-most frequent pair, or None), ``dash``
+    (whether paragraphs open a line of speech with a dash) and ``counts``
+    (the raw tally, for the log). Everything is None/False/empty for a
+    text that punctuates nothing, which is a normal answer: a book with
+    no dialogue at all needs no rule.
+    """
+    counts = {}
+    dash_paragraphs = 0
+    paragraphs = 0
+    for text in texts:
+        if not text:
+            continue
+        paragraphs += 1
+        for mark, _pair, _name in DIALOGUE_MARKS:
+            found = text.count(mark)
+            if found:
+                counts[mark] = counts.get(mark, 0) + found
+        head = text.lstrip()
+        if len(head) > 1 and head[0] in DIALOGUE_DASHES \
+                and head[1] not in DIALOGUE_DASHES:
+            dash_paragraphs += 1
+    ranked = [mark for mark, total in sorted(
+        counts.items(), key=lambda item: (-item[1], item[0]))
+        if total >= _DIALOGUE_MIN_COUNT]
+    primary = ranked[0] if ranked else None
+    nested = None
+    if primary and len(ranked) > 1 \
+            and counts[ranked[1]] >= counts[primary] * _DIALOGUE_NESTED_RATIO:
+        nested = ranked[1]
+    dash = bool(paragraphs) and \
+        dash_paragraphs >= max(3, paragraphs * _DIALOGUE_DASH_RATIO)
+    return {
+        'primary': primary,
+        'nested': nested,
+        'dash': dash,
+        'counts': counts,
+        'dash_paragraphs': dash_paragraphs,
+        'paragraphs': paragraphs,
+    }
+
+
+# Two placeholders of the shipped prompt are empty on most books --
+# there is no author brief, or the source punctuates nothing -- and a
+# literal substitution would leave their blank lines behind.
+_BLANK_LINES_RE = re.compile(r'\n{3,}')
+
+
+def collapse_blank_lines(text):
+    return _BLANK_LINES_RE.sub('\n\n', text or '').strip()
+
+
+def _dialogue_pair(mark):
+    for opening, pair, name in DIALOGUE_MARKS:
+        if opening == mark:
+            return pair, name
+    return mark, mark
+
+
+def dialogue_instruction(style):
+    """Turn :func:`detect_dialogue_style` output into prompt text.
+
+    Returns '' when the source shows no convention worth stating, so the
+    placeholder simply disappears from the system prompt.
+    """
+    if not style:
+        return ''
+    primary = style.get('primary')
+    if not (primary or style.get('dash')):
+        return ''
+    parts = [model_text('Dialogue punctuation.')]
+    if primary:
+        pair, name = _dialogue_pair(primary)
+        parts.append(model_text(
+            'The source marks direct speech with {name} ({pair}). Use '
+            'exactly those characters in the translation, everywhere, '
+            'even where the target language would normally prefer '
+            'others.').format(name=name, pair=pair))
+    nested = style.get('nested')
+    if nested:
+        pair, name = _dialogue_pair(nested)
+        parts.append(model_text(
+            'A quotation inside a line of speech is marked with {name} '
+            '({pair}); keep that distinction.').format(
+                name=name, pair=pair))
+    if style.get('dash'):
+        parts.append(model_text(
+            'Lines of dialogue that open with a dash in the source open '
+            'with the same dash in the translation.'))
+    parts.append(model_text(
+        'This is the convention of the whole book. Follow it in every '
+        'chapter, whatever a particular passage in front of you happens '
+        'to use, and never switch to another set of marks partway '
+        'through.'))
+    return ' '.join(parts)
+
 
 
 # ---------------------------------------------------------------------------
@@ -1280,6 +1539,12 @@ class NovelTranslator:
         # chunk budget. Reset per instance.
         self._structured_choice_logged = False
         self._chunk_budget_logged = False
+        # Computed once per book, lazily: the dialogue rule read off the
+        # source, and the author brief (researched or read back from the
+        # context). None means "not worked out yet", '' means "worked
+        # out, and there is nothing to say".
+        self._dialogue_rules = None
+        self._author_style = None
 
     # -- setters (mirroring lib.translation.Translation) -------------------
 
@@ -1529,6 +1794,75 @@ class NovelTranslator:
         return value or DEFAULT_NOVEL_CONTEXT_PROMPT
 
     @property
+    def author_style_prompt(self):
+        value = self._cfg('novel_author_style_prompt', None)
+        return value or DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT
+
+    @property
+    def author_style_setting(self):
+        """Whether the book gets a brief on how its author writes.
+
+        Values:
+          ``'auto'``  -- research it once before the first chapter,
+                         searching the web when the engine can and
+                         falling back to what the model already knows
+                         when it cannot. The default.
+          ``'model'`` -- ask the model, never search the web. Cheaper,
+                         and the only option that costs nothing extra on
+                         a gateway that bills search results.
+          ``'off'``   -- do not ask at all.
+        """
+        value = self._cfg('novel_author_style', 'auto')
+        if value not in ('auto', 'model', 'off'):
+            value = 'auto'
+        return value
+
+    @property
+    def dialogue_convention(self):
+        """Whether the system prompt states how the source punctuates
+        direct speech. ``'auto'`` (the default) works it out from the
+        source text; ``'off'`` says nothing and lets the model choose,
+        which is what produced guillemets in one chapter and straight
+        quotes in the next.
+        """
+        value = self._cfg('novel_dialogue_convention', 'auto')
+        if value not in ('auto', 'off'):
+            value = 'auto'
+        return value
+
+    def _cache_info(self, key):
+        """Read one field of the cache's info table, '' when absent.
+
+        Defensive about the type: the tests hand the translator a mock
+        cache, and a mock returns a mock rather than a string.
+        """
+        try:
+            value = self.cache.get_info(key)
+        except Exception:
+            return ''
+        return value if isinstance(value, str) else ''
+
+    @property
+    def book_author(self):
+        """Who wrote the book, for the author brief.
+
+        Supplied by the caller (the interactive worker reads it from the
+        calibre metadata); the cache is the fallback, so a run started
+        from the background job still knows.
+        """
+        value = self._cfg('novel_book_author', None)
+        if not value:
+            value = self._cache_info('author')
+        return (value or '').strip()
+
+    @property
+    def book_title(self):
+        value = self._cfg('novel_book_title', None)
+        if not value:
+            value = self._cache_info('title')
+        return (value or '').strip()
+
+    @property
     def combined_context_call(self):
         """Whether the summary and the glossary are asked for at once.
 
@@ -1696,6 +2030,184 @@ class NovelTranslator:
             filled = '%s\n\n%s' % (filled.rstrip(), '\n\n'.join(appended))
         return filled
 
+    # -- book-wide directives ---------------------------------------------
+
+    def _engine_supports_web_search(self):
+        """Whether the current engine can put a web search behind a
+        request (see ``GenAI.web_search_mode``)."""
+        return bool(getattr(self.translator, 'web_search_mode', None))
+
+    @property
+    def dialogue_rules(self):
+        """How direct speech is punctuated, stated once for the book.
+
+        Worked out on first use and kept: the source does not change
+        between chapters, so neither does the answer.
+        """
+        if self._dialogue_rules is None:
+            self._dialogue_rules = self._build_dialogue_rules()
+        return self._dialogue_rules
+
+    def _ensure_dialogue_rules(self):
+        """Work the rule out now, so that its log line lands with the
+        other book-wide decisions instead of inside the first chunk."""
+        return self.dialogue_rules
+
+    def _build_dialogue_rules(self):
+        if self.dialogue_convention == 'off':
+            return ''
+        custom = (self._cfg('novel_dialogue_rules', '') or '').strip()
+        if custom:
+            self.log(_('Dialogue punctuation: using the rule from the '
+                       'settings.'))
+            return custom
+        style = detect_dialogue_style(
+            paragraph.original
+            for chapter in self.chapters
+            for paragraph in chapter.paragraphs
+            if not getattr(paragraph, 'ignored', False))
+        rules = dialogue_instruction(style)
+        if not rules:
+            self.log(_('Dialogue punctuation: the source shows no '
+                       'convention to follow.'))
+            return ''
+        marks = ' '.join(
+            '%s=%d' % (mark, count)
+            for mark, count in sorted(
+                style['counts'].items(), key=lambda i: -i[1])[:4])
+        self.log(_(
+            'Dialogue punctuation read off the source: {primary} '
+            '(counts: {counts}; paragraphs opening with a dash: {dash}). '
+            'Every chapter will be asked to use it.').format(
+                primary=style.get('primary') or '—',
+                counts=marks or _('none'),
+                dash=style.get('dash_paragraphs', 0)))
+        return rules
+
+    @property
+    def author_style(self):
+        """The brief on how this book is written, '' when there is none.
+
+        Read back from the stored context when the research has not run
+        in this session, so a translation resumed in a new process keeps
+        the brief it was started with.
+        """
+        if self._author_style is None:
+            self._author_style = self.ctx.get_style()
+        return self._author_style
+
+    def _style_block(self):
+        style = self.author_style
+        if not style:
+            return ''
+        return '%s\n%s' % (model_text(
+            'How this book is written. The brief below describes the '
+            'author and this novel. Reproduce the manner it describes, '
+            'except where the text in front of you plainly contradicts '
+            'it: the text always wins.'), style)
+
+    def _ensure_author_style(self):
+        """Research once, before the first chapter, how the book is written.
+
+        The answer is stored with the summaries and the glossary, so it
+        is paid for once per book and survives a resume. Every failure
+        along the way -- no author in the metadata, a request that
+        errors, a model that admits it knows nothing -- ends with an
+        empty brief and a translation that proceeds without one: the
+        alternative, a brief the model made up, would misdirect every
+        paragraph of the book.
+        """
+        if self.author_style_setting == 'off':
+            self._author_style = ''
+            return ''
+        existing = self.ctx.get_style()
+        if existing:
+            self._author_style = existing
+            self.log(_('Author brief: reusing the one on file '
+                       '({} characters).').format(len(existing)))
+            return existing
+        author = self.book_author
+        if not author:
+            self.log(_('Author brief: skipped, the book carries no author '
+                       'in its metadata.'))
+            self._author_style = ''
+            return ''
+        search = (self.author_style_setting == 'auto'
+                  and self._engine_supports_web_search())
+        if search:
+            self.log(_('Author brief: researching "{author}" on the web '
+                       'through {engine}.').format(
+                           author=author,
+                           engine=getattr(self.translator, 'name', '?')))
+        else:
+            reason = _('the engine cannot search the web') \
+                if self.author_style_setting == 'auto' \
+                else _('web search is off in the settings')
+            self.log(_('Author brief: asking the model what it knows about '
+                       '"{author}" ({reason}).').format(
+                           author=author, reason=reason))
+        user_prompt = self._compose_prompt(
+            self.author_style_prompt,
+            {'{author}': (model_text('Author:'), author),
+             '{title}': (model_text('Book:'), self.book_title)},
+            required=('{author}', '{title}'))
+        system_prompt = self._fill_placeholders(model_text(
+            'You research how books are written and answer in plain '
+            'prose, using only what the sources actually say.'))
+        try:
+            response = self._author_style_call(
+                system_prompt, user_prompt, search)
+        except Exception as e:
+            self.log(_('Author brief: the request failed ({}). The '
+                       'translation continues without it.').format(e), True)
+            self._author_style = ''
+            return ''
+        brief = collapse_blank_lines(response)
+        condensed = re.sub(r'[^A-Z ]', '', brief.upper()).strip()
+        if len(brief) < 80 or condensed.startswith(NO_AUTHOR_INFORMATION):
+            self.log(_('Author brief: nothing reliable came back, the '
+                       'translation continues without one.'))
+            self._author_style = ''
+            return ''
+        self._author_style = self.ctx.set_style(brief)
+        self.log(_('Author brief ({} characters):').format(len(brief)))
+        self.log(brief)
+        return self._author_style
+
+    def _author_style_call(self, system_prompt, user_prompt, search):
+        """Run the research request, with the engine's web search behind
+        it when ``search`` is set.
+
+        The body swap mirrors :meth:`_translate_with_retry_structured`:
+        the retry, backoff and cancel logic stays in one place, and the
+        engine only has to know how to build one extra body.
+        """
+        label = _('the author brief')
+        if not search:
+            return self._translate_context_call(
+                system_prompt, user_prompt, label)
+        translator = self.translator
+        original_get_body = translator.get_body
+        original_timeout = getattr(translator, 'request_timeout', None)
+        # A search runs several fetches before the model writes a word,
+        # and the reply is one short brief: the wait is all latency.
+        min_search_timeout = 300.0
+        if original_timeout is not None \
+                and original_timeout < min_search_timeout:
+            translator.request_timeout = min_search_timeout
+
+        def search_get_body(text):
+            return translator.get_body_for_search(text)
+
+        translator.get_body = search_get_body
+        try:
+            return self._translate_context_call(
+                system_prompt, user_prompt, label)
+        finally:
+            translator.get_body = original_get_body
+            if original_timeout is not None:
+                translator.request_timeout = original_timeout
+
     def _translation_system_prompt(self, context_text):
         """Build the system prompt of one translation request.
 
@@ -1705,14 +2217,25 @@ class NovelTranslator:
         """
         template = self.translation_prompt
         prompt = self._compose_prompt(
-            template, {'{context}': (None, context_text)},
-            required=('{context}',))
+            template, {
+                '{dialogue}': (None, self.dialogue_rules),
+                '{style}': (None, self._style_block()),
+                '{context}': (None, context_text),
+            },
+            # Ordered by how often the value changes, because a template
+            # that names none of them gets them appended in this order
+            # and the provider's prefix cache reuses everything up to the
+            # first byte that differs.
+            required=('{dialogue}', '{style}', '{context}'))
         if '<tlang>' not in template and '<slang>' not in template:
             prompt = '%s\n\n%s' % (
                 self._fill_placeholders(
                     model_text('Translate from <slang> to <tlang>.')),
                 prompt)
-        return prompt
+        # A book with no author brief, or a source that punctuates
+        # nothing, leaves its placeholder empty and its blank lines
+        # behind.
+        return collapse_blank_lines(prompt)
 
     def _run_translation_call(self, user_text):
         """Invoke ``translator.translate`` handling both plain-string and
@@ -2712,6 +3235,12 @@ class NovelTranslator:
             self.log(_('Model reply limit: {} tokens.').format(
                 self.model_output_limit))
         self.log(_('Resuming from chapter: {}').format(start + 1))
+        # Both are worked out once for the whole book and then repeated
+        # in the system prompt of every request: the dialogue rule is
+        # free (it is read off the source), the author brief costs one
+        # request the first time and nothing on a resume.
+        self._ensure_author_style()
+        self._ensure_dialogue_rules()
         self.log(sep('┈'))
 
         start_ts = time.time()

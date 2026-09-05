@@ -95,6 +95,10 @@ class NovelPreparationWorker(QObject):
 
         cache = get_cache(cache_id)
         cache.set_info('title', self.ebook.title)
+        # Novel Mode researches the author once per book. Written here so
+        # a translation started from the background job -- which only
+        # receives the title -- can still find it.
+        cache.set_info('author', self.ebook.get_author())
         cache.set_info('engine_name', translator_name)
         cache.set_info('target_lang', self.ebook.target_lang)
         cache.set_info('plugin_version', EbookTranslator.__version__)
@@ -330,6 +334,13 @@ class NovelTranslationWorker(QObject):
         ).load()
 
         novel_config = get_novel_config()
+        # Not part of the settings: these two describe the book being
+        # translated, not the way Novel Mode works.
+        novel_config.update({
+            'novel_book_title': (
+                self.ebook.custom_title or self.ebook.title or ''),
+            'novel_book_author': self.ebook.get_author(),
+        })
 
         translator_novel = NovelTranslator(
             translator, chapters, ctx, cache, config=novel_config)
@@ -673,6 +684,17 @@ class NovelTranslation(QDialog):
         # Glossary tab would then show its buttons and no table at all.
         self.tabs.addTab(glossary_wrap, _('Glossary'))
 
+        # Author brief tab. Read-only like the glossary: the worker
+        # writes it once, before the first chapter, and reads it back on
+        # every request.
+        self.style_view = QPlainTextEdit()
+        self.style_view.setReadOnly(True)
+        self.style_view.setPlaceholderText(_(
+            'The brief on how this book is written appears here once the '
+            'translation has started. Turn it off, or stop it searching '
+            'the web, under Novel Mode in the plugin settings.'))
+        self.tabs.addTab(self.style_view, _('Author'))
+
         # Log tab.
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -773,7 +795,7 @@ class NovelTranslation(QDialog):
             self.start_button.setText(_('Re-run all'))
 
     def _refresh_context_views(self, cache=None):
-        """Refresh the Summaries and Glossary tabs.
+        """Refresh the Summaries, Author and Glossary tabs.
 
         Summaries are always read from the SQLite cache (they are long
         strings, writing them into the signal payload would be wasteful).
@@ -813,6 +835,12 @@ class NovelTranslation(QDialog):
                         s.get('title', '')))
                 self.summaries_view.appendPlainText(s.get('summary', ''))
                 self.summaries_view.appendPlainText('')
+
+            # --- Author brief: always from cache, written once per
+            # book before the first chapter.
+            style = cache.get_info('novel_author_style')
+            self.style_view.setPlainText(
+                style if isinstance(style, str) else '')
 
             # --- Glossary: prefer in-memory accumulator; seed from cache
             # on the initial load (when _ui_glossary is still empty).
@@ -952,9 +980,10 @@ class NovelTranslation(QDialog):
     def _reset_context(self):
         ret = QMessageBox.question(
             self, _('Reset context'),
-            _('This will discard all summaries and the glossary, and reset '
-              'chapter progress to 0. The already-translated paragraphs '
-              'will remain in cache. Continue?'),
+            _('This will discard all summaries, the glossary and the '
+              'author brief, and reset chapter progress to 0. The '
+              'already-translated paragraphs will remain in cache. '
+              'Continue?'),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if ret != QMessageBox.StandardButton.Yes:
             return

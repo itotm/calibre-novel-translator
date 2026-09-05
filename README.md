@@ -49,11 +49,38 @@ was extended here.
   level-1 entry is a whole novel) or one XHTML file per chapter, with a
   front-matter filter that keeps cover and title pages out of the narrative.
 * Its own dialog shows the chapter list with per-chapter status and tabs for
-  the summaries, the glossary and the log.
+  the summaries, the glossary, the author brief and the log.
 * Work is written to the translation cache as it is produced, so an interrupted
   run **resumes** — by chapter, and inside a chapter by paragraph, so the chunks
   that did finish are not paid for twice. The final ebook is built from the
   cache with no further model calls.
+
+**How it reads**
+
+Three things the shipped defaults do to keep a book sounding like the book it
+was, all of them settings in *Preferences → Engine → Novel Mode*.
+
+* **The author is researched once, before the first chapter.** One request asks
+  how this particular book is written — its register, the texture of its
+  sentences, its use of irony, dialect or period language — and the answer is
+  repeated in the prompt of every chapter, so the translation keeps the
+  author's manner instead of settling into neutral prose. Engines that can
+  search the web do (OpenRouter's web plugin, Claude's search tool, Gemini's
+  Google Search grounding); the others answer from what the model already
+  knows. An answer that admits it knows nothing about the author is thrown
+  away rather than used, because a manner the model invented would misdirect
+  every paragraph of the book. The brief is stored with the summaries, so it is
+  paid for once per book and reused when you resume.
+* **Dialogue is punctuated the way the source punctuates it.** A chapter is
+  translated by several independent requests and none of them can see what the
+  others chose, which is how the same book came back with guillemets in one
+  chapter and quotation marks in the next. The marks are now counted over the
+  whole book once — it costs nothing, the text is already here — and the answer
+  is stated in every request, nested quotations and dash dialogue included.
+* **The shipped translation prompt** is longer and more specific: what to do
+  with register and narrative voice, how to keep characters' voices and forms
+  of address apart, what may not be added or dropped, how to handle period
+  terms and units, and how closely to follow the typography of the source.
 
 **What it costs**
 

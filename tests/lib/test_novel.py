@@ -11,8 +11,10 @@ from ...lib.novel import (
     tag_paragraphs, parse_tagged_response, _extract_json_object,
     _extract_entities_fallback,
     novel_cache_id, _href_to_page_id,
+    detect_dialogue_style, dialogue_instruction, collapse_blank_lines,
+    NO_AUTHOR_INFORMATION,
     INFO_NOVEL_SUMMARIES, INFO_NOVEL_GLOSSARY, INFO_NOVEL_PROGRESS,
-    INFO_NOVEL_MODE)
+    INFO_NOVEL_MODE, INFO_NOVEL_STYLE)
 
 
 module_name = 'calibre_plugins.ebook_translator_novel.lib.novel'
@@ -2561,6 +2563,221 @@ class TestRequestTimingLog(unittest.TestCase):
         self.assertTrue(
             any('chapter 3 chunk 1/2' in m and 's.' in m
                 for m in messages), messages)
+
+
+# ---------------------------------------------------------------------------
+# Dialogue punctuation
+# ---------------------------------------------------------------------------
+
+
+class TestDetectDialogueStyle(unittest.TestCase):
+    """The source is the only thing that knows how the book punctuates
+    speech, and it has to be asked once for the whole book: asking per
+    chapter is exactly what produced guillemets in one chapter and
+    straight quotes in the next.
+    """
+
+    def test_guillemets_win_over_a_stray_quotation(self):
+        texts = ['«Buongiorno», disse Anna.'] * 10 \
+            + ['He called it a "problem".'] + ['Il sole era alto.'] * 20
+        style = detect_dialogue_style(texts)
+        self.assertEqual('«', style['primary'])
+        self.assertIsNone(style['nested'])
+        self.assertFalse(style['dash'])
+
+    def test_a_nested_mark_is_reported_separately(self):
+        texts = ['"Hello," she said, "he told me \u2018go away\u2019."'] * 8
+        style = detect_dialogue_style(texts)
+        self.assertEqual('"', style['primary'])
+        self.assertEqual('\u2018', style['nested'])
+
+    def test_dash_dialogue_is_detected(self):
+        texts = ['\u2014Hola \u2014dijo Juan.'] * 12 \
+            + ['El sol estaba alto.'] * 20
+        style = detect_dialogue_style(texts)
+        self.assertTrue(style['dash'])
+        self.assertEqual(12, style['dash_paragraphs'])
+
+    def test_a_dash_inside_a_sentence_is_not_dialogue(self):
+        texts = ['The house \u2014 the old one \u2014 was empty.'] * 30
+        self.assertFalse(detect_dialogue_style(texts)['dash'])
+
+    def test_prose_without_dialogue_prescribes_nothing(self):
+        style = detect_dialogue_style(['Plain narrative prose.'] * 30)
+        self.assertIsNone(style['primary'])
+        self.assertEqual('', dialogue_instruction(style))
+
+    def test_a_handful_of_marks_is_noise_not_a_convention(self):
+        style = detect_dialogue_style(['She said "no".'] * 2)
+        self.assertIsNone(style['primary'])
+
+    def test_the_instruction_names_the_marks(self):
+        text = dialogue_instruction(
+            detect_dialogue_style(['«Ciao», disse.'] * 10))
+        self.assertIn('«…»', text)
+        self.assertIn('every chapter', text)
+
+
+class TestDialogueRules(unittest.TestCase):
+    def _translator(self, config=None, chapters=()):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        translator = NovelTranslator(
+            FakeEngine(), list(chapters), ctx, cache, config=config or {})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        return translator
+
+    def _chapter(self, texts):
+        return Chapter(
+            index=1, title='One', page_ids=['a'],
+            paragraphs=[make_paragraph(i, text)
+                        for i, text in enumerate(texts)])
+
+    def test_the_rule_is_read_off_the_source_and_reaches_the_prompt(self):
+        translator = self._translator(
+            chapters=[self._chapter(['«Ciao», disse.'] * 10)])
+        prompt = translator._translation_system_prompt('CONTEXT')
+        self.assertIn('«…»', prompt)
+
+    def test_the_rule_can_be_turned_off(self):
+        translator = self._translator(
+            {'novel_dialogue_convention': 'off'},
+            chapters=[self._chapter(['«Ciao», disse.'] * 10)])
+        self.assertEqual('', translator.dialogue_rules)
+        self.assertNotIn('«…»', translator._translation_system_prompt('C'))
+
+    def test_a_rule_from_the_settings_replaces_the_detected_one(self):
+        translator = self._translator(
+            {'novel_dialogue_rules': 'Always use « guillemets ».'},
+            chapters=[self._chapter(['"Hi," she said.'] * 10)])
+        self.assertEqual(
+            'Always use « guillemets ».', translator.dialogue_rules)
+
+    def test_the_source_is_read_once(self):
+        translator = self._translator(
+            chapters=[self._chapter(['«Ciao», disse.'] * 10)])
+        first = translator.dialogue_rules
+        translator.chapters = []
+        self.assertEqual(first, translator.dialogue_rules)
+
+
+# ---------------------------------------------------------------------------
+# Author brief
+# ---------------------------------------------------------------------------
+
+
+class SearchingEngine(FakeEngine):
+    """A FakeEngine that advertises web search and records which body
+    builder each request went through."""
+
+    web_search_mode = 'plugin'
+    request_timeout = 30.0
+
+    def __init__(self, reply):
+        FakeEngine.__init__(self)
+        self.reply = reply
+        self.bodies = []
+
+    def get_body(self, text):
+        return 'plain'
+
+    def get_body_for_search(self, text):
+        return 'search'
+
+    def translate(self, text):
+        self.bodies.append(self.get_body(text))
+        return self.reply
+
+
+BRIEF = (
+    'Calvino writes a limpid, ironic prose, with long paratactic '
+    'sentences and a light narrative voice that never raises itself.')
+
+
+class TestAuthorBrief(unittest.TestCase):
+    """One request per book, and every way it can go wrong ends with no
+    brief rather than with an invented one."""
+
+    def _translator(self, config=None, engine=None, style=None):
+        cache = Mock()
+        stored = {INFO_NOVEL_STYLE: style} if style else {}
+        cache.get_info.side_effect = stored.get
+        ctx = ContextManager(cache).load()
+        config = dict(config or {})
+        config.setdefault('novel_book_author', 'Italo Calvino')
+        config.setdefault('novel_book_title', 'Il barone rampante')
+        translator = NovelTranslator(
+            engine or SearchingEngine(BRIEF), [], ctx, cache, config=config)
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        return translator
+
+    def test_a_capable_engine_searches_the_web(self):
+        translator = self._translator()
+        self.assertEqual(BRIEF, translator._ensure_author_style())
+        self.assertEqual(['search'], translator.translator.bodies)
+        # The raised timeout is put back afterwards.
+        self.assertEqual(30.0, translator.translator.request_timeout)
+
+    def test_model_only_never_searches(self):
+        translator = self._translator({'novel_author_style': 'model'})
+        translator._ensure_author_style()
+        self.assertEqual(['plain'], translator.translator.bodies)
+
+    def test_off_asks_nothing(self):
+        translator = self._translator({'novel_author_style': 'off'})
+        self.assertEqual('', translator._ensure_author_style())
+        self.assertEqual([], translator.translator.bodies)
+
+    def test_a_book_without_an_author_asks_nothing(self):
+        translator = self._translator({'novel_book_author': ''})
+        self.assertEqual('', translator._ensure_author_style())
+        self.assertEqual([], translator.translator.bodies)
+
+    def test_a_stored_brief_is_reused_instead_of_researched_again(self):
+        translator = self._translator(style=BRIEF)
+        self.assertEqual(BRIEF, translator._ensure_author_style())
+        self.assertEqual([], translator.translator.bodies)
+
+    def test_an_admission_of_ignorance_is_discarded(self):
+        translator = self._translator(
+            engine=SearchingEngine(NO_AUTHOR_INFORMATION))
+        self.assertEqual('', translator._ensure_author_style())
+        self.assertEqual('', translator.ctx.get_style())
+
+    def test_an_answer_too_short_to_be_a_brief_is_discarded(self):
+        translator = self._translator(engine=SearchingEngine('Bello.'))
+        self.assertEqual('', translator._ensure_author_style())
+
+    @patch('%s.time.sleep' % module_name)
+    def test_a_failed_request_does_not_stop_the_translation(self, _sleep):
+        engine = SearchingEngine(BRIEF)
+        engine.translate = Mock(side_effect=RuntimeError('boom'))
+        translator = self._translator(engine=engine)
+        self.assertEqual('', translator._ensure_author_style())
+
+    def test_the_brief_is_persisted_and_reaches_the_prompt(self):
+        translator = self._translator()
+        translator._ensure_author_style()
+        translator.cache.set_info.assert_any_call(INFO_NOVEL_STYLE, BRIEF)
+        self.assertIn(BRIEF, translator._translation_system_prompt('CONTEXT'))
+
+    def test_no_brief_leaves_no_hole_in_the_prompt(self):
+        translator = self._translator({'novel_author_style': 'off'})
+        translator._ensure_author_style()
+        prompt = translator._translation_system_prompt('CONTEXT')
+        self.assertNotIn('\n\n\n', prompt)
+        self.assertTrue(prompt.rstrip().endswith('CONTEXT'))
+
+
+class TestCollapseBlankLines(unittest.TestCase):
+    def test_runs_of_blank_lines_become_one(self):
+        self.assertEqual('a\n\nb', collapse_blank_lines('a\n\n\n\nb\n\n'))
+
+    def test_empty_input(self):
+        self.assertEqual('', collapse_blank_lines(None))
 
 
 if __name__ == '__main__':

@@ -60,6 +60,13 @@ class ClaudeTranslate(GenAI):
         'message_delta',
         'message_stop']
 
+    # Anthropic's server-side search tool. Novel Mode turns it on for
+    # the single request that researches how the author writes.
+    # https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/
+    # web-search-tool
+    web_search_mode = 'tool'
+    web_search_max_results = 5
+
     models: list[str] = []
     # TODO: better handle setting the default model
     # (e.g. fetch programmatically) by default use the latest version of the
@@ -152,13 +159,30 @@ class ClaudeTranslate(GenAI):
 
         return json.dumps(body)
 
+    def get_body_for_search(self, text):
+        """Attach the server-side web search tool to a normal body."""
+        body = json.loads(self.get_body(text))
+        body['tools'] = [{
+            'type': 'web_search_20250305',
+            'name': 'web_search',
+            'max_uses': int(self.web_search_max_results or 5),
+        }]
+        return json.dumps(body)
+
     def get_result(self, response: Response | str) -> str:
         if self.stream:
             return self._parse_stream(response)
 
         response_json = json.loads(response)
-        response_content_text: str = response_json['content'][0]['text']
-        return response_content_text
+        blocks = response_json['content']
+        # Every text block, not just the first one: a reply that used a
+        # server-side tool -- the web search above -- opens with the
+        # tool call and its result, and the prose comes after them.
+        texts = [block['text'] for block in blocks
+                 if isinstance(block, dict) and 'text' in block]
+        if not texts:
+            raise KeyError('no text block in the response')
+        return ''.join(texts)
 
     def _parse_stream(self, data: Response) -> Generator:
         while True:
@@ -183,9 +207,14 @@ class ClaudeTranslate(GenAI):
                 if event_type == 'message_stop':
                     break
                 elif event_type == 'content_block_delta':
-                    delta = chunk.get('delta')
-                    if delta is not None:
-                        yield str(delta.get('text'))
+                    delta = chunk.get('delta') or {}
+                    # Only text deltas carry text. A reply that used a
+                    # server-side tool also streams `input_json_delta`
+                    # blocks, and yielding str(None) for those wrote the
+                    # word "None" into the middle of the translation.
+                    text = delta.get('text')
+                    if text is not None:
+                        yield str(text)
                 elif event_type == 'error':
                     raise Exception(
                         _('Error received: {}')

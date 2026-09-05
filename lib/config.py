@@ -134,6 +134,25 @@ defaults: dict[str, Any] = {
     # are treated as front/back matter (Cover, Titlepage, decorative pages)
     # and excluded from chapter narrative content. Set to 0 to disable.
     'novel_front_matter_min_chars': 100,
+    # Research once per book, before the first chapter, how its author
+    # writes, and repeat the answer in the prompt of every chapter. A
+    # chapter is translated by requests that know the story so far but
+    # nothing about the manner it was told in, and the result drifts
+    # towards neutral prose.
+    #   'auto'  -> search the web on engines that can (OpenRouter, Claude,
+    #              Gemini), fall back to what the model knows on the rest.
+    #   'model' -> never search, ask the model only.
+    #   'off'   -> do not ask at all.
+    'novel_author_style': 'auto',
+    'novel_author_style_prompt': None,
+    # How direct speech is punctuated. 'auto' counts the marks over the
+    # whole book once and states the answer in every request; 'off'
+    # leaves the choice to the model, which is how the same book came
+    # back with guillemets in one chapter and quotation marks in the
+    # next. A rule typed in novel_dialogue_rules replaces the detected
+    # one.
+    'novel_dialogue_convention': 'auto',
+    'novel_dialogue_rules': None,
     'novel_translation_prompt': None,
     'novel_summary_prompt': None,
     'novel_glossary_prompt': None,

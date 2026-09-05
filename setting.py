@@ -1252,6 +1252,61 @@ class TranslationSetting(QDialog):
         novel_layout.addRow(
             _('Context of the last chapter'), novel_skip_last)
 
+        novel_author_style = QComboBox()
+        novel_author_style.addItem(
+            _('Search the web when the engine can'), 'auto')
+        novel_author_style.addItem(_('Ask the model only'), 'model')
+        novel_author_style.addItem(_('Do not ask'), 'off')
+        novel_author_style.setToolTip(_(
+            'Before the first chapter, ask once how this author writes: '
+            'the register, the texture of the sentences, the use of '
+            'dialect or period language. The answer is repeated in the '
+            'prompt of every chapter so the translation keeps the '
+            'author\'s manner instead of drifting into neutral prose.\n\n'
+            'It costs one request per book. "Search the web" uses the '
+            'engine\'s own search where it has one (OpenRouter, Claude, '
+            'Gemini) and falls back to what the model already knows '
+            'elsewhere; searching is billed per result by the gateway. '
+            'An answer that admits it knows nothing about the author is '
+            'discarded rather than used.\n\n'
+            'The book needs an author in its calibre metadata. The brief '
+            'is stored with the summaries, so it is paid for once and '
+            'reused when you resume; "Reset context" in the translation '
+            'window discards it.'))
+        novel_layout.addRow(
+            _('How the author writes'), novel_author_style)
+        self.disable_wheel_event(novel_author_style)
+
+        novel_dialogue = QComboBox()
+        novel_dialogue.addItem(_('Follow the source'), 'auto')
+        novel_dialogue.addItem(_('Leave it to the model'), 'off')
+        novel_dialogue.setToolTip(_(
+            'How direct speech is punctuated. A chapter is translated by '
+            'several independent requests and none of them can see what '
+            'the others chose, so a model left to itself opens one '
+            'chapter with guillemets and the next with quotation '
+            'marks.\n\n'
+            '"Follow the source" counts the marks over the whole book '
+            'once -- it costs nothing, the text is already here -- and '
+            'states the answer in every request. Fill the field below to '
+            'prescribe a rule of your own instead.'))
+        novel_layout.addRow(
+            _('Dialogue punctuation'), novel_dialogue)
+        self.disable_wheel_event(novel_dialogue)
+
+        novel_dialogue_rules = QPlainTextEdit()
+        novel_dialogue_rules.setFixedHeight(50)
+        novel_dialogue_rules.setPlaceholderText(_(
+            'Empty: read the convention off the source text.'))
+        novel_dialogue_rules.setToolTip(_(
+            'Your own rule for punctuating dialogue, in the language of '
+            'the prompt, added to every request instead of the one read '
+            'off the source. For example: Mark direct speech with '
+            '« guillemets » and a quotation inside it with '
+            'double quotation marks.'))
+        novel_layout.addRow(
+            _('Dialogue rule'), novel_dialogue_rules)
+
         novel_translation_prompt = QPlainTextEdit()
         novel_translation_prompt.setFixedHeight(90)
         novel_translation_prompt.setToolTip(_(
@@ -1286,6 +1341,14 @@ class TranslationSetting(QDialog):
             '{existing_keys}.'))
         novel_layout.addRow(
             _('Glossary prompt'), novel_glossary_prompt)
+        novel_author_style_prompt = QPlainTextEdit()
+        novel_author_style_prompt.setFixedHeight(70)
+        novel_author_style_prompt.setToolTip(_(
+            'Prompt asking for the brief on how the author writes, sent '
+            'once per book. {author} and {title} name the book; they are '
+            'appended when the prompt does not place them itself.'))
+        novel_layout.addRow(
+            _('Author brief prompt'), novel_author_style_prompt)
 
         layout.addWidget(novel_group)
 
@@ -1294,7 +1357,8 @@ class TranslationSetting(QDialog):
             from .lib.novel import (
                 DEFAULT_NOVEL_TRANSLATION_PROMPT,
                 DEFAULT_NOVEL_SUMMARY_PROMPT,
-                DEFAULT_NOVEL_GLOSSARY_PROMPT)
+                DEFAULT_NOVEL_GLOSSARY_PROMPT,
+                DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT)
             src = self.config.get(
                 'novel_chapter_source', 'toc_level_1') or 'toc_level_1'
             idx = novel_chapter_source.findData(src)
@@ -1351,6 +1415,22 @@ class TranslationSetting(QDialog):
                 DEFAULT_NOVEL_GLOSSARY_PROMPT)
             novel_glossary_prompt.setPlainText(
                 self.config.get('novel_glossary_prompt') or '')
+            author_style = self.config.get(
+                'novel_author_style', 'auto') or 'auto'
+            idx = novel_author_style.findData(author_style)
+            if idx >= 0:
+                novel_author_style.setCurrentIndex(idx)
+            dialogue = self.config.get(
+                'novel_dialogue_convention', 'auto') or 'auto'
+            idx = novel_dialogue.findData(dialogue)
+            if idx >= 0:
+                novel_dialogue.setCurrentIndex(idx)
+            novel_dialogue_rules.setPlainText(
+                self.config.get('novel_dialogue_rules') or '')
+            novel_author_style_prompt.setPlaceholderText(
+                DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT)
+            novel_author_style_prompt.setPlainText(
+                self.config.get('novel_author_style_prompt') or '')
         load_novel_settings()
 
         def _persist_novel(key, cast):
@@ -1408,6 +1488,12 @@ class TranslationSetting(QDialog):
         novel_skip_last.toggled.connect(
             lambda checked: self.config.update(
                 novel_skip_context_last_chapter=bool(checked)))
+        novel_author_style.currentIndexChanged.connect(
+            lambda _idx: self.config.update(
+                novel_author_style=novel_author_style.currentData()))
+        novel_dialogue.currentIndexChanged.connect(
+            lambda _idx: self.config.update(
+                novel_dialogue_convention=novel_dialogue.currentData()))
 
         def _persist_prompt(widget, key):
             def _handler():
@@ -1425,6 +1511,11 @@ class TranslationSetting(QDialog):
             _persist_prompt(novel_summary_prompt, 'novel_summary_prompt'))
         novel_glossary_prompt.textChanged.connect(
             _persist_prompt(novel_glossary_prompt, 'novel_glossary_prompt'))
+        novel_dialogue_rules.textChanged.connect(
+            _persist_prompt(novel_dialogue_rules, 'novel_dialogue_rules'))
+        novel_author_style_prompt.textChanged.connect(
+            _persist_prompt(
+                novel_author_style_prompt, 'novel_author_style_prompt'))
 
         # Setup genAI model
         def update_model_limits(model):

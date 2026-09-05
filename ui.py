@@ -278,5 +278,6 @@ class EbookTranslatorGui(InterfaceAction):
                 fmt.lower(),  # Input format
                 book_metadata.language,  # Source language
                 extra_formats,
+                list(book_metadata.authors or []),  # Authors
             )
         return ebooks

@@ -3,7 +3,7 @@ from typing import Iterator, Iterable
 
 class Ebook:
     def __init__(self, id, title, files, input_format, source_lang,
-                 extra_formats=[]):
+                 extra_formats=[], authors=None):
         self.id = id
         self.files = files
         self.input_format = input_format
@@ -15,6 +15,11 @@ class Ebook:
         self.lang_code = None
 
         self.title = title
+        # Who wrote the book, as calibre knows it. Novel Mode researches
+        # the author once per book to learn how they write; everything
+        # else in the plugin ignores it. Optional and last in the
+        # signature so the existing positional callers keep working.
+        self.authors = list(authors or [])
         self.custom_title = None
         self.encoding = 'utf-8'
         self.target_direction = 'auto'
@@ -33,6 +38,13 @@ class Ebook:
 
     def set_lang_code(self, code):
         self.lang_code = code
+
+    def set_authors(self, authors):
+        self.authors = list(authors or [])
+
+    def get_author(self):
+        """The authors as one string, '' when the book names none."""
+        return ' & '.join(self.authors)
 
     def set_custom_title(self, title):
         self.custom_title = title

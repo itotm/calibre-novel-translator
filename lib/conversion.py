@@ -477,6 +477,12 @@ def get_novel_config():
             'novel_summary_prompt', None),
         'novel_glossary_prompt': config.get(
             'novel_glossary_prompt', None),
+        'novel_author_style': config.get('novel_author_style', 'auto'),
+        'novel_author_style_prompt': config.get(
+            'novel_author_style_prompt', None),
+        'novel_dialogue_convention': config.get(
+            'novel_dialogue_convention', 'auto'),
+        'novel_dialogue_rules': config.get('novel_dialogue_rules', None),
     }
 
 
