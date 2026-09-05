@@ -2670,7 +2670,13 @@ class TestDialogueRules(unittest.TestCase):
 
 class SearchingEngine(FakeEngine):
     """A FakeEngine that advertises web search and records which body
-    builder each request went through."""
+    builder each request went through.
+
+    ``get_body_for_search`` builds on ``get_body``, exactly as every real
+    engine does: it takes the normal body apart and adds the provider's
+    search field to it. A double that returned a constant instead would
+    not notice a body swap that makes the two call each other.
+    """
 
     web_search_mode = 'plugin'
     request_timeout = 30.0
@@ -2684,7 +2690,7 @@ class SearchingEngine(FakeEngine):
         return 'plain'
 
     def get_body_for_search(self, text):
-        return 'search'
+        return 'search+' + self.get_body(text)
 
     def translate(self, text):
         self.bodies.append(self.get_body(text))
@@ -2717,7 +2723,7 @@ class TestAuthorBrief(unittest.TestCase):
     def test_a_capable_engine_searches_the_web(self):
         translator = self._translator()
         self.assertEqual(BRIEF, translator._ensure_author_style())
-        self.assertEqual(['search'], translator.translator.bodies)
+        self.assertEqual(['search+plain'], translator.translator.bodies)
         # The raised timeout is put back afterwards.
         self.assertEqual(30.0, translator.translator.request_timeout)
 
@@ -2770,6 +2776,46 @@ class TestAuthorBrief(unittest.TestCase):
         prompt = translator._translation_system_prompt('CONTEXT')
         self.assertNotIn('\n\n\n', prompt)
         self.assertTrue(prompt.rstrip().endswith('CONTEXT'))
+
+
+class TestBodyBuilder(unittest.TestCase):
+    """Every alternative request body is built by taking the normal one
+    apart and adding to it, so the swap that puts one in place must not
+    be visible to the builder itself."""
+
+    def _translator(self, engine):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        translator = NovelTranslator(engine, [], ctx, cache, config={})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        return translator
+
+    def test_a_builder_that_calls_get_body_does_not_recurse(self):
+        engine = SearchingEngine('reply')
+        translator = self._translator(engine)
+        with translator._body_builder(engine.get_body_for_search):
+            self.assertEqual('search+plain', engine.get_body('text'))
+            # And again: the swap is put back after every call.
+            self.assertEqual('search+plain', engine.get_body('text'))
+
+    def test_the_original_builder_is_restored(self):
+        engine = SearchingEngine('reply')
+        translator = self._translator(engine)
+        original = engine.get_body
+        with translator._body_builder(engine.get_body_for_search):
+            pass
+        self.assertEqual(original, engine.get_body)
+
+    def test_it_is_restored_after_a_failure_too(self):
+        engine = SearchingEngine('reply')
+        translator = self._translator(engine)
+        original = engine.get_body
+        with self.assertRaises(RuntimeError):
+            with translator._body_builder(engine.get_body_for_search):
+                raise RuntimeError('boom')
+        self.assertEqual(original, engine.get_body)
 
 
 class TestCollapseBlankLines(unittest.TestCase):

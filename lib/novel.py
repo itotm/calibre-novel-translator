@@ -30,6 +30,7 @@ This module has no direct dependency on Qt so it is fully unit-testable.
 import re
 import json
 import time
+from contextlib import contextmanager
 
 from calibre.utils.localization import _  # type: ignore
 
@@ -2178,16 +2179,13 @@ class NovelTranslator:
         """Run the research request, with the engine's web search behind
         it when ``search`` is set.
 
-        The body swap mirrors :meth:`_translate_with_retry_structured`:
-        the retry, backoff and cancel logic stays in one place, and the
-        engine only has to know how to build one extra body.
+        The search body is swapped in through :meth:`_body_builder`.
         """
         label = _('the author brief')
         if not search:
             return self._translate_context_call(
                 system_prompt, user_prompt, label)
         translator = self.translator
-        original_get_body = translator.get_body
         original_timeout = getattr(translator, 'request_timeout', None)
         # A search runs several fetches before the model writes a word,
         # and the reply is one short brief: the wait is all latency.
@@ -2195,16 +2193,11 @@ class NovelTranslator:
         if original_timeout is not None \
                 and original_timeout < min_search_timeout:
             translator.request_timeout = min_search_timeout
-
-        def search_get_body(text):
-            return translator.get_body_for_search(text)
-
-        translator.get_body = search_get_body
         try:
-            return self._translate_context_call(
-                system_prompt, user_prompt, label)
+            with self._body_builder(translator.get_body_for_search):
+                return self._translate_context_call(
+                    system_prompt, user_prompt, label)
         finally:
-            translator.get_body = original_get_body
             if original_timeout is not None:
                 translator.request_timeout = original_timeout
 
@@ -2657,6 +2650,39 @@ class NovelTranslator:
                     missing[:10]))
         return result
 
+    @contextmanager
+    def _body_builder(self, build):
+        """Point the engine's ``get_body`` at ``build`` for the duration
+        of one request, and put the original back afterwards.
+
+        ``build`` receives the request text and returns the body. It runs
+        with the *plain* builder back in place, because every alternative
+        body is built by taking the normal one apart and adding to it --
+        ``get_body_for_search`` on every engine, ``get_body_for_structured``
+        on Gemini -- and leaving the swap in place while it runs makes it
+        call itself until the stack ends.
+
+        Swapping rather than threading a flag through
+        :meth:`_translate_with_retry` keeps the retry, backoff and cancel
+        logic in one place, and leaves the engines with one method to
+        write per alternative body.
+        """
+        translator = self.translator
+        original = translator.get_body
+
+        def swapped(text):
+            translator.get_body = original
+            try:
+                return build(text)
+            finally:
+                translator.get_body = swapped
+
+        translator.get_body = swapped
+        try:
+            yield
+        finally:
+            translator.get_body = original
+
     def _translate_with_retry_structured(self, system_prompt, user_text,
                                          schema=None, attempts=None,
                                          label=None):
@@ -2685,14 +2711,11 @@ class NovelTranslator:
         Ollama's ``srv stop: cancel task`` at exactly the router NAT
         session timeout (~30s).
 
-        Implementation swaps ``get_body`` temporarily rather than
-        threading a "structured" flag through :meth:`_translate_with_retry`;
-        this keeps the retry / backoff / cancel logic in one place.
+        The request body is swapped in through :meth:`_body_builder`.
         """
         from types import GeneratorType
 
         translator = self.translator
-        original_get_body = translator.get_body
         original_timeout = getattr(translator, 'request_timeout', None)
         original_keepalive = getattr(translator, 'request_keepalive', False)
         original_stream = getattr(translator, 'stream', False)
@@ -2718,12 +2741,11 @@ class NovelTranslator:
         def structured_get_body(text):
             return translator.get_body_for_structured(text, schema)
 
-        translator.get_body = structured_get_body
         try:
-            result = self._translate_with_retry(
-                system_prompt, user_text, attempts=attempts, label=label)
+            with self._body_builder(structured_get_body):
+                result = self._translate_with_retry(
+                    system_prompt, user_text, attempts=attempts, label=label)
         finally:
-            translator.get_body = original_get_body
             if original_timeout is not None:
                 translator.request_timeout = original_timeout
             translator.request_keepalive = original_keepalive
