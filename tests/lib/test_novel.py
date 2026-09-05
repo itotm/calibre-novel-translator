@@ -1135,6 +1135,142 @@ class TestNovelTranslator(unittest.TestCase):
         self.assertIsNone(self.paragraphs[1].translation)
         self.assertIsNotNone(self.paragraphs[2].translation)
 
+    def test_paragraphs_already_translated_are_not_sent_again(self):
+        """What an interrupted run left in the cache is not paid for twice.
+
+        Progress only advances at the end of a chapter, so resuming
+        re-enters a chapter whose first chunks were already stored.
+        """
+        self.paragraphs[0].translation = 'Alpha 1 (IT)'
+        self.paragraphs[0].engine_name = 'FakeEngine'
+        self.paragraphs[0].target_lang = 'Italian'
+        translation_calls = []
+        context_calls = []
+
+        def side_effect(text, prompt):
+            if _is_translation_call(prompt):
+                translation_calls.append(text)
+                return _echo_markers(text)
+            context_calls.append(text)
+            if _is_glossary_call(prompt):
+                return '{"entities": []}'
+            return 'Summary text.'
+
+        engine = FakeEngine(translate_side_effect=side_effect)
+        translator = self._make_translator(engine)
+        translator.run()
+
+        # The model was asked for the second paragraph only.
+        self.assertNotIn('Alpha 1', translation_calls[0])
+        self.assertIn('Alpha 2', translation_calls[0])
+        # The stored translation was left alone.
+        self.assertEqual('Alpha 1 (IT)', self.paragraphs[0].translation)
+        # And the summary still read the whole chapter, the paragraph
+        # that came from the cache included.
+        self.assertIn('Alpha 1 (IT)', context_calls[0])
+
+    def test_reuse_translated_paragraphs_can_be_turned_off(self):
+        self.paragraphs[0].translation = 'Alpha 1 (IT)'
+        self.paragraphs[0].engine_name = 'FakeEngine'
+        self.paragraphs[0].target_lang = 'Italian'
+        translation_calls = []
+
+        def side_effect(text, prompt):
+            if _is_translation_call(prompt):
+                translation_calls.append(text)
+                return _echo_markers(text)
+            if _is_glossary_call(prompt):
+                return '{"entities": []}'
+            return 'Summary text.'
+
+        engine = FakeEngine(translate_side_effect=side_effect)
+        translator = self._make_translator(
+            engine, config={'novel_reuse_translated_paragraphs': False})
+        translator.run()
+
+        self.assertIn('Alpha 1', translation_calls[0])
+
+    def test_fully_translated_chapter_only_needs_its_context(self):
+        """A chapter cancelled between its last chunk and its summary
+        asks for the summary alone when it resumes."""
+        for paragraph in self.paragraphs[:2]:
+            paragraph.translation = '%s (IT)' % paragraph.original
+            paragraph.engine_name = 'FakeEngine'
+            paragraph.target_lang = 'Italian'
+        translation_calls = []
+        context_calls = []
+
+        def side_effect(text, prompt):
+            if _is_translation_call(prompt):
+                translation_calls.append(text)
+                return _echo_markers(text)
+            context_calls.append(text)
+            if _is_glossary_call(prompt):
+                return '{"entities": []}'
+            return 'Summary text.'
+
+        engine = FakeEngine(translate_side_effect=side_effect)
+        translator = self._make_translator(engine)
+        translator.run()
+
+        # Chapter one asked for nothing but its context; chapter two,
+        # which has no translation yet, was translated as usual.
+        self.assertEqual(1, len(translation_calls))
+        self.assertIn('Beta 1', translation_calls[0])
+        self.assertIn('Alpha 1 (IT)', context_calls[0])
+
+    def test_a_chunk_writes_its_own_paragraphs_in_one_batch(self):
+        """Each chunk commits once, and only what it produced."""
+        def side_effect(text, prompt):
+            if _is_translation_call(prompt):
+                return _echo_markers(text)
+            if _is_glossary_call(prompt):
+                return '{"entities": []}'
+            return 'Summary text.'
+
+        engine = FakeEngine(translate_side_effect=side_effect)
+        translator = self._make_translator(
+            engine, config={'novel_max_paragraphs_per_chunk': 1})
+        translator.run()
+
+        batches = [c.args[0] for c
+                   in self.cache.update_paragraphs.call_args_list]
+        self.assertEqual(
+            [['Alpha 1'], ['Alpha 2'], ['Beta 1']],
+            [[p.original for p in batch] for batch in batches])
+        self.cache.update_paragraph.assert_not_called()
+
+    def test_chunk_budget_is_capped_by_the_model_reply_limit(self):
+        """A chunk is never longer than the model can answer."""
+        engine = FakeEngine()
+        engine.model_max_output_tokens = 4096
+        translator = self._make_translator(
+            engine, config={'novel_chunk_tokens': 16000})
+        self.assertEqual(
+            int(4096 * NovelTranslator.OUTPUT_BUDGET_RATIO),
+            translator._effective_chunk_tokens())
+
+        # A model that writes more than the configured budget changes
+        # nothing: the cap only ever lowers.
+        engine.model_max_output_tokens = 128000
+        translator = self._make_translator(
+            engine, config={'novel_chunk_tokens': 16000})
+        self.assertEqual(16000, translator._effective_chunk_tokens())
+
+        # And it can be turned off.
+        engine.model_max_output_tokens = 4096
+        translator = self._make_translator(engine, config={
+            'novel_chunk_tokens': 16000,
+            'novel_output_aware_chunking': False})
+        self.assertEqual(16000, translator._effective_chunk_tokens())
+
+    def test_unknown_reply_limit_leaves_the_budget_alone(self):
+        engine = FakeEngine()
+        translator = self._make_translator(
+            engine, config={'novel_chunk_tokens': 16000})
+        self.assertEqual(0, translator.model_output_limit)
+        self.assertEqual(16000, translator._effective_chunk_tokens())
+
     def test_cancel_stops_run(self):
         engine = FakeEngine()
         translator = self._make_translator(engine)
@@ -1370,9 +1506,12 @@ class TestNovelTranslator(unittest.TestCase):
         second = translation_calls[1]
         self.assertIn('already translated', second)
         # The overlap must contain the translated form of at least one
-        # paragraph from the first chunk (which was echoed with '(IT)').
-        self.assertIn('(IT)', second.split(
-            'Translate each numbered')[0])
+        # paragraph from the first chunk (which was echoed with '(IT)'),
+        # and must come before the paragraphs to translate so the two
+        # blocks cannot be confused. The rules themselves are first, so
+        # that the part of the request that never changes can be served
+        # from the provider's prompt cache.
+        self.assertIn('(IT)', second.split('Source paragraphs:')[0])
 
     def test_overlap_disabled_no_context_block(self):
         """With overlap=0 no chunk should carry a context block, even the

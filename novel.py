@@ -19,7 +19,7 @@ from qt.core import (  # type: ignore
     QProgressBar, pyqtSignal, pyqtSlot, QPixmap, QListWidget,
     QListWidgetItem, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QSpacerItem, QStackedWidget, QComboBox, QMessageBox,
-    QSizePolicy, QColor)
+    QSizePolicy, QColor, QAbstractItemView)
 from calibre.constants import __version__  # type: ignore
 from calibre.gui2 import I  # type: ignore
 from calibre.utils.localization import _  # type: ignore
@@ -37,7 +37,8 @@ from .lib.element import (
 from .lib.translation import get_engine_class, get_translator
 from .lib.exception import TranslationCanceled, TranslationFailed
 from .lib.novel import (
-    ChapterBuilder, ContextManager, NovelTranslator, novel_cache_id)
+    Chapter, ChapterBuilder, ContextManager, NovelTranslator,
+    novel_cache_id)
 from .lib.conversion import get_novel_config
 from .engines.genai import GenAI
 from .components import (
@@ -166,6 +167,13 @@ class NovelPreparationWorker(QObject):
                     'title': ch.title,
                     'char_count': ch.char_count,
                     'paragraphs': len(ch.paragraphs),
+                    # Which pages and which cached paragraphs the chapter
+                    # is made of. With these the translation worker
+                    # rebuilds the chapters straight from the cache
+                    # instead of converting the whole ebook a second
+                    # time. See NovelTranslationWorker._chapters_from_meta.
+                    'page_ids': list(ch.page_ids),
+                    'paragraph_ids': [p.id for p in ch.paragraphs],
                 })
             # Persist chapter metadata so subsequent openings can reuse it
             # without re-running Plumber.
@@ -224,27 +232,40 @@ class NovelTranslationWorker(QObject):
         else:
             self.finished.emit(True, _('Novel mode: completed.'))
 
-    def _do_run(self):
-        cache = get_cache(self.cache_id)
-        translator = get_translator(self.engine_class)
-        translator.set_source_lang(self.ebook.source_lang)
-        translator.set_target_lang(self.ebook.target_lang)
+    def _chapters_from_meta(self, cache, chapters_meta):
+        """Rebuild the chapters from what the preparation worker stored.
 
-        # Rebuild chapters exactly as the preparation worker did.
-        # We need to reload the OEB spine to know page_ids/titles; a
-        # cheaper alternative is to reuse the metadata we cached earlier.
-        import json as _json
-        raw = cache.get_info('novel_chapters_meta')
-        try:
-            chapters_meta = _json.loads(raw) if raw else []
-        except (ValueError, TypeError):
-            chapters_meta = []
+        Preparation already converted the whole ebook to find the chapter
+        boundaries, and wrote down which pages and which cached
+        paragraphs every chapter ended up with. Rebuilding from that is
+        one query; the alternative, running Plumber again, is a second
+        full conversion of the book on every Start or Resume.
 
-        # Fetch the paragraphs of each chapter from the cache, grouped by
-        # page. We don't have direct chapter->page mapping in the meta
-        # blob (we only stored aggregate counts) so we still need the
-        # ChapterBuilder to reconstruct chapters. Re-running plumber just
-        # for that is expensive; instead we do a light-weight OEB parse.
+        Returns None when the metadata predates those two fields, so the
+        caller falls back to reading the ebook.
+        """
+        if not chapters_meta:
+            return None
+        if any('paragraph_ids' not in meta for meta in chapters_meta):
+            return None
+        by_id = {p.id: p for p in cache.all_paragraphs()}
+        chapters = []
+        for meta in chapters_meta:
+            chapters.append(Chapter(
+                index=meta['index'],
+                title=meta.get('title') or '',
+                page_ids=meta.get('page_ids') or [],
+                paragraphs=[by_id[pid] for pid in meta['paragraph_ids']
+                            if pid in by_id]))
+        return chapters
+
+    def _chapters_from_ebook(self, cache):
+        """Rebuild the chapters by converting the ebook again.
+
+        The fallback for caches whose metadata predates
+        :meth:`_chapters_from_meta`. It repeats exactly what the
+        preparation worker does, Plumber run included.
+        """
         input_path = self.ebook.get_input_path()
         plumber = Plumber(input_path, PersistentTemporaryFile(
             suffix='.epub').name, log=log)
@@ -276,10 +297,31 @@ class NovelTranslationWorker(QObject):
             'novel_chapter_source', 'toc_level_1') or 'toc_level_1'
         front_matter_min = int(
             get_config().get('novel_front_matter_min_chars', 100) or 0)
-        chapters = ChapterBuilder(
+        return ChapterBuilder(
             page_ids, oeb.toc.nodes, list(oeb.manifest.items),
             paragraphs, source=source,
             front_matter_min_chars=front_matter_min).build()
+
+    def _do_run(self):
+        cache = get_cache(self.cache_id)
+        translator = get_translator(self.engine_class)
+        translator.set_source_lang(self.ebook.source_lang)
+        translator.set_target_lang(self.ebook.target_lang)
+
+        # Rebuild the chapters the preparation worker had already built.
+        import json as _json
+        raw = cache.get_info('novel_chapters_meta')
+        try:
+            chapters_meta = _json.loads(raw) if raw else []
+        except (ValueError, TypeError):
+            chapters_meta = []
+
+        chapters = self._chapters_from_meta(cache, chapters_meta)
+        if chapters is None:
+            self.logging.emit(_(
+                'Chapter metadata was written by an older version: '
+                'reading the ebook again to rebuild the chapters.'), False)
+            chapters = self._chapters_from_ebook(cache)
 
         ctx = ContextManager(
             cache,
@@ -607,13 +649,15 @@ class NovelTranslation(QDialog):
             [_('Source'), _('Translation'), _('Type'), _('Notes')])
         self.glossary_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
-        self.tabs.addTab(self.glossary_table, _('Glossary'))
+        # Read-only on purpose. The table is redrawn from scratch every
+        # time a chapter completes, and the worker thread keeps its own
+        # copy of the glossary that it writes back after each chapter:
+        # an edit typed here during a run was overwritten without a word.
+        self.glossary_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
         glossary_actions = QHBoxLayout()
-        save_glossary_btn = QPushButton(_('Save edits'))
-        save_glossary_btn.clicked.connect(self._save_glossary_edits)
         reset_glossary_btn = QPushButton(_('Reset context'))
         reset_glossary_btn.clicked.connect(self._reset_context)
-        glossary_actions.addWidget(save_glossary_btn)
         glossary_actions.addWidget(reset_glossary_btn)
         glossary_actions.addStretch(1)
         glossary_wrap = QWidget()
@@ -621,9 +665,13 @@ class NovelTranslation(QDialog):
         glossary_wrap_layout.setContentsMargins(0, 0, 0, 0)
         glossary_wrap_layout.addWidget(self.glossary_table, 1)
         glossary_wrap_layout.addLayout(glossary_actions)
-        # Replace the tab widget with the wrapper.
-        self.tabs.removeTab(1)
-        self.tabs.insertTab(1, glossary_wrap, _('Glossary'))
+        # The table is added to the wrapper and only the wrapper becomes a
+        # tab. Adding the table as a page first and swapping it afterwards
+        # would leave it permanently invisible: QStackedLayout calls hide()
+        # on every page that is not the current one, and reparenting a
+        # widget into another layout never undoes an explicit hide() -- the
+        # Glossary tab would then show its buttons and no table at all.
+        self.tabs.addTab(glossary_wrap, _('Glossary'))
 
         # Log tab.
         self.log_view = QPlainTextEdit()
@@ -899,33 +947,7 @@ class NovelTranslation(QDialog):
         else:
             self.alert.pop(message, 'warning')
 
-    # -- glossary editing --------------------------------------------------
-
-    def _save_glossary_edits(self):
-        import json as _json
-        new_glossary = {}
-        for row in range(self.glossary_table.rowCount()):
-            def _cell(col):
-                item = self.glossary_table.item(row, col)
-                return (item.text() if item else '').strip()
-            source = _cell(0)
-            translation = _cell(1)
-            if not source or not translation:
-                continue
-            new_glossary[source] = {
-                'translation': translation,
-                'type': _cell(2),
-                'notes': _cell(3),
-            }
-        cache = get_cache(self.cache_id)
-        try:
-            cache.set_info(
-                'novel_glossary',
-                _json.dumps(new_glossary, ensure_ascii=False))
-        finally:
-            cache.close()
-        self._ui_glossary = new_glossary
-        self.alert.pop(_('Glossary saved.'))
+    # -- context -----------------------------------------------------------
 
     def _reset_context(self):
         ret = QMessageBox.question(

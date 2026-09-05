@@ -529,6 +529,19 @@ class TranslationSetting(QDialog):
         genai_model_layout.addWidget(genai_model_input, 3)
         genai_layout.addRow(_('Model'), genai_model)
 
+        genai_model_limits = QLabel()
+        genai_model_limits.setWordWrap(True)
+        genai_model_limits.setStyleSheet('color:grey;')
+        genai_model_limits.setToolTip(_(
+            'What the provider says about the selected model. The reply '
+            'limit is the one that matters most in Novel Mode: a chunk '
+            'is answered with a translation about as long as the chunk '
+            'itself, so it is what a request can be sized against.\n\n'
+            'Shown for engines whose model listing publishes the '
+            'figures (OpenRouter today), and only after the list has '
+            'been fetched.'))
+        genai_layout.addRow('', genai_model_limits)
+
         self.disable_wheel_event(genai_model_list)
 
         sampling_widget = QWidget()
@@ -704,9 +717,11 @@ class TranslationSetting(QDialog):
             return widget
 
         def openrouter_row(label, *widgets):
+            """Add one form row; returns its index so it can be hidden."""
+            index = openrouter_layout.rowCount()
             if len(widgets) == 1:
                 openrouter_layout.addRow(label, widgets[0])
-                return
+                return index
             container = QWidget()
             container_layout = QHBoxLayout(container)
             container_layout.setContentsMargins(0, 0, 0, 0)
@@ -714,6 +729,7 @@ class TranslationSetting(QDialog):
                 container_layout.addWidget(widget)
             container_layout.addStretch(1)
             openrouter_layout.addRow(label, container)
+            return index
 
         openrouter_row(
             _('Reasoning'),
@@ -743,7 +759,19 @@ class TranslationSetting(QDialog):
                   'the response. Recommended: the plugin only reads the '
                   'translated text, so returning it just costs bandwidth.')))
 
-        openrouter_row(
+        openrouter_advanced = QCheckBox(_('Show'))
+        openrouter_advanced.setToolTip(_(
+            'Show the sampling and penalty parameters.\n\n'
+            'They are hidden by default: they are specialist knobs, each '
+            'already at the neutral value that leaves it out of the '
+            'request, and a book-length translation has no use for them. '
+            'Hiding them does not change what is sent -- a value set here '
+            'and then hidden is still part of every request.'))
+        openrouter_layout.addRow(
+            _('Advanced parameters'), openrouter_advanced)
+
+        advanced_rows = []
+        advanced_rows.append(openrouter_row(
             _('Sampling'),
             openrouter_spin(
                 'top_k', 'top_k', 0, 200,
@@ -756,9 +784,9 @@ class TranslationSetting(QDialog):
             openrouter_spin(
                 'top_a', 'top_a', 0, 1, decimals=2, step=0.05,
                 tooltip=_('Dynamic filtering relative to the top token '
-                          'probability. 0 disables it.')))
+                          'probability. 0 disables it.'))))
 
-        openrouter_row(
+        advanced_rows.append(openrouter_row(
             _('Penalties'),
             openrouter_spin(
                 'frequency_penalty', 'frequency', -2, 2,
@@ -774,7 +802,18 @@ class TranslationSetting(QDialog):
                 'repetition_penalty', 'repetition', 0, 2,
                 decimals=2, step=0.05,
                 tooltip=_('Scale down tokens already present in the input. '
-                          '1 disables it.')))
+                          '1 disables it.'))))
+
+        def show_advanced_parameters(visible):
+            for row in advanced_rows:
+                openrouter_layout.setRowVisible(row, bool(visible))
+        openrouter_advanced.setChecked(bool(self.config.get(
+            'openrouter_advanced_parameters', False)))
+        openrouter_advanced.toggled.connect(
+            lambda checked: self.config.update(
+                openrouter_advanced_parameters=bool(checked)))
+        openrouter_advanced.toggled.connect(show_advanced_parameters)
+        show_advanced_parameters(openrouter_advanced.isChecked())
 
         openrouter_row(
             _('Limits'),
@@ -848,7 +887,10 @@ class TranslationSetting(QDialog):
                   '"response_format" is a provider that answers with the '
                   'source text copied next to the translation, and one '
                   'free to drop "reasoning" bills for thinking you asked '
-                  'it not to do. Turn it off if OpenRouter answers that '
+                  'it not to do.\n\n'
+                  'The request now carries only the parameters the chosen '
+                  'model accepts, which is what used to make this setting '
+                  'risky. Turn it off anyway if OpenRouter answers that '
                   'no provider is available for your model.')),
             openrouter_check(
                 'provider_zdr', 'zdr',
@@ -1007,6 +1049,48 @@ class TranslationSetting(QDialog):
         novel_layout.addRow(
             _('Overlap paragraphs'), novel_overlap)
         self.disable_wheel_event(novel_overlap)
+
+        novel_output_aware = QCheckBox(_('Cap it with the model limit'))
+        novel_output_aware.setToolTip(_(
+            'Never ask for a chunk longer than the model can answer.\n\n'
+            'On by default. The token cap above says how much to send; '
+            'it says nothing about how much the model is able to write '
+            'back, and the two are unrelated -- context windows run to '
+            'hundreds of thousands of tokens while reply limits start at '
+            '4096. A chunk that cannot be finished is cut mid-answer and '
+            'the lost paragraphs are asked for again, so the request is '
+            'paid twice.\n\n'
+            'The limit is the one the provider reported when the model '
+            'was picked in the Model row above, and it is only known for '
+            'engines that publish it (OpenRouter today). With no figure '
+            'to go on, the cap above is used as it stands.'))
+        novel_layout.addRow(
+            _('Chunk size against the reply limit'), novel_output_aware)
+
+        novel_reuse_paragraphs = QCheckBox(_('Keep'))
+        novel_reuse_paragraphs.setToolTip(_(
+            'Keep the paragraphs already translated in the cache instead '
+            'of sending them to the model again.\n\n'
+            'On by default. Translations are written after every chunk '
+            'while the chapter counter only moves once a chapter is '
+            'over, so a run cancelled at chunk 7 of 9 pays for those '
+            'seven chunks a second time when it resumes. Turn it off to '
+            'translate every pending chapter from scratch.'))
+        novel_layout.addRow(
+            _('Paragraphs already translated'), novel_reuse_paragraphs)
+
+        novel_prompt_cache = QCheckBox(_('Ask the engine to cache it'))
+        novel_prompt_cache.setToolTip(_(
+            'Ask the engine to keep the prompt prefix in its cache.\n\n'
+            'On by default. Every chunk of a chapter is sent with the '
+            'same system prompt -- role, languages, running summary and '
+            'glossary -- and a prefix the provider already holds is '
+            'billed at a fraction of the price.\n\n'
+            'Only engines whose API needs an explicit cache breakpoint '
+            '(Claude) read this. The ones that cache on their own '
+            '(ChatGPT, Gemini, DeepSeek) do it either way.'))
+        novel_layout.addRow(
+            _('Prompt prefix'), novel_prompt_cache)
 
         novel_structured = QComboBox()
         novel_structured.addItem(_('Auto (recommended)'), 'auto')
@@ -1229,6 +1313,12 @@ class TranslationSetting(QDialog):
             idx = novel_structured.findData(structured_mode)
             if idx >= 0:
                 novel_structured.setCurrentIndex(idx)
+            novel_output_aware.setChecked(bool(self.config.get(
+                'novel_output_aware_chunking', True)))
+            novel_reuse_paragraphs.setChecked(bool(self.config.get(
+                'novel_reuse_translated_paragraphs', True)))
+            novel_prompt_cache.setChecked(bool(self.config.get(
+                'novel_prompt_cache', True)))
             novel_context_tokens.setValue(int(self.config.get(
                 'novel_context_tokens', 4000) or 4000))
             novel_summary_tokens.setValue(int(self.config.get(
@@ -1285,6 +1375,15 @@ class TranslationSetting(QDialog):
         novel_structured.currentIndexChanged.connect(
             lambda _idx: self.config.update(
                 novel_structured_output=novel_structured.currentData()))
+        novel_output_aware.toggled.connect(
+            lambda checked: self.config.update(
+                novel_output_aware_chunking=bool(checked)))
+        novel_reuse_paragraphs.toggled.connect(
+            lambda checked: self.config.update(
+                novel_reuse_translated_paragraphs=bool(checked)))
+        novel_prompt_cache.toggled.connect(
+            lambda checked: self.config.update(
+                novel_prompt_cache=bool(checked)))
         novel_context_tokens.valueChanged.connect(
             _persist_novel('novel_context_tokens', int))
         novel_summary_tokens.valueChanged.connect(
@@ -1328,6 +1427,45 @@ class TranslationSetting(QDialog):
             _persist_prompt(novel_glossary_prompt, 'novel_glossary_prompt'))
 
         # Setup genAI model
+        def update_model_limits(model):
+            """Show what the provider says the chosen model can do, and
+            remember its reply limit.
+
+            The limit is written into the engine preferences so a
+            translation can size its requests against a real number
+            without asking the provider again. It is only ever written
+            when a listing has actually been fetched: with no listing to
+            speak from, whatever was stored for this engine stands.
+            """
+            details = getattr(self.current_engine, 'model_details', None)
+            if not details:
+                genai_model_limits.setVisible(False)
+                return
+            limits = self.current_engine.get_model_limits(model)
+            context = limits.get('context_length')
+            output = limits.get('max_output_tokens')
+            self.current_engine.config.update(
+                model_max_output_tokens=int(output or 0),
+                model_supported_parameters=list(
+                    limits.get('supported_parameters') or []))
+            if not limits:
+                genai_model_limits.setText(_(
+                    'The provider says nothing about this model.'))
+                genai_model_limits.setVisible(True)
+                return
+
+            def thousands(value):
+                if not value:
+                    return _('not stated')
+                return '{:,}'.format(int(value)).replace(',', ' ')
+            genai_model_limits.setText(_(
+                'Context: {context} tokens \u00b7 longest reply: {output} '
+                'tokens \u00b7 JSON schema: {json}').format(
+                    context=thousands(context), output=thousands(output),
+                    json=_('yes') if limits.get('structured_output')
+                    else _('no')))
+            genai_model_limits.setVisible(True)
+
         def init_ai_models(model=None):
             if not issubclass(self.current_engine, GenAI):
                 return
@@ -1357,11 +1495,13 @@ class TranslationSetting(QDialog):
                 genai_model_input.setText(model)
                 if model in models or model == _('Custom'):
                     genai_model_input.clear()
+            update_model_limits(model)
             genai_model_list.currentTextChanged.connect(init_ai_models)
         self.model_worker.finished.connect(init_ai_models)
-        genai_model_input.textChanged.connect(
-            lambda model: self.current_engine.config.update(
-                model=model.strip()))
+        def set_custom_model(model):
+            self.current_engine.config.update(model=model.strip())
+            update_model_limits(model.strip())
+        genai_model_input.textChanged.connect(set_custom_model)
 
         def fetch_ai_models():
             try:

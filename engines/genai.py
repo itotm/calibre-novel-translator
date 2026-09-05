@@ -11,13 +11,7 @@ class GenAI(Base, ABC):
     model: str | None
     samplings: list
     sampling: str
-    # One default for every GenAI engine. 1.0 is the middle ground
-    # between the determinism a book-length job wants for names and
-    # terminology and the freedom literary prose wants to avoid reading
-    # like a calque. Per-engine guidance disagrees in both directions,
-    # so the value is left where each provider's own scale is neutral
-    # and easy to move from in the Fine-tuning section.
-    temperature: float = 1.0
+    temperature: float
     top_p: float
     top_k: int
 
@@ -49,6 +43,48 @@ class GenAI(Base, ABC):
     # change: they will naturally pick up the overridden value.
 
     structured_output_mode: str | None = None
+
+    # Set by the novel pipeline when it wants the provider to keep the
+    # prompt prefix in its cache: every chunk of a chapter is sent with
+    # the same system prompt, a few thousand tokens of running summary
+    # and glossary, and a prefix the provider already holds is billed at
+    # a fraction of the price. Engines that cache on their own (OpenAI,
+    # Gemini, DeepSeek) ignore this; the ones whose API needs an explicit
+    # breakpoint read it in ``get_body``.
+    prompt_cache: bool = False
+
+    # What the provider says about each model it serves, keyed by model
+    # id: the context window, the longest reply it will write and whether
+    # it honours a JSON schema. Filled by ``get_models`` on engines whose
+    # listing publishes the numbers, empty everywhere else.
+    model_details: dict = {}
+
+    # The longest reply the configured model will write, in tokens, as
+    # the provider reported it when the model was chosen. Persisted in
+    # the engine preferences so a translation can size its requests
+    # against a real number without asking the provider again. 0 means
+    # nobody ever said.
+    model_max_output_tokens: int = 0
+
+    # The request parameters the configured model accepts, as the
+    # provider listed them when the model was chosen. Persisted next to
+    # the reply limit, and empty when nobody ever said -- in which case
+    # every parameter is sent, as it always was.
+    model_supported_parameters: list = []
+
+    @classmethod
+    def get_model_limits(cls, model):
+        """What the provider says ``model`` can do.
+
+        Returns a dict with ``context_length``, ``max_output_tokens``,
+        ``structured_output`` and ``supported_parameters`` -- any of them
+        possibly None or empty when the provider is silent about it -- or
+        an empty dict when the model is unknown, which is the case for
+        every engine that does not publish a listing and for any engine
+        whose listing was never fetched.
+        """
+        details = cls.model_details.get(model) if model else None
+        return dict(details) if details else {}
 
     def get_body_for_structured(self, text, schema=None):
         """Return the request body with structured (JSON) output enabled.

@@ -43,6 +43,7 @@ class ClaudeTranslate(GenAI):
 
     samplings = ['temperature', 'top_p']
     sampling = 'temperature'
+    temperature = 1.0
     top_p = 1.0
     top_k = 1
     stream = True
@@ -117,13 +118,33 @@ class ClaudeTranslate(GenAI):
 
         return headers
 
+    def get_system_prompt(self):
+        """The ``system`` field of a request.
+
+        A plain string normally. When ``prompt_cache`` is set -- the
+        novel pipeline does that -- it becomes a single block carrying a
+        cache breakpoint instead, so the provider keeps the prompt and
+        bills the requests that follow a fraction of the price for it.
+        Claude reuses a cached prefix for five minutes and needs it to
+        be at least 1024 tokens long (2048 on Haiku); a shorter one is
+        simply not cached, at no extra cost.
+        """
+        prompt = self._get_prompt()
+        if not self.prompt_cache:
+            return prompt
+        return [{
+            'type': 'text',
+            'text': prompt,
+            'cache_control': {'type': 'ephemeral'},
+        }]
+
     def get_body(self, text):
         body = {
             'stream': self.stream,
             'max_tokens': 4096,
             'model': self.model,
             'top_k': self.top_k,
-            'system': self._get_prompt(),
+            'system': self.get_system_prompt(),
             'messages': [{'role': 'user', 'content': text}]
         }
         sampling_value = getattr(self, self.sampling)

@@ -47,6 +47,11 @@ defaults: dict[str, Any] = {
     'ebook_metadata': {},
     'search_paths': [],
     'novel_mode_enabled': False,
+    # Show the sampling and penalty parameters of the OpenRouter section.
+    # Off by default: specialist knobs, each already at the neutral value
+    # that leaves it out of the request. Visibility only -- a value set
+    # and then hidden is still sent.
+    'openrouter_advanced_parameters': False,
     # Sized for the context windows current models actually have,
     # but capped by what a model can *write* rather than read: the
     # reply is about as long as the chunk, and output limits are far
@@ -105,6 +110,25 @@ defaults: dict[str, Any] = {
     # LLM calls. Typical target: front/back matter (Copyright, Table of
     # Contents, About the Author, ...) which is not narrative content.
     'novel_min_chars_for_context': 300,
+    # Keep the paragraphs the cache already holds instead of translating
+    # them again. Progress only advances at the end of a chapter while
+    # translations are stored after every chunk, so a run cancelled at
+    # chunk 7 of 9 would otherwise pay for those seven chunks twice.
+    'novel_reuse_translated_paragraphs': True,
+    # Cap the chunk budget with the longest reply the chosen model can
+    # write, as its provider reports it (OpenRouter publishes the figure
+    # for every model it proxies). Reading room and writing room have
+    # nothing to do with each other -- context windows run to hundreds of
+    # thousands of tokens, reply limits start at 4096 -- and a chunk the
+    # model cannot finish is paid for twice.
+    'novel_output_aware_chunking': True,
+    # Ask the engine to keep the prompt prefix in its cache. Every chunk
+    # of a chapter carries the same system prompt -- role, languages,
+    # running summary and glossary -- and a prefix the provider already
+    # holds is billed at a fraction of the price. Only engines with
+    # explicit cache breakpoints (Claude) read this; the ones that cache
+    # on their own are unaffected either way.
+    'novel_prompt_cache': True,
     'novel_chapter_source': 'toc_level_1',  # 'toc_level_1' | 'toc_level_2' | 'xhtml_file'
     # Pages whose total non-ignored text (in chars) is below this threshold
     # are treated as front/back matter (Cover, Titlepage, decorative pages)

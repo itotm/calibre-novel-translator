@@ -889,7 +889,11 @@ DEFAULT_NOVEL_TRANSLATION_PROMPT = (
 # Local models (Gemma, Mistral, LLaMA) tend to "forget" formatting rules
 # placed in a long system prompt but respect them when they are the last
 # thing they read before the actual task.
-DEFAULT_NOVEL_FORMAT_INSTRUCTIONS = (
+# The rules are the same for every request of the whole book, the source
+# block changes with every one of them: they are kept apart so a request
+# can put what never changes first, where a provider's prompt cache can
+# reuse it.
+DEFAULT_NOVEL_FORMAT_RULES = (
     'Translate each numbered paragraph below. Rules:\n'
     '1) Keep the exact marker "[N]" on its own line before each translated '
     'paragraph, in the same order and with the same numbers as the source.\n'
@@ -898,8 +902,12 @@ DEFAULT_NOVEL_FORMAT_INSTRUCTIONS = (
     '4) Preserve verbatim any inline placeholder like {id_XXXXX} '
     '(they represent images, line breaks and similar).\n'
     '5) Reply with the numbered paragraphs only. No preamble, no '
-    'explanation, no closing remarks.\n\n'
-    'Source paragraphs:\n\n{text}')
+    'explanation, no closing remarks.')
+
+DEFAULT_NOVEL_FORMAT_SOURCE = 'Source paragraphs:\n\n{text}'
+
+DEFAULT_NOVEL_FORMAT_INSTRUCTIONS = '%s\n\n%s' % (
+    DEFAULT_NOVEL_FORMAT_RULES, DEFAULT_NOVEL_FORMAT_SOURCE)
 
 
 DEFAULT_NOVEL_SUMMARY_PROMPT = (
@@ -1267,9 +1275,11 @@ class NovelTranslator:
         self.abort_count = 0
         self.total_chapters = 0
         self.completed_chapters = 0
-        # One-shot log flag: set to True after the first _structured_active
-        # call logs the chosen output format. Reset per instance.
+        # One-shot log flags: set to True after the first call that logs
+        # the chosen output format, and the first one that lowers the
+        # chunk budget. Reset per instance.
         self._structured_choice_logged = False
+        self._chunk_budget_logged = False
 
     # -- setters (mirroring lib.translation.Translation) -------------------
 
@@ -1546,6 +1556,86 @@ class NovelTranslator:
         """
         return bool(self._cfg('novel_skip_context_last_chapter', True))
 
+    # A chunk is answered with the same text in another language, plus
+    # the JSON scaffolding around it: the reply is about as long as what
+    # was sent, longer when the target language is wordier than the
+    # source. Two thirds of the model's output limit leaves room for
+    # both without wasting most of the window.
+    OUTPUT_BUDGET_RATIO = 0.66
+
+    @property
+    def output_aware_chunking(self):
+        """Whether the chunk size is capped by what the model can write.
+
+        On by default. ``novel_chunk_tokens`` says how much to send;
+        nothing in it says how much the model is able to answer, and the
+        two have nothing to do with each other -- context windows are
+        measured in hundreds of thousands of tokens while reply limits
+        run from 4096 up. A chunk the model cannot finish is cut
+        mid-answer, and the paragraphs that were lost are asked for
+        again: the request is paid twice and was never going to fit.
+        """
+        return bool(self._cfg('novel_output_aware_chunking', True))
+
+    @property
+    def model_output_limit(self):
+        """The longest reply the configured model will write, in tokens,
+        as its provider reported it when the model was chosen in the
+        setting dialog. 0 when nobody ever said."""
+        try:
+            return max(0, int(getattr(
+                self.translator, 'model_max_output_tokens', 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _effective_chunk_tokens(self):
+        """The per-chunk token budget, capped by what the model writes.
+
+        Never raises the configured budget, only lowers it, and says so
+        once when it does.
+        """
+        wanted = self.chunk_tokens
+        limit = self.model_output_limit
+        if not (self.output_aware_chunking and limit):
+            return wanted
+        allowed = max(500, int(limit * self.OUTPUT_BUDGET_RATIO))
+        if allowed >= wanted:
+            return wanted
+        if not self._chunk_budget_logged:
+            self._chunk_budget_logged = True
+            self.log(_(
+                'Chunk budget lowered from {} to {} tokens: this model '
+                'writes at most {} tokens per reply.').format(
+                    wanted, allowed, limit))
+        return allowed
+
+    @property
+    def reuse_translated_paragraphs(self):
+        """Whether paragraphs the cache already holds are kept instead of
+        being sent to the model again.
+
+        On by default. Translations are written after every chunk while
+        the progress counter only moves once a chapter is finished, so a
+        run cancelled at chunk 7 of 9 would otherwise pay for those seven
+        chunks a second time. Turn it off to force a fresh translation of
+        every paragraph of the chapters that are still pending.
+        """
+        return bool(self._cfg('novel_reuse_translated_paragraphs', True))
+
+    @property
+    def prompt_cache(self):
+        """Whether the engine is asked to cache the prompt prefix.
+
+        Every chunk of a chapter is sent with the same system prompt --
+        role, languages, running summary and glossary, a few thousand
+        tokens of it -- and providers charge a fraction of the price for
+        a prefix they already hold. Engines that cache on their own
+        (OpenAI, Gemini, DeepSeek) need nothing from us and ignore this;
+        it is the engines with explicit cache breakpoints, Claude today,
+        that read it.
+        """
+        return bool(self._cfg('novel_prompt_cache', True))
+
     # -- engine plumbing ---------------------------------------------------
 
     def _apply_prompt(self, prompt_text):
@@ -1554,6 +1644,9 @@ class NovelTranslator:
         Uses ``override_prompt`` if defined by the engine (GenAI helper),
         else falls back to assigning to ``.prompt`` directly.
         """
+        # Engines that support explicit prompt-cache breakpoints read this
+        # attribute; the others never look at it.
+        self.translator.prompt_cache = self.prompt_cache
         if hasattr(self.translator, 'override_prompt'):
             self.translator.override_prompt(prompt_text)
         else:
@@ -1733,6 +1826,10 @@ class NovelTranslator:
                     'Reasoning turned off for {} (novel_context_reasoning '
                     'is off).').format(label))
         cap = self.context_max_tokens
+        # Asking for more than the model can write is an error on some
+        # providers and a silent truncation on others.
+        if cap > 0 and self.model_output_limit:
+            cap = min(cap, self.model_output_limit)
         if cap > 0 and hasattr(translator, 'max_tokens'):
             try:
                 current = int(getattr(translator, 'max_tokens', 0) or 0)
@@ -1808,9 +1905,11 @@ class NovelTranslator:
         # glossary). Static per-chapter -- no formatting rules here.
         system_prompt = self._translation_system_prompt(context_text)
 
-        # Build the user message. Order matters: header, then optional
-        # overlap block (already translated -- for reading only), then
-        # format instructions + the tagged source paragraphs.
+        # Build the user message. Order matters for the provider's prompt
+        # cache: what never changes goes first -- the system prompt is
+        # the same for every chunk of a chapter -- then the header, the
+        # optional overlap block (already translated, for reading only)
+        # and last the tagged source paragraphs.
         header = model_text('Chapter {n}: "{title}" (chunk {c}/{t})').format(
             n=chapter_num, title=chapter_title,
             c=chunk_num, t=total_chunks)
@@ -1829,9 +1928,11 @@ class NovelTranslator:
                     + '\n' + joined + '\n'
                     + model_text('--- End of context ---'))
 
-        format_body = self._fill_placeholders(
-            DEFAULT_NOVEL_FORMAT_INSTRUCTIONS, extra={'{text}': tagged})
-        user_text = '%s%s\n\n%s' % (header, overlap_block, format_body)
+        user_text = '%s\n\n%s%s\n\n%s' % (
+            self._fill_placeholders(DEFAULT_NOVEL_FORMAT_RULES),
+            header, overlap_block,
+            self._fill_placeholders(
+                DEFAULT_NOVEL_FORMAT_SOURCE, extra={'{text}': tagged}))
 
         chunk_label = _('chapter {} chunk {}/{}').format(
             chapter_num, chunk_num, total_chunks)
@@ -2172,9 +2273,14 @@ class NovelTranslator:
             'placeholder like {id_XXXXX}. Do not add, drop, or renumber '
             'paragraphs. Return ONLY the JSON object, no preamble.')
 
+        # Order matters for the provider's prompt cache: the system
+        # prompt is identical for every chunk of a chapter and these
+        # instructions are identical for the whole book, so both sit
+        # before anything that changes from one request to the next
+        # (the chunk number in the header, the overlap, the payload).
         user_text = (
-            '%s%s\n\n%s\n\nInput:\n%s'
-            % (header, overlap_block, instructions, payload_json))
+            '%s\n\n%s%s\n\nInput:\n%s'
+            % (instructions, header, overlap_block, payload_json))
 
         chunk_label = _('chapter {} chunk {}/{}').format(
             chapter_num, chunk_num, total_chunks)
@@ -2525,8 +2631,9 @@ class NovelTranslator:
 
     # -- persistence -------------------------------------------------------
 
-    def _store_chapter(self, chapter, translations):
-        """Write chapter translations back to cache paragraphs."""
+    def _translation_identity(self):
+        """The (engine name, target language) pair stamped on a paragraph
+        when its translation is stored."""
         engine_name = getattr(self.translator, 'name', None)
         target_lang = None
         if hasattr(self.translator, 'get_target_lang'):
@@ -2536,9 +2643,40 @@ class NovelTranslator:
                 target_lang = None
         target_lang = target_lang or getattr(
             self.translator, 'target_lang', None)
+        return engine_name, target_lang
 
+    def _already_translated(self, paragraph, identity):
+        """Whether the cache already holds a usable translation of
+        ``paragraph``, made by the engine and for the language of this run.
+
+        A paragraph carrying no engine or language at all is accepted:
+        older caches predate those columns being filled in.
+        """
+        if not (paragraph.translation or '').strip():
+            return False
+        engine_name, target_lang = identity
+        if engine_name and paragraph.engine_name \
+                and paragraph.engine_name != engine_name:
+            return False
+        if target_lang and paragraph.target_lang \
+                and paragraph.target_lang != target_lang:
+            return False
+        return True
+
+    def _store_chapter(self, chapter, translations, positions=None):
+        """Write chapter translations back to cache paragraphs.
+
+        :positions: chapter positions to write. This runs once per chunk
+            while ``translations`` keeps growing, so without it every
+            chunk rewrites all the paragraphs the previous ones stored.
+            ``None`` writes everything that has a translation.
+        """
+        engine_name, target_lang = self._translation_identity()
+        pending = []
         for i, paragraph in enumerate(chapter.paragraphs, start=1):
             if paragraph.ignored:
+                continue
+            if positions is not None and i not in positions:
                 continue
             translation = translations.get(i)
             if translation is None:
@@ -2547,7 +2685,8 @@ class NovelTranslator:
             paragraph.engine_name = engine_name
             paragraph.target_lang = target_lang
             paragraph.is_cache = False
-            self.cache.update_paragraph(paragraph)
+            pending.append(paragraph)
+        self.cache.update_paragraphs(pending)
 
     # -- main loop ---------------------------------------------------------
 
@@ -2569,6 +2708,9 @@ class NovelTranslator:
         self.log(sep())
         self.log(_('Novel mode: starting.'))
         self.log(_('Total chapters: {}').format(self.total_chapters))
+        if self.model_output_limit:
+            self.log(_('Model reply limit: {} tokens.').format(
+                self.model_output_limit))
         self.log(_('Resuming from chapter: {}').format(start + 1))
         self.log(sep('┈'))
 
@@ -2613,14 +2755,41 @@ class NovelTranslator:
             self._report_progress()
             return
 
+        # Resume inside the chapter. Translations are stored after every
+        # chunk but the progress counter only moves once the chapter is
+        # over, so a run cancelled at chunk 7 of 9 would otherwise pay
+        # for those seven chunks a second time.
+        position = {p.id: i
+                    for i, p in enumerate(chapter.paragraphs, start=1)}
+        translations = {}
+        pending = list(translatable)
+        if self.reuse_translated_paragraphs:
+            identity = self._translation_identity()
+            pending = []
+            for paragraph in translatable:
+                if self._already_translated(paragraph, identity):
+                    translations[position[paragraph.id]] = \
+                        paragraph.translation
+                else:
+                    pending.append(paragraph)
+            if translations:
+                self.log(_(
+                    '  {} of {} paragraphs are already translated in the '
+                    'cache; asking the model for the remaining {}.').format(
+                        len(translations), len(translatable), len(pending)))
+            if not pending:
+                self.log(_(
+                    '  Nothing left to translate in this chapter.'))
+
         # Chunk with dual-cap (token budget + paragraph count).
+        chunk_tokens = self._effective_chunk_tokens()
         budget = TokenBudget(
-            budget=self.chunk_tokens,
+            budget=chunk_tokens,
             max_paragraphs=self.max_paragraphs_per_chunk,
         )
         overlap_reserved = self.overlap_paragraphs * 80
         chunks_with_stats = budget.chunk_with_stats(
-            translatable,
+            pending,
             reserved=(
                 self.context_tokens + self.summary_tokens + overlap_reserved))
         chunks = [c for c, _tok, _reason in chunks_with_stats]
@@ -2635,7 +2804,7 @@ class NovelTranslator:
             'Split into {} chunk(s). Caps: {} tokens / {} paragraphs. '
             'Overlap: {} paragraphs.')
             .format(
-                total_chunks, self.chunk_tokens, cap_paragraphs_display,
+                total_chunks, chunk_tokens, cap_paragraphs_display,
                 overlap_display))
         # Per-chunk diagnostic (helps tune the caps against a real book).
         # ``reason`` is one of TokenBudget.REASON_* and tells which limit
@@ -2659,27 +2828,18 @@ class NovelTranslator:
             relevant_to=source_text if self.glossary_relevant_only else None,
             glossary_limit=self.glossary_prompt_max_entries)
 
-        # Translate each chunk.
-        translations = {}
-        # We need to map each translatable paragraph's chunk-local index to
-        # its position inside the *chapter*. Simplest: enumerate the chapter
-        # paragraphs (skipping ignored) and remember, for each chunk, which
-        # chapter-index each of its paragraphs corresponds to.
-        chapter_local_index = {}
-        counter = 0
-        for i, p in enumerate(chapter.paragraphs, start=1):
-            if p.ignored:
-                continue
-            counter += 1
-            chapter_local_index[counter] = i  # translatable_seq -> chapter_seq
-
+        # Translate each chunk. A chunk-local index is mapped back to the
+        # position of that paragraph inside the chapter through ``position``
+        # (keyed by the cache row id), so a chunk list that covers only
+        # part of the chapter -- which is what resuming produces -- still
+        # lands in the right place.
+        #
         # Sliding overlap: after each chunk we capture up to
         # ``self.overlap_paragraphs`` of its just-produced translations
         # and pass them to the next chunk as reading context. The first
         # chunk of a chapter starts with an empty overlap.
         overlap_translations = []
 
-        seq = 0
         for c_idx, chunk in enumerate(chunks, start=1):
             if self.cancel_request():
                 raise TranslationCanceled(_('Translation canceled.'))
@@ -2695,17 +2855,19 @@ class NovelTranslator:
             # order the LLM saw them (chunk-local order), not in chapter
             # order, so that a "recent context" window is preserved.
             new_translations_in_chunk = []
-            for local_i in range(1, len(chunk) + 1):
-                p = chunk[local_i - 1]
+            written = set()
+            for local_i, p in enumerate(chunk, start=1):
                 if p.ignored:
                     continue
-                seq += 1
                 translation = chunk_result.get(local_i)
                 if translation is not None:
-                    translations[chapter_local_index[seq]] = translation
+                    chapter_position = position[p.id]
+                    translations[chapter_position] = translation
+                    written.add(chapter_position)
                     new_translations_in_chunk.append(translation)
-            # Persist translations as they arrive.
-            self._store_chapter(chapter, translations)
+            # Persist translations as they arrive -- only the ones this
+            # chunk produced, in a single transaction.
+            self._store_chapter(chapter, translations, positions=written)
 
             # Prepare overlap for the next chunk (last N translated
             # paragraphs of THIS chunk). If this chunk produced fewer

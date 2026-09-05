@@ -457,6 +457,11 @@ def get_novel_config():
             'novel_context_reasoning', False),
         'novel_min_chars_for_context': config.get(
             'novel_min_chars_for_context', 300),
+        'novel_reuse_translated_paragraphs': config.get(
+            'novel_reuse_translated_paragraphs', True),
+        'novel_prompt_cache': config.get('novel_prompt_cache', True),
+        'novel_output_aware_chunking': config.get(
+            'novel_output_aware_chunking', True),
         'novel_summary_input_max_chars': config.get(
             'novel_summary_input_max_chars', 60000),
         'novel_summary_max_chars': config.get(

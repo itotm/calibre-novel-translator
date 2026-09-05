@@ -79,15 +79,19 @@ class OpenRouterTranslate(ChatgptTranslate):
     models: list[str] = []
     model: str | None = 'deepseek/deepseek-v4-flash'
 
-    # The one place where a GenAI engine departs from the shared default
-    # of 1.0. OpenRouter is the gateway through which Novel Mode reaches
-    # models whose provider does not enforce `response_format`, so the
-    # requested JSON shape rests on the prompt alone -- and a model at
-    # 1.0 wanders off that shape far more readily than one at 0.2. Over a
-    # book, a drifting name or an invented detail also costs more than
-    # the flatness a low temperature brings. Raise it in the Fine-tuning
-    # section if the prose comes out lifeless.
-    temperature = 0.2
+    # Lower than what the other engines default to. Translation is a
+    # high-certainty task where diversity is noise: measured over six
+    # temperatures, quality falls as it rises -- 4.3 COMET points from 0
+    # to 1 on English to Chinese (arXiv:2303.13780). It also keeps a
+    # model on the requested JSON shape where the provider does not
+    # enforce it, and keeps names and terminology steady over a book.
+    #
+    # 0.3 rather than something lower because that is the value DeepSeek
+    # runs its own product at, and its published table -- 1.3 for
+    # translation -- is written on the API's remapped scale, not on the
+    # raw one this gateway forwards. Raise it in the Fine-tuning section
+    # if the prose comes out flat.
+    temperature = 0.3
 
     # -- extra sampling parameters -------------------------------------
     # Every value below is the neutral one: it is omitted from the request
@@ -101,6 +105,11 @@ class OpenRouterTranslate(ChatgptTranslate):
     top_a = 0.0
     max_tokens = 0
     seed = 0
+
+    # Filled in by the setting dialog from the model listing. See
+    # GenAI.model_max_output_tokens and model_supported_parameters.
+    model_max_output_tokens = 0
+    model_supported_parameters: list = []
 
     # -- reasoning ------------------------------------------------------
     # 'default' omits the field and lets the model decide, 'none' turns
@@ -160,6 +169,7 @@ class OpenRouterTranslate(ChatgptTranslate):
     preference_keys = (
         'top_k', 'frequency_penalty', 'presence_penalty',
         'repetition_penalty', 'min_p', 'top_a', 'max_tokens', 'seed',
+        'model_max_output_tokens', 'model_supported_parameters',
         'reasoning_effort', 'reasoning_max_tokens', 'reasoning_exclude',
         'provider_only', 'provider_order', 'provider_ignore',
         'provider_quantizations', 'provider_sort',
@@ -173,7 +183,21 @@ class OpenRouterTranslate(ChatgptTranslate):
             setattr(self, key, self.config.get(key, getattr(self, key)))
 
     def get_models(self):
-        """https://openrouter.ai/docs/api-reference/list-available-models"""
+        """https://openrouter.ai/docs/api-reference/list-available-models
+
+        The listing carries far more than the ids. For every model it
+        reports the context window, the longest reply its top provider
+        will write (``top_provider.max_completion_tokens``) and the
+        parameters that provider honours. Those are kept in
+        ``model_details`` so the setting dialog can show them and the
+        novel pipeline can size its requests against a real number
+        instead of a guess: a model that writes at most 4096 tokens
+        cannot answer a chunk budgeted at 16000.
+
+        The figures describe the provider OpenRouter would route to by
+        default. Provider routing can land on a different endpoint with
+        a lower ceiling, so they are an upper bound, not a promise.
+        """
         endpoint = self.endpoint or ''
         model_endpoint = re.sub(
             r'/chat/completions/?$', '/models', endpoint)
@@ -182,8 +206,28 @@ class OpenRouterTranslate(ChatgptTranslate):
         response = request(
             model_endpoint, headers=self.get_headers(),
             proxy_uri=self.proxy_uri)
-        return sorted(
-            item['id'] for item in json.loads(response).get('data') or [])
+        details = {}
+        for item in json.loads(response).get('data') or []:
+            model_id = item.get('id')
+            if not model_id:
+                continue
+            top_provider = item.get('top_provider') or {}
+            parameters = item.get('supported_parameters') or []
+            details[model_id] = {
+                'context_length': (
+                    top_provider.get('context_length')
+                    or item.get('context_length')),
+                'max_output_tokens': top_provider.get(
+                    'max_completion_tokens'),
+                'structured_output': (
+                    'structured_outputs' in parameters
+                    or 'response_format' in parameters),
+                'supported_parameters': list(parameters),
+            }
+        # Assigned, never mutated in place: the empty dict on GenAI is
+        # shared by every engine that does not publish a listing.
+        type(self).model_details = details
+        return sorted(details)
 
     def get_headers(self):
         headers = super().get_headers()
@@ -195,6 +239,71 @@ class OpenRouterTranslate(ChatgptTranslate):
         for name, value in parse_object(self.extra_headers).items():
             headers[str(name)] = str(value)
         return headers
+
+    # Optional knobs, as opposed to the request itself (model, messages,
+    # stream). Each is dropped when the chosen model does not list it
+    # among the parameters it accepts. A fifth of the catalogue takes no
+    # `temperature` at all -- the GPT-6 and GPT-5.6 families, the newest
+    # Claude models -- and a parameter a model cannot take is at best
+    # ignored and at worst, with `require_parameters` on, leaves the
+    # request with no provider to route to.
+    #
+    # `response_format` is deliberately not in the list: whether to ask
+    # for a JSON schema is decided once, by `structured_output_mode`
+    # below, and a user who overrides that decision in the Novel Mode
+    # settings means it.
+    optional_parameters = (
+        'temperature', 'top_p', 'top_k', 'min_p', 'top_a',
+        'frequency_penalty', 'presence_penalty', 'repetition_penalty',
+        'max_tokens', 'seed', 'logit_bias', 'stop', 'reasoning')
+
+    # Parameters OpenRouter names in more than one way in its listing.
+    parameter_aliases = {
+        'max_tokens': ('max_tokens', 'max_completion_tokens'),
+        'response_format': ('response_format', 'structured_outputs'),
+    }
+
+    def get_supported_parameters(self) -> list[str]:
+        """The parameters the chosen model accepts, empty when unknown.
+
+        Taken from the listing when it has been fetched in this session,
+        otherwise from what the setting dialog persisted when the model
+        was picked. Empty means nothing is filtered and every parameter
+        is sent, which is what happened before this existed.
+        """
+        listed = self.get_model_limits(self.model).get('supported_parameters')
+        return list(listed or self.model_supported_parameters or [])
+
+    def accepts_parameter(self, name, supported=None) -> bool:
+        supported = self.get_supported_parameters() \
+            if supported is None else supported
+        if not supported:
+            return True
+        return any(alias in supported
+                   for alias in self.parameter_aliases.get(name, (name,)))
+
+    def drop_unsupported(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Remove the optional fields the chosen model does not accept."""
+        supported = self.get_supported_parameters()
+        if not supported:
+            return body
+        for key in self.optional_parameters:
+            if key in body and not self.accepts_parameter(key, supported):
+                del body[key]
+        return body
+
+    @property
+    def structured_output_mode(self):
+        """Whether Novel Mode may ask this model for a JSON schema.
+
+        Inherited from the ChatGPT engine as a plain class attribute, it
+        described the gateway. Behind the gateway sit hundreds of models
+        and some of them accept no `response_format` at all, so the
+        answer depends on the model that is configured.
+        """
+        if not self.accepts_parameter('response_format'):
+            return None
+        return 'schema'
 
     def get_reasoning(self) -> dict[str, Any]:
         """Build the unified `reasoning` object.
@@ -267,6 +376,9 @@ class OpenRouterTranslate(ChatgptTranslate):
         provider = self.get_provider_routing()
         if provider:
             body['provider'] = provider
+        # Filtered before the escape hatch, which is how a field the
+        # listing does not mention can still be forced through.
+        self.drop_unsupported(body)
         # Applied last so it can override anything computed above.
         body.update(parse_object(self.extra_body))
         return body

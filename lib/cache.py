@@ -313,6 +313,24 @@ class TranslationCache:
             engine_name=paragraph.engine_name,
             target_lang=paragraph.target_lang)
 
+    def update_paragraphs(self, paragraphs):
+        """Write the translation of several paragraphs in one transaction.
+
+        :meth:`update_paragraph` commits once per row, and one fsync per
+        translated paragraph is a real cost on a book: a chapter of five
+        hundred paragraphs pays five hundred of them. Here the whole
+        batch is a single statement and a single commit.
+        """
+        paragraphs = list(paragraphs)
+        if not paragraphs:
+            return
+        self.cursor.executemany(
+            'UPDATE cache SET translation=?, engine_name=?, target_lang=? '
+            'WHERE id=?',
+            [(p.translation, p.engine_name, p.target_lang, p.id)
+             for p in paragraphs])
+        self.connection.commit()
+
     def delete_paragraphs(self, paragraphs):
         self.delete([paragraph.id for paragraph in paragraphs])
 

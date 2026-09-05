@@ -618,6 +618,108 @@ class TestOpenRouterTranslate(unittest.TestCase):
             headers=self.translator.get_headers(),
             proxy_uri=self.translator.proxy_uri)
 
+    @patch(module_name + '.openrouter.request')
+    def test_get_models_records_the_limits(self, mock_request):
+        mock_request.return_value = json.dumps({'data': [
+            {
+                'id': 'openai/gpt-5.1',
+                'context_length': 400000,
+                'top_provider': {
+                    'context_length': 400000,
+                    'max_completion_tokens': 128000,
+                },
+                'supported_parameters': ['response_format', 'seed'],
+            },
+            {
+                # No top_provider figures at all: the model is listed,
+                # and what is not stated stays unstated.
+                'id': 'someone/mystery-model',
+                'context_length': 8192,
+            },
+        ]})
+
+        self.assertEqual(
+            ['openai/gpt-5.1', 'someone/mystery-model'],
+            self.translator.get_models())
+        self.assertEqual(
+            {'context_length': 400000, 'max_output_tokens': 128000,
+             'structured_output': True,
+             'supported_parameters': ['response_format', 'seed']},
+            OpenRouterTranslate.get_model_limits('openai/gpt-5.1'))
+        self.assertEqual(
+            {'context_length': 8192, 'max_output_tokens': None,
+             'structured_output': False, 'supported_parameters': []},
+            OpenRouterTranslate.get_model_limits('someone/mystery-model'))
+        self.assertEqual(
+            {}, OpenRouterTranslate.get_model_limits('nobody/nothing'))
+
+    def test_parameters_the_model_rejects_are_not_sent(self):
+        """A fifth of the OpenRouter catalogue takes no temperature."""
+        translator = self.reconfigure(
+            model='vendor/no-knobs',
+            model_supported_parameters=['max_tokens', 'response_format'],
+            seed=42, top_k=20)
+
+        body = json.loads(translator.get_body('test content'))
+
+        self.assertNotIn('temperature', body)
+        self.assertNotIn('seed', body)
+        self.assertNotIn('top_k', body)
+        self.assertNotIn('reasoning', body)
+        # What the request is made of is never touched.
+        self.assertEqual('vendor/no-knobs', body['model'])
+        self.assertIn('messages', body)
+
+    def test_parameters_the_model_accepts_are_sent(self):
+        translator = self.reconfigure(
+            model='vendor/every-knob',
+            model_supported_parameters=[
+                'temperature', 'seed', 'top_k', 'reasoning'],
+            seed=42, top_k=20)
+
+        body = json.loads(translator.get_body('test content'))
+
+        self.assertEqual(0.3, body['temperature'])
+        self.assertEqual(42, body['seed'])
+        self.assertEqual(20, body['top_k'])
+        self.assertEqual({'enabled': False}, body['reasoning'])
+
+    def test_nothing_is_filtered_when_the_model_is_unknown(self):
+        translator = self.reconfigure(model='vendor/unlisted', seed=42)
+
+        body = json.loads(translator.get_body('test content'))
+
+        self.assertEqual(0.3, body['temperature'])
+        self.assertEqual(42, body['seed'])
+
+    def test_extra_body_forces_a_filtered_parameter(self):
+        translator = self.reconfigure(
+            model='vendor/no-knobs',
+            model_supported_parameters=['max_tokens'],
+            extra_body='{"temperature": 0.9}')
+
+        body = json.loads(translator.get_body('test content'))
+
+        self.assertEqual(0.9, body['temperature'])
+
+    def test_structured_output_follows_the_model(self):
+        self.assertIsNone(self.reconfigure(
+            model='vendor/no-json',
+            model_supported_parameters=['temperature'],
+        ).structured_output_mode)
+        self.assertEqual('schema', self.reconfigure(
+            model='vendor/json',
+            model_supported_parameters=['structured_outputs'],
+        ).structured_output_mode)
+        # An unknown model keeps what the gateway itself advertises.
+        self.assertEqual('schema', self.reconfigure(
+            model='vendor/unlisted').structured_output_mode)
+
+    def test_model_max_output_tokens_is_a_preference(self):
+        translator = self.reconfigure(model_max_output_tokens=64000)
+        self.assertEqual(64000, translator.model_max_output_tokens)
+        self.assertEqual(0, self.reconfigure().model_max_output_tokens)
+
     def test_get_headers(self):
         translator = self.reconfigure(
             app_referer='https://example.com', app_title='My Books',
@@ -633,7 +735,7 @@ class TestOpenRouterTranslate(unittest.TestCase):
         body = json.loads(self.translator.get_body('test content'))
 
         self.assertEqual('deepseek/deepseek-v4-flash', body['model'])
-        self.assertEqual(0.2, body['temperature'])
+        self.assertEqual(0.3, body['temperature'])
         # Reasoning is off by default and routing asks for the fastest
         # endpoint that honours every parameter we send.
         self.assertEqual({'enabled': False}, body['reasoning'])

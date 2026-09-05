@@ -47,6 +47,7 @@ class ChatgptTranslate(GenAI):
 
     samplings = ['temperature', 'top_p']
     sampling = 'temperature'
+    temperature = 1.0
     top_p = 1.0
     stream = True
 
