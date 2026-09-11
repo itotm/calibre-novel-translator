@@ -4,6 +4,7 @@ from typing import Any
 
 from calibre.utils.localization import _  # type: ignore
 
+from .. import NovelTranslatorPlugin
 from ..lib.utils import request
 
 from .openai import ChatgptTranslate
@@ -57,6 +58,10 @@ class OpenRouterTranslate(ChatgptTranslate):
     name = 'OpenRouter'
     alias = 'OpenRouter'
     endpoint = 'https://openrouter.ai/api/v1/chat/completions'
+    # One provider, no presets: the gateway is the whole point. The
+    # endpoint is not a setting either -- another server that speaks the
+    # same API is a provider of the OpenAI-compatible engine.
+    providers: dict = {}
     api_key_hint = 'sk-or-v1-xxx...xxx'
     # https://openrouter.ai/docs/api-reference/errors
     api_key_errors = [
@@ -79,19 +84,14 @@ class OpenRouterTranslate(ChatgptTranslate):
     models: list[str] = []
     model: str | None = 'deepseek/deepseek-v4-flash'
 
-    # Lower than what the other engines default to. Translation is a
-    # high-certainty task where diversity is noise: measured over six
-    # temperatures, quality falls as it rises -- 4.3 COMET points from 0
-    # to 1 on English to Chinese (arXiv:2303.13780). It also keeps a
-    # model on the requested JSON shape where the provider does not
-    # enforce it, and keeps names and terminology steady over a book.
-    #
-    # 0.3 rather than something lower because that is the value DeepSeek
-    # runs its own product at, and its published table -- 1.3 for
-    # translation -- is written on the API's remapped scale, not on the
-    # raw one this gateway forwards. Raise it in the Fine-tuning section
-    # if the prose comes out flat.
-    temperature = 0.3
+    # Translation is a high-certainty task where diversity is noise:
+    # measured over six temperatures, quality falls as it rises -- 4.3
+    # COMET points from 0 to 1 on English to Chinese (arXiv:2303.13780).
+    # A low value also keeps a model on the requested JSON shape where
+    # the provider does not enforce it, and keeps names and terminology
+    # steady over a book. Raise it in the Fine-tuning section if the
+    # prose comes out flat.
+    temperature = 0.2
 
     # -- extra sampling parameters -------------------------------------
     # Every value below is the neutral one: it is omitted from the request
@@ -141,12 +141,13 @@ class OpenRouterTranslate(ChatgptTranslate):
     provider_ignore = ''
     provider_quantizations = ''
     provider_sorts = ['default', 'price', 'throughput', 'latency']
-    # A book is a long sequence of large, strictly sequential requests,
-    # so the endpoint's speed is felt end to end: the same model behind
-    # the same gateway was measured at 200 tokens/s on one request and
-    # 30 on another a few minutes later. 'throughput' asks OpenRouter for
-    # the fastest endpoint rather than its balanced default.
-    provider_sort = 'throughput'
+    # A book is hundreds of large requests, so the endpoint's price is
+    # felt end to end; 'price' asks OpenRouter for the cheapest endpoint
+    # serving the model rather than its balanced default. 'throughput'
+    # is the one to pick when the run is too slow: the same model behind
+    # the same gateway was measured at 200 tokens/s on one endpoint and
+    # 30 on another.
+    provider_sort = 'price'
     provider_allow_fallbacks = True
     # Novel Mode asks for JSON with `response_format` and for reasoning
     # to be off; a provider that supports neither is free to ignore both
@@ -168,8 +169,8 @@ class OpenRouterTranslate(ChatgptTranslate):
     web_search_max_results = 5
 
     # -- attribution and escape hatches ---------------------------------
-    app_referer = 'https://github.com/itotm/calibre-plugin-ebook-translator'
-    app_title = 'Ebook Translator (Novel)'
+    app_referer = NovelTranslatorPlugin.homepage
+    app_title = NovelTranslatorPlugin.name
     extra_headers = ''
     extra_body = ''
 
@@ -188,6 +189,7 @@ class OpenRouterTranslate(ChatgptTranslate):
 
     def __init__(self):
         super().__init__()
+        self.endpoint = type(self).endpoint
         for key in self.preference_keys:
             setattr(self, key, self.config.get(key, getattr(self, key)))
 
@@ -207,13 +209,8 @@ class OpenRouterTranslate(ChatgptTranslate):
         default. Provider routing can land on a different endpoint with
         a lower ceiling, so they are an upper bound, not a promise.
         """
-        endpoint = self.endpoint or ''
-        model_endpoint = re.sub(
-            r'/chat/completions/?$', '/models', endpoint)
-        if model_endpoint == endpoint:
-            model_endpoint = '%s/models' % endpoint.rstrip('/')
         response = request(
-            model_endpoint, headers=self.get_headers(),
+            self.get_model_endpoint(), headers=self.get_headers(),
             proxy_uri=self.proxy_uri)
         details = {}
         for item in json.loads(response).get('data') or []:
@@ -238,15 +235,25 @@ class OpenRouterTranslate(ChatgptTranslate):
         type(self).model_details = details
         return sorted(details)
 
+    @staticmethod
+    def header_value(value) -> str:
+        """An HTTP header value the client can send.
+
+        ``http.client`` encodes header values as latin-1 and raises on
+        anything outside it, so a title typed in Japanese or Chinese
+        used to fail every request. Such characters are replaced.
+        """
+        return str(value).encode('latin-1', 'replace').decode('latin-1')
+
     def get_headers(self):
         headers = super().get_headers()
         # Optional attribution headers used by openrouter.ai/rankings.
         if self.app_referer:
-            headers['HTTP-Referer'] = str(self.app_referer)
+            headers['HTTP-Referer'] = self.header_value(self.app_referer)
         if self.app_title:
-            headers['X-Title'] = str(self.app_title)
+            headers['X-Title'] = self.header_value(self.app_title)
         for name, value in parse_object(self.extra_headers).items():
-            headers[str(name)] = str(value)
+            headers[self.header_value(name)] = self.header_value(value)
         return headers
 
     # Optional knobs, as opposed to the request itself (model, messages,
@@ -332,6 +339,21 @@ class OpenRouterTranslate(ChatgptTranslate):
         if reasoning and self.reasoning_exclude:
             reasoning['exclude'] = True
         return reasoning
+
+    def relax_parameters(self) -> bool:
+        """Stop insisting that the provider honour every parameter.
+
+        With ``require_parameters`` on, a provider list narrowed down to
+        one that does not take some parameter -- a JSON schema, a
+        reasoning field -- leaves OpenRouter with nothing to route to
+        and a 404 that says so. The pipeline calls this once when that
+        happens and asks again. Returns False when there was nothing to
+        relax.
+        """
+        if not self.provider_require_parameters:
+            return False
+        self.provider_require_parameters = False
+        return True
 
     def get_provider_routing(self) -> dict[str, Any]:
         """Build the `provider` object.

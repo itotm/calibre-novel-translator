@@ -19,10 +19,12 @@ pipeline (see ``lib/translation.py``), the novel pipeline:
 
 The public entry points are:
 
-    ChapterBuilder(oeb, paragraphs, config).build() -> list[Chapter]
+    ChapterBuilder(page_ids, toc_nodes, manifest_items, paragraphs).build()
+        -> list[Chapter], with auxiliary_paragraphs() for what is left out
     TokenBudget(budget).chunk(paragraphs, reserved) -> list[list[Paragraph]]
     ContextManager(cache).load() / append_chapter() / context_text()
-    NovelTranslator(translator, chapters, context_manager, cache, config).run()
+    NovelTranslator(translator, chapters, context_manager, cache, config,
+                    aux_paragraphs).run()
 
 This module has no direct dependency on Qt so it is fully unit-testable.
 """
@@ -35,7 +37,8 @@ from contextlib import contextmanager
 from calibre.utils.localization import _  # type: ignore
 
 from .utils import log, sep, uid, dummy
-from .exception import TranslationCanceled, TranslationFailed
+from .exception import (
+    TranslationCanceled, TranslationFailed, HTTPRequestError)
 
 
 load_translations()  # type: ignore
@@ -155,8 +158,9 @@ class ChapterBuilder:
         :source: 'toc_level_1' | 'toc_level_2' | 'xhtml_file'.
         :front_matter_min_chars: XHTML pages whose total non-ignored text
             is shorter than this threshold are considered front/back matter
-            (Cover, Titlepage, decorative pages) and their paragraphs are
-            silently dropped from chapter content. Set to 0 to disable.
+            (Cover, Titlepage, decorative pages). Their paragraphs are kept
+            out of the chapters and handed back by
+            :meth:`auxiliary_paragraphs` instead. Set to 0 to disable.
         """
         self.ordered_page_ids = list(ordered_page_ids)
         self.toc_nodes = list(toc_nodes or [])
@@ -166,6 +170,9 @@ class ChapterBuilder:
         self.front_matter_min_chars = max(0, int(front_matter_min_chars))
         self.aux_paragraphs = [
             p for p in self.paragraphs if p.page in self.AUX_PAGES]
+        # Filled by build(): the paragraphs of the pages the front-matter
+        # filter set aside.
+        self.front_matter_paragraphs = []
 
         # Pre-compute per-page character counts (non-ignored paragraphs only)
         # used by the front-matter filter.
@@ -343,12 +350,14 @@ class ChapterBuilder:
 
         # Group paragraphs by chapter, applying the front-matter filter.
         # Pages identified as front matter (very short text, e.g. Cover,
-        # Titlepage) are silently excluded from chapter content.  Their
-        # paragraphs are still in the cache and will be translated by the
-        # auxiliary pipeline (metadata/TOC titles), but they will not be
-        # sent to the LLM as part of the chapter narrative payload.
+        # Titlepage) are kept out of the narrative payload: sent to the
+        # model as isolated lines inside a chapter they invite
+        # hallucination. They are not dropped either -- a dedication or
+        # a part divider left in the source language is a hole in the
+        # book -- but set aside for ``auxiliary_paragraphs``, which the
+        # translator handles apart from the chapters.
         chapter_paragraphs = {i: [] for i in chapter_titles}
-        skipped_pages = set()
+        self.front_matter_paragraphs = []
         for p in self.paragraphs:
             if p.page in self.AUX_PAGES:
                 continue
@@ -356,7 +365,7 @@ class ChapterBuilder:
             if chap_i is None:
                 continue
             if self._is_front_matter(p.page):
-                skipped_pages.add(p.page)
+                self.front_matter_paragraphs.append(p)
                 continue
             chapter_paragraphs[chap_i].append(p)
 
@@ -370,6 +379,13 @@ class ChapterBuilder:
             )
             chapters.append(ch)
         return chapters
+
+    def auxiliary_paragraphs(self):
+        """Everything :meth:`build` left out of the chapters: the metadata
+        and table-of-contents entries, and the paragraphs of the pages the
+        front-matter filter set aside. The translator sends them apart from
+        the narrative, with no running context."""
+        return list(self.aux_paragraphs) + list(self.front_matter_paragraphs)
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +562,13 @@ INFO_NOVEL_GLOSSARY = 'novel_glossary'
 INFO_NOVEL_PROGRESS = 'novel_progress'
 INFO_NOVEL_CHAPTERS = 'novel_chapters_meta'
 INFO_NOVEL_STYLE = 'novel_author_style'
+# Why there is no brief, when there is none: shown in the window where
+# the brief would be, instead of an empty tab.
+INFO_NOVEL_STYLE_NOTE = 'novel_author_style_note'
+# The log of the last runs, kept with the book so the window can show
+# it again after being closed: what the author brief answered, why a
+# chapter's summary was dropped, where a run stopped.
+INFO_NOVEL_LOG = 'novel_log'
 
 
 # Words of a glossary key that are worth matching on their own. Four
@@ -590,19 +613,14 @@ class ContextManager:
     translation cache. No schema change is required.
     """
 
-    def __init__(self, cache, glossary_max_entries=200,
-                 summaries_keep_last=None):
+    def __init__(self, cache, glossary_max_entries=200):
         """
         :cache: a ``TranslationCache`` instance.
         :glossary_max_entries: hard cap. When new entries would exceed it,
             oldest entries are dropped (FIFO). Set to 0 for no limit.
-        :summaries_keep_last: if not None, only the last N summaries are
-            included in ``context_text``. Older ones still remain persisted
-            in case the user wants to see them in the UI.
         """
         self.cache = cache
         self.glossary_max_entries = int(glossary_max_entries or 0)
-        self.summaries_keep_last = summaries_keep_last
         self.summaries = []
         self.glossary = {}
         self.style = ''
@@ -666,10 +684,20 @@ class ContextManager:
     def set_style(self, text):
         """Store the author brief. Persisted like the rest of the context,
         so a resumed run reuses it instead of paying for the research
-        again."""
+        again. A brief replaces any note on why there was none."""
         self.style = (text or '').strip()
         self._persist()
+        if self.style:
+            self.cache.set_info(INFO_NOVEL_STYLE_NOTE, '')
         return self.style
+
+    def set_style_note(self, text):
+        """Record why there is no brief, for the window to show."""
+        self.cache.set_info(INFO_NOVEL_STYLE_NOTE, (text or '').strip())
+
+    def get_style_note(self):
+        raw = self.cache.get_info(INFO_NOVEL_STYLE_NOTE)
+        return raw if isinstance(raw, str) else ''
 
     def glossary_for(self, text=None, limit=0):
         """Return the glossary entries that ``text`` actually mentions.
@@ -723,11 +751,19 @@ class ContextManager:
         """
         summary = (summary or '').strip()
         if summary or title:
-            self.summaries.append({
+            entry = {
                 'chapter': int(chapter_index),
                 'title': title or '',
                 'summary': summary,
-            })
+            }
+            # A chapter translated a second time replaces its own entry:
+            # appending would repeat it in every later prompt.
+            for i, existing in enumerate(self.summaries):
+                if existing.get('chapter') == entry['chapter']:
+                    self.summaries[i] = entry
+                    break
+            else:
+                self.summaries.append(entry)
         if glossary_updates:
             self._merge_glossary(glossary_updates)
         # Progress advances only forward.
@@ -768,6 +804,14 @@ class ContextManager:
         self.summaries = []
         self.glossary = {}
         self.style = ''
+        self.progress = 0
+        self._persist()
+        self.cache.set_info(INFO_NOVEL_STYLE_NOTE, '')
+
+    def reset_progress(self):
+        """Forget which chapters are done and keep everything learned
+        from them, so a book can be translated again with the summaries,
+        the glossary and the author brief it already has."""
         self.progress = 0
         self._persist()
 
@@ -825,8 +869,6 @@ class ContextManager:
         max_chars = max(200, int(budget_tokens * ratio))
 
         summaries = self.summaries
-        if self.summaries_keep_last is not None:
-            summaries = summaries[-int(self.summaries_keep_last):]
 
         glossary_text = self._format_glossary(
             self.glossary_for(relevant_to, limit=glossary_limit))
@@ -977,9 +1019,12 @@ DEFAULT_NOVEL_FORMAT_RULES = (
 
 DEFAULT_NOVEL_FORMAT_SOURCE = 'Source paragraphs:\n\n{text}'
 
-DEFAULT_NOVEL_FORMAT_INSTRUCTIONS = '%s\n\n%s' % (
-    DEFAULT_NOVEL_FORMAT_RULES, DEFAULT_NOVEL_FORMAT_SOURCE)
 
+# What the summary call answers, and the combined call flags, when the
+# chapter is not part of the story: a copyright page, a list of the
+# author's other books, a preface, an afterword, notes. A summary of
+# those was carried into every later prompt as if it were plot.
+NOT_A_STORY_CHAPTER = 'NOT A STORY CHAPTER'
 
 DEFAULT_NOVEL_SUMMARY_PROMPT = (
     'Summarize the following chapter of a novel in <tlang>. '
@@ -989,8 +1034,12 @@ DEFAULT_NOVEL_SUMMARY_PROMPT = (
     '(e.g. relationships between characters, unresolved threads). '
     'Do not include any preamble or metacommentary; return the summary '
     'text only.\n\n'
+    'If the chapter is not part of the story itself -- a copyright page, '
+    'a list of other books, a dedication, a table of contents, a '
+    'preface, an afterword, notes, a biography of the author -- reply '
+    'with exactly: %s\n\n'
     'Chapter {chapter_num}: "{chapter_title}"\n\n'
-    '{text}')
+    '{text}') % NOT_A_STORY_CHAPTER
 
 
 DEFAULT_NOVEL_GLOSSARY_PROMPT = (
@@ -1026,21 +1075,30 @@ DEFAULT_NOVEL_CONTEXT_PROMPT = (
     'introduced.\n\n'
     'Reply with ONLY that JSON object. No preamble, no explanation, no '
     'markdown fences. Follow this exact schema:\n\n'
-    '{"summary": "...", "entities": [\n'
+    '{"narrative": true, "summary": "...", "entities": [\n'
     '  {"source": "Aslan", "translation": "Aslan", "type": "character", '
     '"notes": "the lion"},\n'
     '  {"source": "Narnia", "translation": "Narnia", "type": "place", '
     '"notes": ""}\n'
     ']}\n\n'
+    '"narrative" is true when the chapter is part of the story itself '
+    'and false for anything around it: a copyright page, a list of '
+    'other books, a dedication, a table of contents, a preface, an '
+    'afterword, notes, a biography of the author. When it is false, '
+    'make "summary" one sentence saying what the chapter is and '
+    '"entities" an empty list.\n\n'
     '"summary" is 150 to 350 words in <tlang>. Focus on plot events, '
     'character introductions and developments, key locations, and '
     'anything that will help translate the following chapters '
     'consistently (relationships between characters, unresolved '
     'threads). No preamble, no metacommentary.\n\n'
     '"entities" lists only the NEW characters, places, unique objects '
-    'and organizations, each with the translation you used for it. '
-    'Never list the same name twice, and never list a name that is '
-    'already known. Use an empty list when there are none.\n\n'
+    'and organizations, each with the translation you used for it, the '
+    'most important first and at most forty of them. Never list the '
+    'same name twice, and never list a name that is already known. Use '
+    'an empty list when there are none.\n\n'
+    'Write "narrative" and "summary" before "entities": a reply cut '
+    'short must still carry the summary.\n\n'
     'Chapter {chapter_num}: "{chapter_title}"\n\n'
     'Already known (skip these): {existing_keys}\n\n'
     'Source:\n{source_text}\n\n'
@@ -1058,14 +1116,31 @@ DEFAULT_NOVEL_CONTEXT_PROMPT = (
 # ``NO INFORMATION`` reply, which the pipeline recognises and discards.
 NO_AUTHOR_INFORMATION = 'NO INFORMATION'
 
+# What the brief may draw on, one sentence per way of asking: the
+# prompt used to tell every model to search the web and to reply NO
+# INFORMATION when it could not find anything, and a model with no
+# search behind it did exactly that, every time. A model that does not
+# know the author well still answers NO INFORMATION, and that is the
+# answer wanted: the window then says so, and the user can turn the web
+# search on or pick another model, rather than get a brief made up.
+AUTHOR_STYLE_SOURCES = {
+    'search': (
+        'Search the web and rely on what is actually documented about '
+        'this author and this book: criticism, reviews, translators\' '
+        'notes, encyclopaedia entries, publisher copy. Prefer sources '
+        'that discuss the prose itself rather than the plot.'),
+    'model': (
+        'Rely on what you know about this author and this book: the '
+        'criticism, reviews, translators\' notes and encyclopaedia '
+        'entries you have read. Prefer what concerns the prose itself '
+        'rather than the plot. Do not search anything.'),
+}
+
 DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT = (
     'You are preparing a brief for the translator of a novel. Describe '
     'how this particular book is written, so that its manner can be '
     'reproduced in <tlang>.\n\n'
-    'Search the web and rely on what is actually documented about this '
-    'author and this book: criticism, reviews, translators\' notes, '
-    'encyclopaedia entries, publisher copy. Prefer sources that discuss '
-    'the prose itself rather than the plot.\n\n'
+    '{sources}\n\n'
     'Cover, in this order and only where the sources support it: the '
     'genre and the period the book belongs to; the narrative voice and '
     'the point of view; the texture of the sentences (long or short, '
@@ -1077,8 +1152,8 @@ DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT = (
     'Write 150 to 300 words of plain prose in <tlang>. Describe only '
     'what you can support. Do not summarise the plot, do not review or '
     'praise the book, do not give advice that would apply to any novel, '
-    'and invent nothing. If you cannot find reliable information about '
-    'this author and this book, reply with exactly: %s\n\n'
+    'and invent nothing. If you know nothing reliable about this author '
+    'and this book, reply with exactly: %s\n\n'
     'Reply with the brief itself and nothing else: no preamble, no '
     'headings, no lists, no citations, no closing remarks.\n\n'
     'Author: {author}\n'
@@ -1122,6 +1197,56 @@ DIALOGUE_MARKS = (
 # sentence are parenthetical, not speech.
 DIALOGUE_DASHES = ('—', '–', '―', '-')
 
+# The conventions a user can prescribe instead of having the source
+# read. Each is what detect_dialogue_style would report for a book that
+# follows it: the primary pair, the pair used for a quotation inside a
+# line of speech, and whether lines of speech open with a dash. The
+# pairs are given outright rather than looked up in DIALOGUE_MARKS,
+# which only knows the marks worth counting: a reversed guillemet opens
+# speech in German and closes it in French, so it is never counted.
+DIALOGUE_CONVENTIONS = {
+    'curly_double': {
+        'label': '“…”  curly double quotation marks (‘…’ inside)',
+        'primary': ('“…”', 'curly double quotation marks'),
+        'nested': ('‘…’', 'curly single quotation marks'),
+        'dash': False},
+    'curly_single': {
+        'label': '‘…’  curly single quotation marks (“…” inside)',
+        'primary': ('‘…’', 'curly single quotation marks'),
+        'nested': ('“…”', 'curly double quotation marks'),
+        'dash': False},
+    'straight_double': {
+        'label': '"…"  straight double quotation marks (\'…\' inside)',
+        'primary': ('"…"', 'straight double quotation marks'),
+        'nested': ("'…'", 'straight single quotation marks'),
+        'dash': False},
+    'guillemets': {
+        'label': '«…»  guillemets (“…” inside)',
+        'primary': ('«…»', 'guillemets'),
+        'nested': ('“…”', 'curly double quotation marks'),
+        'dash': False},
+    'reversed_guillemets': {
+        'label': '»…«  reversed guillemets (›…‹ inside)',
+        'primary': ('»…«', 'reversed guillemets'),
+        'nested': ('›…‹', 'reversed single guillemets'),
+        'dash': False},
+    'low_high': {
+        'label': '„…“  low-high quotation marks (‚…‘ inside)',
+        'primary': ('„…“', 'low-high double quotation marks'),
+        'nested': ('‚…‘', 'low-high single quotation marks'),
+        'dash': False},
+    'dash': {
+        'label': '—  dash at the start of each line of speech',
+        'primary': None,
+        'nested': ('“…”', 'curly double quotation marks'),
+        'dash': True},
+    'corner': {
+        'label': '「…」  corner brackets (『…』 inside)',
+        'primary': ('「…」', 'corner brackets'),
+        'nested': ('『…』', 'white corner brackets'),
+        'dash': False},
+}
+
 # Below this many occurrences a mark is noise -- a stray quotation in an
 # epigraph, a measurement in inches -- rather than the book's convention.
 _DIALOGUE_MIN_COUNT = 6
@@ -1131,6 +1256,49 @@ _DIALOGUE_NESTED_RATIO = 0.05
 # Share of paragraphs that must open with a dash before dash dialogue is
 # reported. Real dash dialogue runs through whole conversations.
 _DIALOGUE_DASH_RATIO = 0.03
+
+
+def detect_book_dialogue_style(chapters):
+    """Return how the book punctuates direct speech, chapter by chapter.
+
+    :chapters: an iterable of chapters, each an iterable of source
+        paragraph strings.
+
+    Every chapter that shows a convention votes for it, and the book
+    follows the convention most chapters use; the raw counts then come
+    from those chapters alone. A raw count over the whole book let a
+    preface or an afterword decide -- an essay quoting at length in
+    straight marks outweighed a novel that opens speech with guillemets
+    a few times a page -- and a vote is what a preface cannot win.
+    The result is that of :func:`detect_dialogue_style`, plus ``votes``
+    (chapters that chose the winner) and ``voters`` (chapters that
+    showed any convention), both for the log.
+    """
+    chapters = [list(texts) for texts in chapters]
+    votes = {}
+    styles = []
+    for texts in chapters:
+        style = detect_dialogue_style(texts)
+        styles.append(style)
+        choice = style['primary'] or ('dash' if style['dash'] else None)
+        if choice:
+            votes[choice] = votes.get(choice, 0) + 1
+    if not votes:
+        style = detect_dialogue_style(
+            text for texts in chapters for text in texts)
+        style.update(votes=0, voters=0)
+        return style
+    winner = max(votes, key=lambda choice: (
+        votes[choice],
+        sum(s['counts'].get(choice, 0) for s in styles)))
+    chosen = [
+        texts for texts, style in zip(chapters, styles)
+        if (style['primary'] or ('dash' if style['dash'] else None))
+        == winner]
+    style = detect_dialogue_style(
+        text for texts in chosen for text in texts)
+    style.update(votes=votes[winner], voters=sum(votes.values()))
+    return style
 
 
 def detect_dialogue_style(texts):
@@ -1190,17 +1358,134 @@ def collapse_blank_lines(text):
     return _BLANK_LINES_RE.sub('\n\n', text or '').strip()
 
 
+# ---------------------------------------------------------------------------
+# What went wrong with a request
+# ---------------------------------------------------------------------------
+
+
+def _http_error(error):
+    """The HTTPRequestError behind ``error``, or None."""
+    for candidate in (error, getattr(error, 'cause', None)):
+        if isinstance(candidate, HTTPRequestError):
+            return candidate
+    return None
+
+
+def _error_payload(http):
+    """The ``error`` object of an HTTP error body, or {}."""
+    try:
+        payload = json.loads(http.body)
+    except (TypeError, ValueError):
+        return {}
+    error = payload.get('error') if isinstance(payload, dict) else None
+    return error if isinstance(error, dict) else {}
+
+
+def describe_error(error):
+    """One line saying what went wrong, for the log and the window.
+
+    The exception an engine raises carries a traceback and the whole
+    response body; on a rate limit that was a hundred lines to say
+    "try again later". The provider's own message is what a reader
+    wants: the status and, for OpenRouter, the upstream reason too.
+    """
+    http = _http_error(error)
+    if http is not None:
+        payload = _error_payload(http)
+        parts = ['HTTP %d' % http.status]
+        message = payload.get('message') or http.reason
+        if message:
+            parts.append(str(message))
+        metadata = payload.get('metadata')
+        raw = metadata.get('raw') if isinstance(metadata, dict) else None
+        if raw:
+            parts.append(str(raw))
+        return ': '.join(parts)
+    text = str(error)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    # The last line that is not part of a traceback is the message.
+    for line in reversed(lines):
+        if line.startswith(('File ', 'Traceback ', '~', '^')):
+            continue
+        return line[:300]
+    return text[:300]
+
+
+def retry_after(error):
+    """How long the provider asked to wait before asking again, in
+    seconds, or None."""
+    http = _http_error(error)
+    if http is None:
+        return None
+    if http.retry_after:
+        return float(http.retry_after)
+    metadata = _error_payload(http).get('metadata')
+    if isinstance(metadata, dict):
+        try:
+            value = float(metadata.get('retry_after_seconds') or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return None
+
+
+def is_rate_limited(error):
+    """Whether the request was refused for the moment, not for good."""
+    http = _http_error(error)
+    if http is not None:
+        if http.status == 429:
+            return True
+        payload = _error_payload(http)
+        metadata = payload.get('metadata')
+        code = metadata.get('provider_error_code') \
+            if isinstance(metadata, dict) else None
+        if code in ('capacity', 'rate_limit', 'rate_limited'):
+            return True
+    text = str(error).lower()
+    return 'rate-limit' in text or 'rate limit' in text \
+        or 'too many requests' in text
+
+
+def is_routing_dead_end(error):
+    """Whether OpenRouter found no provider taking every parameter."""
+    http = _http_error(error)
+    if http is None:
+        return False
+    message = str(_error_payload(http).get('message') or '')
+    return http.status == 404 and 'requested parameters' in message
+
+
 def _dialogue_pair(mark):
+    """The pair and the name of a mark: an opening mark as counted by
+    detection, or a ``(pair, name)`` tuple as a convention states it."""
+    if isinstance(mark, tuple):
+        return mark
     for opening, pair, name in DIALOGUE_MARKS:
         if opening == mark:
             return pair, name
     return mark, mark
 
 
-def dialogue_instruction(style):
-    """Turn :func:`detect_dialogue_style` output into prompt text.
+def dialogue_convention_style(key):
+    """The style dict of a convention in ``DIALOGUE_CONVENTIONS``, in
+    the shape :func:`detect_dialogue_style` returns, or None."""
+    convention = DIALOGUE_CONVENTIONS.get(key)
+    if convention is None:
+        return None
+    return {
+        'primary': convention['primary'],
+        'nested': convention['nested'],
+        'dash': convention['dash'],
+        'counts': {},
+    }
 
-    Returns '' when the source shows no convention worth stating, so the
+
+def dialogue_instruction(style):
+    """Turn :func:`detect_dialogue_style` output -- or a convention's
+    style, see :func:`dialogue_convention_style` -- into prompt text.
+
+    Returns '' when there is no convention worth stating, so the
     placeholder simply disappears from the system prompt.
     """
     if not style:
@@ -1268,9 +1553,34 @@ def dialogue_instruction(style):
 # Matches a marker line ``[N]`` capturing everything up to the next marker
 # or end of string.  MULTILINE + DOTALL so ``.`` spans newlines inside a
 # paragraph, and ``^\s*\[N\]`` anchors on a line by itself.
+# The marker is asked for on a line of its own, and most replies put it
+# there; some models write "[1] Text" on one line, or "**[1]**", and a
+# reply of theirs used to parse as forty-two missing paragraphs.
 _MARKER_RE = re.compile(
-    r'^[ \t]*\[(\d+)\][ \t]*\n(.*?)(?=\n[ \t]*\[\d+\][ \t]*\n|\Z)',
+    r'^[ \t]*(?:\*\*)?\[(\d+)\](?:\*\*)?[ \t]*:?[ \t]*\n?'
+    r'(.*?)'
+    r'(?=\n[ \t]*(?:\*\*)?\[\d+\](?:\*\*)?[ \t]*:?[ \t]*(?:\n|\S)|\Z)',
     re.MULTILINE | re.DOTALL)
+
+
+def _renumbered(found, expected_indices):
+    """Map a reply that numbered its paragraphs from 1 back onto the
+    numbers it was asked for.
+
+    A retry asks for the paragraphs that are still missing under their
+    original numbers -- 34 to 75, say -- and some models number what
+    they are given from 1 regardless. When nothing carries an expected
+    number and the reply's numbers are exactly 1..k for the k paragraphs
+    asked, the order is the mapping.
+    """
+    expected = list(expected_indices)
+    if not found or not expected or expected[0] == 1:
+        return None
+    if any(n in expected for n in found):
+        return None
+    if not set(found) <= set(range(1, len(expected) + 1)):
+        return None
+    return {expected[n - 1]: value for n, value in found.items()}
 
 
 def tag_paragraphs(paragraphs):
@@ -1323,11 +1633,20 @@ def parse_tagged_response(response, expected_indices):
             # itself contains a marker — but that case is already
             # handled by the outer finditer, so this cut is safe.
             body = body[:blank_break.start()]
+        body = body.strip()
+        if not body:
+            # A marker with nothing under it is a paragraph the model
+            # skipped, not a translation. Left out, it is asked for again
+            # by the alignment retry; stored, it blanked the paragraph in
+            # the output. The structured path treats an empty
+            # "translation" the same way.
+            continue
         # Latest occurrence wins if duplicated.
-        found[idx] = body.strip()
+        found[idx] = body
     # Filter to only expected indices to avoid pollution from
     # hallucinated tags.
-    return {i: found[i] for i in expected_indices if i in found}
+    result = {i: found[i] for i in expected_indices if i in found}
+    return result or _renumbered(found, expected_indices) or {}
 
 
 # ---------------------------------------------------------------------------
@@ -1516,9 +1835,16 @@ class NovelTranslator:
     """
 
     def __init__(self, translator, chapters, context_manager, cache,
-                 config=None):
+                 config=None, aux_paragraphs=None):
+        """
+        :aux_paragraphs: the paragraphs that belong to no chapter -- the
+            metadata, the table of contents, the pages the front-matter
+            filter set aside (see ``ChapterBuilder.auxiliary_paragraphs``).
+            Translated before the chapters, apart from the narrative.
+        """
         self.translator = translator
         self.chapters = list(chapters)
+        self.aux_paragraphs = list(aux_paragraphs or [])
         self.ctx = context_manager
         self.cache = cache
         self.config = dict(config or {})
@@ -1532,7 +1858,6 @@ class NovelTranslator:
         self.cancel_request = lambda: False
 
         # Runtime state.
-        self.abort_count = 0
         self.total_chapters = 0
         self.completed_chapters = 0
         # One-shot log flags: set to True after the first call that logs
@@ -1540,12 +1865,16 @@ class NovelTranslator:
         # chunk budget. Reset per instance.
         self._structured_choice_logged = False
         self._chunk_budget_logged = False
+        self._reply_room_logged = False
         # Computed once per book, lazily: the dialogue rule read off the
         # source, and the author brief (researched or read back from the
         # context). None means "not worked out yet", '' means "worked
         # out, and there is nothing to say".
         self._dialogue_rules = None
         self._author_style = None
+        # Whether the chapter being worked on belongs to the story, as
+        # the model reported when asked for its summary.
+        self._chapter_is_narrative = True
 
     # -- setters (mirroring lib.translation.Translation) -------------------
 
@@ -1589,7 +1918,7 @@ class NovelTranslator:
 
         Set to 0 to disable the cap and use only the token budget.
         """
-        return int(self._cfg('novel_max_paragraphs_per_chunk', 100))
+        return int(self._cfg('novel_max_paragraphs_per_chunk', 75))
 
     @property
     def overlap_paragraphs(self):
@@ -1610,7 +1939,7 @@ class NovelTranslator:
 
         Set to 0 to disable overlap entirely.
         """
-        return max(0, int(self._cfg('novel_overlap_paragraphs', 3)))
+        return max(0, int(self._cfg('novel_overlap_paragraphs', 5)))
 
     @property
     def structured_output_setting(self):
@@ -1779,25 +2108,16 @@ class NovelTranslator:
         value = self._cfg('novel_translation_prompt', None)
         return value or DEFAULT_NOVEL_TRANSLATION_PROMPT
 
-    @property
-    def summary_prompt(self):
-        value = self._cfg('novel_summary_prompt', None)
-        return value or DEFAULT_NOVEL_SUMMARY_PROMPT
-
-    @property
-    def glossary_prompt(self):
-        value = self._cfg('novel_glossary_prompt', None)
-        return value or DEFAULT_NOVEL_GLOSSARY_PROMPT
-
-    @property
-    def context_prompt(self):
-        value = self._cfg('novel_context_prompt', None)
-        return value or DEFAULT_NOVEL_CONTEXT_PROMPT
-
-    @property
-    def author_style_prompt(self):
-        value = self._cfg('novel_author_style_prompt', None)
-        return value or DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT
+    # The summary, glossary, combined-context and author-brief prompts
+    # are the plugin's own and not settings: they ask for a shape the
+    # code parses (a JSON object with given fields, a summary of a given
+    # size) and a prompt typed by a user broke that shape more often
+    # than it improved the answer. The translation prompt stays a
+    # setting, because its output is prose.
+    summary_prompt = DEFAULT_NOVEL_SUMMARY_PROMPT
+    glossary_prompt = DEFAULT_NOVEL_GLOSSARY_PROMPT
+    context_prompt = DEFAULT_NOVEL_CONTEXT_PROMPT
+    author_style_prompt = DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT
 
     @property
     def author_style_setting(self):
@@ -1813,21 +2133,22 @@ class NovelTranslator:
                          a gateway that bills search results.
           ``'off'``   -- do not ask at all.
         """
-        value = self._cfg('novel_author_style', 'auto')
+        value = self._cfg('novel_author_style', 'model')
         if value not in ('auto', 'model', 'off'):
             value = 'auto'
         return value
 
     @property
     def dialogue_convention(self):
-        """Whether the system prompt states how the source punctuates
-        direct speech. ``'auto'`` (the default) works it out from the
-        source text; ``'off'`` says nothing and lets the model choose,
-        which is what produced guillemets in one chapter and straight
-        quotes in the next.
+        """How the system prompt states the punctuation of direct
+        speech. ``'auto'`` (the default) reads it off the source text,
+        chapter by chapter; a key of ``DIALOGUE_CONVENTIONS`` prescribes
+        that convention; ``'off'`` says nothing and lets the model
+        choose, which is what produced guillemets in one chapter and
+        straight quotes in the next.
         """
         value = self._cfg('novel_dialogue_convention', 'auto')
-        if value not in ('auto', 'off'):
+        if value not in ('auto', 'off') and value not in DIALOGUE_CONVENTIONS:
             value = 'auto'
         return value
 
@@ -1868,17 +2189,22 @@ class NovelTranslator:
         """Whether the summary and the glossary are asked for at once.
 
         On by default: the two tasks read the same chapter, so keeping
-        them apart sends it twice. A prompt typed by the user in either
-        of the two separate fields wins over this -- that prompt would
-        otherwise be silently ignored -- unless a combined prompt of
-        their own is set in ``novel_context_prompt``.
+        them apart sends it twice.
         """
-        if not bool(self._cfg('novel_combined_context_call', True)):
-            return False
-        if self._cfg('novel_context_prompt', None):
-            return True
-        return not (self._cfg('novel_summary_prompt', None)
-                    or self._cfg('novel_glossary_prompt', None))
+        return bool(self._cfg('novel_combined_context_call', True))
+
+    @property
+    def context_narrative_only(self):
+        """Whether the summary and the glossary are kept only for the
+        chapters that belong to the story.
+
+        On by default. The model that summarises a chapter is asked
+        whether the chapter is part of the story at all; a copyright
+        page, a list of the author's other books, a preface or a note
+        gets no summary and no glossary entries, which would otherwise
+        be carried into every later prompt as if they were plot.
+        """
+        return bool(self._cfg('novel_context_narrative_only', True))
 
     @property
     def skip_context_last_chapter(self):
@@ -1896,7 +2222,17 @@ class NovelTranslator:
     # was sent, longer when the target language is wordier than the
     # source. Two thirds of the model's output limit leaves room for
     # both without wasting most of the window.
-    OUTPUT_BUDGET_RATIO = 0.66
+    # How long a reply is for a chunk of a given size: the translation
+    # runs to 1.2-1.5 times the source in most language pairs, and the
+    # JSON or the markers around it add a fifth. And what a reply needs
+    # over that: the object's own scaffolding, a few entries repeated.
+    # One pair of numbers sizes both the chunk (how much source fits
+    # under the reply room) and the room asked for a chunk (how much
+    # the reply of that source needs), so the two cannot disagree; they
+    # used to, and a chunk sized for 11000 source tokens was given room
+    # for 16384 of reply, a third short.
+    REPLY_RATIO = 2.2
+    REPLY_MARGIN = 1500
 
     @property
     def output_aware_chunking(self):
@@ -1912,37 +2248,100 @@ class NovelTranslator:
         """
         return bool(self._cfg('novel_output_aware_chunking', True))
 
+    # No model writes more than this in one reply; a listing that says
+    # so is quoting the context window (OpenRouter has reported 943718
+    # for a model with a million-token context), and is not believed.
+    MODEL_OUTPUT_LIMIT_CEILING = 262144
+
     @property
     def model_output_limit(self):
         """The longest reply the configured model will write, in tokens,
         as its provider reported it when the model was chosen in the
-        setting dialog. 0 when nobody ever said."""
+        setting dialog. 0 when nobody ever said, or when the figure is
+        not a reply limit at all."""
         try:
-            return max(0, int(getattr(
+            limit = max(0, int(getattr(
                 self.translator, 'model_max_output_tokens', 0) or 0))
         except (TypeError, ValueError):
             return 0
+        return limit if limit <= self.MODEL_OUTPUT_LIMIT_CEILING else 0
 
-    def _effective_chunk_tokens(self):
-        """The per-chunk token budget, capped by what the model writes.
+    def _effective_chunk_tokens(self, reserved=0):
+        """The tokens of source text one chunk may carry.
+
+        Two ceilings, and the lower one wins. The configured budget minus
+        ``reserved`` is what the context window leaves once the system
+        prompt, the running summary, the glossary and the overlap are in;
+        the reply limit of the model, when the provider published one,
+        is how much of a translation it can write back. The two are
+        unrelated -- the reserve is input, the limit is output -- which
+        is why the reserve is subtracted from the budget and never from
+        the limit: taken off both, a 4096-token limit left 200 tokens per
+        chunk and a chapter went out one paragraph at a time.
 
         Never raises the configured budget, only lowers it, and says so
-        once when it does.
+        once when the model limit is what lowers it.
         """
-        wanted = self.chunk_tokens
-        limit = self.model_output_limit
-        if not (self.output_aware_chunking and limit):
+        wanted = max(200, self.chunk_tokens - int(reserved or 0))
+        room = self.reply_room_limit
+        if not (self.output_aware_chunking and room):
             return wanted
-        allowed = max(500, int(limit * self.OUTPUT_BUDGET_RATIO))
+        allowed = self.source_for_reply(room)
         if allowed >= wanted:
             return wanted
         if not self._chunk_budget_logged:
             self._chunk_budget_logged = True
             self.log(_(
-                'Chunk budget lowered from {} to {} tokens: this model '
-                'writes at most {} tokens per reply.').format(
-                    wanted, allowed, limit))
+                'Chunk budget lowered from {} to {} source tokens: a reply '
+                'may run to {} tokens ({}), and a translation is about '
+                '{} times its source with the JSON around it.').format(
+                    wanted, allowed, room, self._reply_room_reason(),
+                    self.REPLY_RATIO))
         return allowed
+
+    @property
+    def reply_room_limit(self):
+        """The most a reply may run to, in tokens: the lower of what the
+        model can write and the cap in the settings, 0 when neither is
+        known."""
+        limits = [n for n in (self.model_output_limit, self.reply_max_tokens)
+                  if n]
+        return min(limits) if limits else 0
+
+    def _reply_room_reason(self):
+        limit, cap = self.model_output_limit, self.reply_max_tokens
+        if limit and (not cap or limit <= cap):
+            return _('the model\'s limit')
+        return _('the cap in the settings')
+
+    def source_for_reply(self, room):
+        """How much source fits in a chunk whose reply may run to
+        ``room`` tokens."""
+        return max(300, int((room - self.REPLY_MARGIN) / self.REPLY_RATIO))
+
+    def reply_for_source(self, source_tokens):
+        """How much room the reply of ``source_tokens`` needs."""
+        return int(self.REPLY_RATIO * source_tokens) + self.REPLY_MARGIN
+
+    def _log_sizing(self):
+        """Say once, at the start, how the requests are sized and why."""
+        reserved = (self.context_tokens + self.summary_tokens
+                    + self.overlap_paragraphs * 80)
+        room = self.reply_room_limit
+        source = self._effective_chunk_tokens(reserved)
+        parts = [_('Sizing: {} tokens of budget less {} reserved for the '
+                   'running context').format(self.chunk_tokens, reserved)]
+        if room and self.output_aware_chunking:
+            parts.append(_(
+                'a reply of at most {} tokens ({}) holds about {} of '
+                'source').format(room, self._reply_room_reason(),
+                                 self.source_for_reply(room)))
+        parts.append(_('so a chunk carries up to {} source tokens').format(
+            source))
+        if self.max_paragraphs_per_chunk:
+            parts.append(_('and {} paragraphs').format(
+                self.max_paragraphs_per_chunk))
+        self.log('; '.join(parts) + '.')
 
     @property
     def reuse_translated_paragraphs(self):
@@ -1956,6 +2355,80 @@ class NovelTranslator:
         every paragraph of the chapters that are still pending.
         """
         return bool(self._cfg('novel_reuse_translated_paragraphs', True))
+
+    @property
+    def reply_max_tokens(self):
+        """The most a translation request may ask the model to write,
+        in tokens, when the engine leaves the figure to the provider.
+
+        Left out, a provider applies a default of its own -- 4096 on
+        many -- and a chunk of seventy-five paragraphs came back cut at
+        a third, three times over, before the paragraphs were asked for
+        in smaller pieces. Each chunk asks for what it needs, twice its
+        own size plus room for the JSON, up to this cap and to what the
+        model can write. 0 sends nothing and leaves it to the provider.
+        """
+        return max(0, int(self._cfg('novel_reply_max_tokens', 16384) or 0))
+
+    @contextmanager
+    def _reply_room(self, chunk_paragraphs):
+        """Set the engine's reply limit for one chunk, when the engine
+        leaves it to the provider, and put it back afterwards."""
+        translator = self.translator
+        cap = self.reply_max_tokens
+        current = 0
+        if cap and hasattr(translator, 'max_tokens'):
+            try:
+                current = int(getattr(translator, 'max_tokens', 0) or 0)
+            except (TypeError, ValueError):
+                current = 0
+        if not cap or current > 0 or not hasattr(translator, 'max_tokens'):
+            yield
+            return
+        source = sum(self._estimate_tokens(p.original or '')
+                     for p in chunk_paragraphs
+                     if not getattr(p, 'ignored', False))
+        wanted = min(cap, self.reply_for_source(source))
+        if self.model_output_limit:
+            wanted = min(wanted, self.model_output_limit)
+        if not self._reply_room_logged:
+            self._reply_room_logged = True
+            self.log(_(
+                'Reply room: each chunk asks the model for {} times its '
+                'source plus {} tokens, capped at {} tokens '
+                '(novel_reply_max_tokens).').format(
+                    self.REPLY_RATIO, self.REPLY_MARGIN, cap))
+        translator.max_tokens = wanted
+        try:
+            yield
+        finally:
+            translator.max_tokens = 0
+
+    @property
+    def rate_limit_max_wait(self):
+        """How long, in seconds, a rate-limited request may be waited
+        out before it counts as a failure. A 429 says "not now", not
+        "never": the three attempts used to be spent in a second on a
+        provider that asked for one second of patience. 0 treats a rate
+        limit like any other error."""
+        return max(0, int(self._cfg('novel_rate_limit_max_wait', 600) or 0))
+
+    @property
+    def on_missing_paragraphs(self):
+        """What to do with paragraphs the model never returned, once the
+        retries inside a chunk and one more pass in smaller chunks have
+        all been tried.
+
+        'stop', the default, ends the run with the chapter unfinished:
+        its progress is not recorded, so a resume asks for exactly those
+        paragraphs again and nothing else. 'continue' logs them and goes
+        on to the next chapter; they keep their source text in the
+        output, and nothing comes back for them later, because a resume
+        starts after the last finished chapter.
+        """
+        value = str(self._cfg(
+            'novel_on_missing_paragraphs', 'stop') or 'stop').lower()
+        return 'continue' if value == 'continue' else 'stop'
 
     @property
     def prompt_cache(self):
@@ -2062,11 +2535,19 @@ class NovelTranslator:
             self.log(_('Dialogue punctuation: using the rule from the '
                        'settings.'))
             return custom
-        style = detect_dialogue_style(
-            paragraph.original
-            for chapter in self.chapters
-            for paragraph in chapter.paragraphs
-            if not getattr(paragraph, 'ignored', False))
+        convention = self.dialogue_convention
+        if convention != 'auto':
+            rules = dialogue_instruction(dialogue_convention_style(convention))
+            self.log(_(
+                'Dialogue punctuation as set in the settings: {}. Every '
+                'chapter will be asked to use it.').format(
+                    DIALOGUE_CONVENTIONS[convention]['label'].strip()))
+            return rules
+        style = detect_book_dialogue_style(
+            [paragraph.original
+             for paragraph in chapter.paragraphs
+             if not getattr(paragraph, 'ignored', False)]
+            for chapter in self.chapters)
         rules = dialogue_instruction(style)
         if not rules:
             self.log(_('Dialogue punctuation: the source shows no '
@@ -2077,10 +2558,12 @@ class NovelTranslator:
             for mark, count in sorted(
                 style['counts'].items(), key=lambda i: -i[1])[:4])
         self.log(_(
-            'Dialogue punctuation read off the source: {primary} '
+            'Dialogue punctuation read off the source: {primary}, the '
+            'choice of {votes} of the {voters} chapter(s) that show one '
             '(counts: {counts}; paragraphs opening with a dash: {dash}). '
             'Every chapter will be asked to use it.').format(
                 primary=style.get('primary') or '—',
+                votes=style.get('votes', 0), voters=style.get('voters', 0),
                 counts=marks or _('none'),
                 dash=style.get('dash_paragraphs', 0)))
         return rules
@@ -2119,8 +2602,9 @@ class NovelTranslator:
         paragraph of the book.
         """
         if self.author_style_setting == 'off':
-            self._author_style = ''
-            return ''
+            return self._no_author_style(_(
+                'The author brief is turned off in the settings (Novel '
+                'Mode, "How the author writes").'))
         existing = self.ctx.get_style()
         if existing:
             self._author_style = existing
@@ -2131,8 +2615,10 @@ class NovelTranslator:
         if not author:
             self.log(_('Author brief: skipped, the book carries no author '
                        'in its metadata.'))
-            self._author_style = ''
-            return ''
+            return self._no_author_style(_(
+                'No brief: the book carries no author in its calibre '
+                'metadata, so there was nobody to ask about. Set the '
+                'author in calibre and use "Reset context" to ask again.'))
         search = (self.author_style_setting == 'auto'
                   and self._engine_supports_web_search())
         if search:
@@ -2149,31 +2635,61 @@ class NovelTranslator:
                            author=author, reason=reason))
         user_prompt = self._compose_prompt(
             self.author_style_prompt,
-            {'{author}': (model_text('Author:'), author),
+            {'{sources}': (None, model_text(
+                AUTHOR_STYLE_SOURCES['search' if search else 'model'])),
+             '{author}': (model_text('Author:'), author),
              '{title}': (model_text('Book:'), self.book_title)},
-            required=('{author}', '{title}'))
+            required=('{sources}', '{author}', '{title}'))
         system_prompt = self._fill_placeholders(model_text(
             'You research how books are written and answer in plain '
             'prose, using only what the sources actually say.'))
         try:
             response = self._author_style_call(
                 system_prompt, user_prompt, search)
+        except TranslationCanceled:
+            raise
         except Exception as e:
             self.log(_('Author brief: the request failed ({}). The '
-                       'translation continues without it.').format(e), True)
-            self._author_style = ''
-            return ''
+                       'translation continues without it.').format(
+                           describe_error(e)), True)
+            return self._no_author_style(_(
+                'No brief: the request for it failed ({}). The translation '
+                'went on without one; "Reset context" asks again.')
+                .format(describe_error(e)))
         brief = collapse_blank_lines(response)
         condensed = re.sub(r'[^A-Z ]', '', brief.upper()).strip()
-        if len(brief) < 80 or condensed.startswith(NO_AUTHOR_INFORMATION):
-            self.log(_('Author brief: nothing reliable came back, the '
+        if condensed.startswith(NO_AUTHOR_INFORMATION):
+            self.log(_('Author brief: the model has no reliable information '
+                       'about this author and said so; the translation '
+                       'continues without a brief.'))
+            return self._no_author_style(_(
+                'No brief: the model was asked how {author} writes and '
+                'answered that it has no reliable information about this '
+                'author and this book, which is the honest answer and '
+                'better than an invented one. The translation goes on '
+                'without a brief.\n\n'
+                'To get one, let an engine that can search the web do so '
+                '(Novel Mode, "How the author writes": "Search the web '
+                'when the engine can") or pick a model that knows the '
+                'author, then use "Reset context" so the question is '
+                'asked again.').format(author=author))
+        if len(brief) < 80:
+            self.log(_('Author brief: nothing usable came back, the '
                        'translation continues without one.'))
-            self._author_style = ''
-            return ''
+            return self._no_author_style(_(
+                'No brief: the model answered with too little to be one '
+                '({} characters). The translation goes on without a '
+                'brief; "Reset context" asks again.').format(len(brief)))
         self._author_style = self.ctx.set_style(brief)
         self.log(_('Author brief ({} characters):').format(len(brief)))
         self.log(brief)
         return self._author_style
+
+    def _no_author_style(self, note):
+        """Go on without a brief, leaving ``note`` for the window."""
+        self._author_style = ''
+        self.ctx.set_style_note(note)
+        return ''
 
     def _author_style_call(self, system_prompt, user_prompt, search):
         """Run the research request, with the engine's web search behind
@@ -2274,7 +2790,13 @@ class NovelTranslator:
             self.translator, 'request_attempt', 3) or 3
         label = label or _('request')
         last_error = None
-        for attempt in range(1, attempts + 1):
+        attempt = 0
+        # Seconds spent waiting out rate limits so far, and how many
+        # times in a row; both bound the patience.
+        waited = 0.0
+        limited = 0
+        relaxed = False
+        while attempt < attempts:
             if self.cancel_request():
                 raise TranslationCanceled(_('Translation canceled.'))
             started = time.time()
@@ -2286,24 +2808,74 @@ class NovelTranslator:
             try:
                 self._apply_prompt(system_prompt)
                 result = self._run_translation_call(user_text)
+                if self.cancel_request():
+                    # The request was cut short from outside (see
+                    # ``Base.abort``): whatever came back is not a reply.
+                    raise TranslationCanceled(_('Translation canceled.'))
                 self.log(_(
                     '  <- {}: {} chars (~{} tokens) in {}s.').format(
                         label, len(result), self._estimate_tokens(result),
                         round(time.time() - started, 1)))
                 return result
+            except TranslationCanceled:
+                raise
             except Exception as e:
+                if self.cancel_request():
+                    raise TranslationCanceled(_('Translation canceled.'))
                 last_error = e
+                elapsed = round(time.time() - started, 1)
+                # A provider list narrowed to one that does not take
+                # every parameter leaves OpenRouter nothing to route to.
+                # Asking without insisting on the parameters is the way
+                # through; done once, and said.
+                relax = getattr(self.translator, 'relax_parameters', None)
+                if is_routing_dead_end(e) and not relaxed and relax \
+                        and relax():
+                    relaxed = True
+                    self.log(_(
+                        '{label}: no provider takes every parameter of '
+                        'the request ({error}). Asking again without '
+                        'requiring them.').format(
+                            label=label, error=describe_error(e)), True)
+                    continue
+                # A rate limit says "not now", not "never": wait what
+                # the provider asks, a little longer each time, and do
+                # not spend an attempt on it -- within reason.
+                delay = retry_after(e) or 0
+                delay = max(delay, min(60, 2.0 * 2 ** limited))
+                if is_rate_limited(e) and waited + delay \
+                        <= self.rate_limit_max_wait:
+                    limited += 1
+                    waited += delay
+                    self.log(_(
+                        '{label}: rate limited ({error}); trying again '
+                        'in {delay}s.').format(
+                            label=label, error=describe_error(e),
+                            delay=int(delay)), True)
+                    self._wait(delay)
+                    continue
+                attempt += 1
                 self.log(
                     _('Novel mode request failed after {}s '
                       '(attempt {}/{}): {}').format(
-                          round(time.time() - started, 1),
-                          attempt, attempts, e), True)
-                time.sleep(min(30, 5 * attempt))
+                          elapsed, attempt, attempts,
+                          describe_error(e)), True)
+                if attempt < attempts:
+                    self._wait(min(30, 5 * attempt))
             finally:
                 self._restore_prompt()
         raise TranslationFailed(
             _('Novel mode: giving up after {} attempts. Last error: {}')
-            .format(attempts, last_error))
+            .format(attempts, describe_error(last_error)))
+
+    def _wait(self, seconds):
+        """Sleep in short steps so a cancel does not wait the whole
+        pause out."""
+        step = 0.5
+        for _step in range(int(seconds / step)):
+            if self.cancel_request():
+                raise TranslationCanceled(_('Translation canceled.'))
+            time.sleep(step)
 
     def _translate_context_call(self, system_prompt, user_prompt, label,
                                 schema=None):
@@ -2388,15 +2960,16 @@ class NovelTranslator:
         used. A one-shot log line at the very first invocation records
         the chosen path so the user can verify what is happening.
         """
-        if self._structured_active():
-            return self._translate_chunk_structured(
+        with self._reply_room(chunk_paragraphs):
+            if self._structured_active():
+                return self._translate_chunk_structured(
+                    chunk_paragraphs, context_text,
+                    chapter_num, chapter_title, chunk_num, total_chunks,
+                    overlap_translations=overlap_translations)
+            return self._translate_chunk_markers(
                 chunk_paragraphs, context_text,
                 chapter_num, chapter_title, chunk_num, total_chunks,
                 overlap_translations=overlap_translations)
-        return self._translate_chunk_markers(
-            chunk_paragraphs, context_text,
-            chapter_num, chapter_title, chunk_num, total_chunks,
-            overlap_translations=overlap_translations)
 
     def _translate_chunk_markers(self, chunk_paragraphs, context_text,
                                  chapter_num, chapter_title, chunk_num,
@@ -2569,10 +3142,11 @@ class NovelTranslator:
         'type': 'object',
         'additionalProperties': False,
         'properties': {
+            'narrative': {'type': 'boolean'},
             'summary': {'type': 'string'},
             'entities': _GLOSSARY_RESPONSE_SCHEMA['properties']['entities'],
         },
-        'required': ['summary', 'entities'],
+        'required': ['narrative', 'summary', 'entities'],
     }
 
     def _build_structured_payload(self, chunk_paragraphs, indices):
@@ -2622,7 +3196,7 @@ class NovelTranslator:
             truncated = True
 
         expected = set(expected_indices)
-        result = {}
+        found = {}
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -2631,11 +3205,18 @@ class NovelTranslator:
                 n = int(raw_n)
             except (TypeError, ValueError):
                 continue
-            if n not in expected:
-                continue
             translation = (item.get('translation') or '').strip()
             if translation:
-                result[n] = translation
+                found[n] = translation
+        result = {n: t for n, t in found.items() if n in expected}
+        if not result:
+            renumbered = _renumbered(found, list(expected_indices))
+            if renumbered:
+                self.log(_(
+                    'The reply numbered its paragraphs from 1 instead of '
+                    'keeping the numbers it was given; matched them by '
+                    'order.'))
+                result = renumbered
 
         if truncated:
             missing = sorted(expected - set(result))
@@ -2916,15 +3497,12 @@ class NovelTranslator:
                 parts.append(text)
         return '\n\n'.join(parts)
 
-    def _head_and_tail(self, text, max_chars):
-        """Truncate ``text`` to at most ``max_chars``, keeping only the head.
+    def _head(self, text, max_chars):
+        """Truncate ``text`` to at most ``max_chars``, keeping the head.
 
-        Used for summary/glossary prompts. We deliberately take ONLY the
-        beginning of the translated chapter text because:
-
-          * The opening paragraphs reliably introduce the characters, setting
-            and plot thread for that chapter -- exactly what a useful summary
-            needs.
+        Used for the summary and glossary prompts. The opening paragraphs
+        of a chapter reliably introduce its characters, setting and plot
+        thread, which is what a useful summary needs.
 
         If the text already fits within ``max_chars`` it is returned verbatim.
         If ``max_chars`` <= 0, truncation is disabled.
@@ -2941,14 +3519,14 @@ class NovelTranslator:
         response. Hardcoded to a sensible default; the ``novel_summary_
         input_max_chars`` config key can override.
         """
-        default = 60000  # ~15000 words in Latin text
+        default = 40000  # ~10000 words in Latin text
         return int(self._cfg('novel_summary_input_max_chars', default))
 
     def _generate_summary(self, chapter, translated_text):
         if not translated_text.strip():
             return ''
         max_chars = self._summary_input_budget_chars()
-        clipped = self._head_and_tail(translated_text, max_chars)
+        clipped = self._head(translated_text, max_chars)
         if len(clipped) < len(translated_text):
             self.log(_(
                 'Summary input truncated: {} -> {} chars.').format(
@@ -2971,7 +3549,13 @@ class NovelTranslator:
         except TranslationFailed as e:
             self.log(_('Summary generation failed: {}').format(e), True)
             return ''
-        return self._clip_summary(response.strip(), chapter)
+        summary = response.strip()
+        condensed = re.sub(r'[^A-Z ]', '', summary.upper()).strip()
+        if condensed.startswith(NOT_A_STORY_CHAPTER) \
+                and self.context_narrative_only:
+            self._discard_context(chapter, '')
+            return ''
+        return self._clip_summary(summary, chapter)
 
     def _clip_summary(self, summary, chapter):
         """Keep a runaway summary out of the stored context.
@@ -2998,8 +3582,8 @@ class NovelTranslator:
         if not source_text.strip() or not translated_text.strip():
             return []
         max_chars = self._summary_input_budget_chars()
-        src_clipped = self._head_and_tail(source_text, max_chars)
-        tgt_clipped = self._head_and_tail(translated_text, max_chars)
+        src_clipped = self._head(source_text, max_chars)
+        tgt_clipped = self._head(translated_text, max_chars)
         known, existing_keys = self._glossary_prompt_keys(
             chapter, '%s\n%s' % (src_clipped, tgt_clipped))
         system_prompt = self._fill_placeholders(model_text(
@@ -3131,8 +3715,8 @@ class NovelTranslator:
         if not translated_text.strip():
             return '', []
         max_chars = self._summary_input_budget_chars()
-        src_clipped = self._head_and_tail(source_text, max_chars)
-        tgt_clipped = self._head_and_tail(translated_text, max_chars)
+        src_clipped = self._head(source_text, max_chars)
+        tgt_clipped = self._head(translated_text, max_chars)
         known, existing_keys = self._glossary_prompt_keys(
             chapter, '%s\n%s' % (src_clipped, tgt_clipped))
         system_prompt = self._fill_placeholders(model_text(
@@ -3170,9 +3754,35 @@ class NovelTranslator:
             # entity list, so it is usually there in full anyway.
             summary = _extract_json_string(response, 'summary')
             obj = None
+        # A missing flag is read as "part of the story": a model that
+        # ignored the field is not a reason to drop a real summary.
+        if obj is not None and obj.get('narrative') is False \
+                and self.context_narrative_only:
+            self._discard_context(chapter, summary)
+            return '', []
         entities = self._new_entities(
             self._parse_entities(response, obj=obj), known, chapter)
+        if not summary.strip() and entities:
+            # The reply listed the names first and was cut before the
+            # summary: a chapter without one is a hole in every later
+            # prompt, so the summary is asked for on its own.
+            self.log(_(
+                'The reply carried the glossary but no summary; asking '
+                'for the summary on its own.'))
+            summary = self._generate_summary(chapter, translated_text)
         return self._clip_summary(summary, chapter), entities
+
+    def _discard_context(self, chapter, summary):
+        """Log that a chapter is not part of the story and that nothing
+        of it goes into the running context."""
+        self._chapter_is_narrative = False
+        what = (summary or '').strip().replace('\n', ' ')
+        if len(what) > 120:
+            what = what[:117] + '...'
+        self.log(_(
+            'Chapter {} is not part of the story{}: its summary and '
+            'glossary are discarded.').format(
+                chapter.index, ' (%s)' % what if what else ''))
 
     # -- persistence -------------------------------------------------------
 
@@ -3239,8 +3849,12 @@ class NovelTranslator:
         """Execute the pipeline. Returns the number of chapters translated."""
         self.total_chapters = len(self.chapters)
         self.completed_chapters = 0
-        if self.total_chapters == 0:
+        if self.total_chapters == 0 and not self.aux_paragraphs:
             self.log(_('Novel mode: no chapters to translate.'))
+            return 0
+
+        self._translate_auxiliary()
+        if self.total_chapters == 0:
             return 0
 
         start = self.ctx.get_progress()
@@ -3256,6 +3870,7 @@ class NovelTranslator:
         if self.model_output_limit:
             self.log(_('Model reply limit: {} tokens.').format(
                 self.model_output_limit))
+        self._log_sizing()
         self.log(_('Resuming from chapter: {}').format(start + 1))
         # Both are worked out once for the whole book and then repeated
         # in the system prompt of every request: the dialogue rule is
@@ -3332,22 +3947,86 @@ class NovelTranslator:
                 self.log(_(
                     '  Nothing left to translate in this chapter.'))
 
-        # Chunk with dual-cap (token budget + paragraph count).
-        chunk_tokens = self._effective_chunk_tokens()
+        source_text = self._build_source_chapter_text(chapter.paragraphs)
+        context_text = self.ctx.context_text(
+            budget_tokens=self.context_tokens,
+            relevant_to=source_text if self.glossary_relevant_only else None,
+            glossary_limit=self.glossary_prompt_max_entries)
+
+        reserved = (self.context_tokens + self.summary_tokens
+                    + self.overlap_paragraphs * 80)
+        missing = self._translate_pending(
+            chapter, pending, context_text, position, translations,
+            reserved)
+        self._settle_missing(chapter, missing, context_text, position,
+                             translations, reserved)
+
+        # Summary + glossary.
+        translated_text = self._build_translated_chapter_text(
+            chapter.paragraphs, translations)
+
+        # Skip context extraction on trivially short chapters
+        # (Copyright, TOC, About the Author, ...). They are still
+        # translated normally at the paragraph level; only the two
+        # extra LLM calls (summary + glossary) are avoided.
+        translated_len = len(translated_text.strip())
+        summary = ''
+        glossary_delta = []
+        threshold = self.min_chars_for_context
+        if translated_len < threshold:
+            self.log(_(
+                'Chapter {}: {} chars translated, below threshold {}. '
+                'Skipping summary + glossary extraction.').format(
+                    chapter.index, translated_len, threshold))
+        elif self._is_last_chapter(chapter) and self.skip_context_last_chapter:
+            self.log(_(
+                'Chapter {} is the last one: skipping summary + glossary, '
+                'nothing comes after them.').format(chapter.index))
+        elif self.combined_context_call:
+            self._chapter_is_narrative = True
+            summary, glossary_delta = self._generate_context(
+                chapter, source_text, translated_text)
+            if self._chapter_is_narrative:
+                self._log_summary(chapter, summary)
+        else:
+            self._chapter_is_narrative = True
+            summary = self._generate_summary(chapter, translated_text)
+            if self._chapter_is_narrative:
+                self._log_summary(chapter, summary)
+                glossary_delta = self._extract_glossary_updates(
+                    chapter, source_text, translated_text)
+
+        # Persist context (marks chapter as done, bumps progress).
+        self.ctx.append_chapter(
+            chapter.index, chapter.title, summary, glossary_delta)
+        self.chapter_done(chapter, summary, glossary_delta)
+        self._report_progress()
+
+    def _translate_pending(self, chapter, pending, context_text, position,
+                           translations, reserved, ratio=1.0):
+        """Send ``pending`` to the model chunk by chunk.
+
+        What comes back is written into ``translations`` (keyed by the
+        paragraph's position in ``chapter``, see ``position``) and into
+        the cache, one transaction per chunk. Returns the paragraphs that
+        still have no translation afterwards.
+
+        :ratio: scales both chunk caps down; the second pass over what
+            the first one missed uses 0.5.
+        """
+        chunk_tokens = self._effective_chunk_tokens(reserved)
+        max_paragraphs = self.max_paragraphs_per_chunk
+        if ratio != 1.0:
+            chunk_tokens = max(200, int(chunk_tokens * ratio))
+            if max_paragraphs:
+                max_paragraphs = max(1, int(max_paragraphs * ratio))
         budget = TokenBudget(
-            budget=chunk_tokens,
-            max_paragraphs=self.max_paragraphs_per_chunk,
-        )
-        overlap_reserved = self.overlap_paragraphs * 80
-        chunks_with_stats = budget.chunk_with_stats(
-            pending,
-            reserved=(
-                self.context_tokens + self.summary_tokens + overlap_reserved))
+            budget=chunk_tokens, max_paragraphs=max_paragraphs)
+        chunks_with_stats = budget.chunk_with_stats(pending)
         chunks = [c for c, _tok, _reason in chunks_with_stats]
         total_chunks = len(chunks)
         cap_paragraphs_display = (
-            str(self.max_paragraphs_per_chunk)
-            if self.max_paragraphs_per_chunk else _('unlimited'))
+            str(max_paragraphs) if max_paragraphs else _('unlimited'))
         overlap_display = (
             str(self.overlap_paragraphs)
             if self.overlap_paragraphs else _('disabled'))
@@ -3368,16 +4047,6 @@ class NovelTranslator:
                 '  Chunk {}/{}: {} paragraphs, ~{} tokens '
                 '(closed by: {}).').format(
                     i, total_chunks, visible, tok_est, reason))
-
-        # The glossary handed to the translation prompt is filtered to
-        # the names this chapter actually contains: the rest cannot be
-        # mistranslated here, and leaving them out keeps the block small
-        # enough that the budget never has to truncate it.
-        source_text = self._build_source_chapter_text(chapter.paragraphs)
-        context_text = self.ctx.context_text(
-            budget_tokens=self.context_tokens,
-            relevant_to=source_text if self.glossary_relevant_only else None,
-            glossary_limit=self.glossary_prompt_max_entries)
 
         # Translate each chunk. A chunk-local index is mapped back to the
         # position of that paragraph inside the chapter through ``position``
@@ -3430,42 +4099,74 @@ class NovelTranslator:
             else:
                 overlap_translations = []
 
-        # Summary + glossary.
-        translated_text = self._build_translated_chapter_text(
-            chapter.paragraphs, translations)
+        return [p for p in pending if position[p.id] not in translations]
 
-        # Skip context extraction on trivially short chapters
-        # (Copyright, TOC, About the Author, ...). They are still
-        # translated normally at the paragraph level; only the two
-        # extra LLM calls (summary + glossary) are avoided.
-        translated_len = len(translated_text.strip())
-        summary = ''
-        glossary_delta = []
-        threshold = self.min_chars_for_context
-        if translated_len < threshold:
-            self.log(_(
-                'Chapter {}: {} chars translated, below threshold {}. '
-                'Skipping summary + glossary extraction.').format(
-                    chapter.index, translated_len, threshold))
-        elif self._is_last_chapter(chapter) and self.skip_context_last_chapter:
-            self.log(_(
-                'Chapter {} is the last one: skipping summary + glossary, '
-                'nothing comes after them.').format(chapter.index))
-        elif self.combined_context_call:
-            summary, glossary_delta = self._generate_context(
-                chapter, source_text, translated_text)
-            self._log_summary(chapter, summary)
-        else:
-            summary = self._generate_summary(chapter, translated_text)
-            self._log_summary(chapter, summary)
-            glossary_delta = self._extract_glossary_updates(
-                chapter, source_text, translated_text)
+    def _settle_missing(self, chapter, missing, context_text, position,
+                        translations, reserved):
+        """Deal with the paragraphs a pass over the chapter did not bring
+        back: one more pass in smaller chunks, then the configured policy
+        (see ``on_missing_paragraphs``)."""
+        if not missing:
+            return
+        # A chunk the model could not finish is the usual reason, and a
+        # smaller chunk is the remedy the retries inside a chunk cannot
+        # apply: they ask for the missing paragraphs at the same size.
+        self.log(_(
+            'Chapter {}: {} paragraph(s) still missing; sending them '
+            'again in smaller chunks.').format(
+                chapter.index, len(missing)), True)
+        missing = self._translate_pending(
+            chapter, missing, context_text, position, translations,
+            reserved, ratio=0.5)
+        if not missing:
+            return
+        message = _(
+            'Chapter {}: {} paragraph(s) could not be translated after '
+            'every retry (positions {}).').format(
+                chapter.index, len(missing),
+                ', '.join(str(position[p.id]) for p in missing))
+        if self.on_missing_paragraphs == 'stop':
+            raise TranslationFailed(message + ' ' + _(
+                'The chapter is left unfinished so that a resume asks for '
+                'them again; what was translated is in the cache.'))
+        self.log(message + ' ' + _(
+            'Going on with the next chapter, as configured: these '
+            'paragraphs keep their source text.'), True)
 
-        # Persist context (marks chapter as done, bumps progress).
-        self.ctx.append_chapter(
-            chapter.index, chapter.title, summary, glossary_delta)
-        self.chapter_done(chapter, summary, glossary_delta)
-        self._report_progress()
+    def _translate_auxiliary(self):
+        """Translate what sits outside the chapters: the metadata, the
+        table of contents and the pages the front-matter filter kept out
+        of the narrative (cover, title page, dedication, part dividers).
+
+        They go through the same chunk machinery as a chapter -- one
+        request for the lot when they fit -- with no running context and
+        no summary afterwards: there is no story in them to keep track
+        of. Paragraphs the cache already holds are kept, so a resume
+        costs nothing here.
+        """
+        paragraphs = [p for p in self.aux_paragraphs if not p.ignored]
+        if not paragraphs:
+            return
+        pending = list(paragraphs)
+        if self.reuse_translated_paragraphs:
+            identity = self._translation_identity()
+            pending = [p for p in paragraphs
+                       if not self._already_translated(p, identity)]
+        if not pending:
+            return
+        self.log(sep())
+        self.log(_(
+            'Metadata, contents and front matter: {} of {} paragraphs to '
+            'translate.').format(len(pending), len(paragraphs)))
+        chapter = Chapter(0, model_text('Front matter'), [], paragraphs)
+        position = {p.id: i
+                    for i, p in enumerate(chapter.paragraphs, start=1)}
+        translations = {}
+        reserved = self.overlap_paragraphs * 80
+        missing = self._translate_pending(
+            chapter, pending, '', position, translations, reserved)
+        self._settle_missing(chapter, missing, '', position, translations,
+                             reserved)
 
     def _is_last_chapter(self, chapter):
         return bool(self.chapters) \

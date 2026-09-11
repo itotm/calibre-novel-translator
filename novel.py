@@ -1,11 +1,9 @@
-"""Novel Mode UI dialog.
+"""The translation window.
 
-A dedicated GUI (analogous to ``advanced.py`` and ``batch.py``) that lets
-the user run the chapter-aware sequential translation pipeline defined in
-``lib/novel.py`` on a single ebook. Unlike Advanced Mode there is no
-per-paragraph review table: the LLM operates on whole chapters, so the UI
-surfaces chapter-level progress plus tabs for the running summaries, the
-dynamic glossary and the log.
+It runs the chapter-aware sequential pipeline defined in ``lib/novel.py``
+on a single ebook. The model operates on whole chapters, so the window
+shows chapter-level progress plus tabs for the running summaries, the
+dynamic glossary, the author brief and the log.
 
 Only engines that inherit from ``engines.genai.GenAI`` are eligible.
 """
@@ -19,7 +17,7 @@ from qt.core import (  # type: ignore
     QProgressBar, pyqtSignal, pyqtSlot, QPixmap, QListWidget,
     QListWidgetItem, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QSpacerItem, QStackedWidget, QComboBox, QMessageBox,
-    QSizePolicy, QColor, QAbstractItemView)
+    QSizePolicy, QColor, QBrush, QAbstractItemView)
 from calibre.constants import __version__  # type: ignore
 from calibre.gui2 import I  # type: ignore
 from calibre.utils.localization import _  # type: ignore
@@ -27,7 +25,7 @@ from calibre.ebooks.conversion.plumber import (  # type: ignore
     Plumber, CompositeProgressReporter)
 from calibre.ptempfile import PersistentTemporaryFile  # type: ignore
 
-from . import EbookTranslator
+from . import NovelTranslatorPlugin
 from .lib.utils import log, sep, uid, traceback_error
 from .lib.config import get_config
 from .lib.cache import get_cache
@@ -38,7 +36,8 @@ from .lib.translation import get_engine_class, get_translator
 from .lib.exception import TranslationCanceled, TranslationFailed
 from .lib.novel import (
     Chapter, ChapterBuilder, ContextManager, NovelTranslator,
-    novel_cache_id)
+    novel_cache_id, INFO_NOVEL_CHAPTERS, INFO_NOVEL_LOG, INFO_NOVEL_STYLE,
+    INFO_NOVEL_STYLE_NOTE)
 from .lib.conversion import get_novel_config
 from .engines.genai import GenAI
 from .components import (
@@ -101,15 +100,20 @@ class NovelPreparationWorker(QObject):
         cache.set_info('author', self.ebook.get_author())
         cache.set_info('engine_name', translator_name)
         cache.set_info('target_lang', self.ebook.target_lang)
-        cache.set_info('plugin_version', EbookTranslator.__version__)
+        cache.set_info('plugin_version', NovelTranslatorPlugin.__version__)
         cache.set_info('calibre_version', __version__)
         cache.set_info('novel_mode', '1')
 
         chapters_meta = []
-        if cache.is_fresh() or not cache.is_persistence():
+        # A cache without its chapter list is one a previous preparation
+        # left half-written (the paragraphs are saved, then the chapters
+        # are worked out); reading it as "no chapters" locked the book
+        # out until the cache was deleted by hand.
+        if cache.is_fresh() or not cache.is_persistence() \
+                or not cache.get_info(INFO_NOVEL_CHAPTERS):
             self.progress_message.emit(_('Extracting ebook content...'))
-            # Reuse the same plumbing as advanced.extract_item, but keep the
-            # element_handler around so we can prepare_original into cache.
+            # Convert through Plumber and keep the element handler around
+            # so its prepare_original can fill the cache.
             element_handler = get_element_handler(
                 self.engine_class.placeholder, self.engine_class.separator,
                 self.ebook.target_direction)
@@ -182,13 +186,12 @@ class NovelPreparationWorker(QObject):
             # Persist chapter metadata so subsequent openings can reuse it
             # without re-running Plumber.
             import json as _json
-            cache.set_info(
-                'novel_chapters_meta', _json.dumps(chapters_meta))
+            cache.set_info(INFO_NOVEL_CHAPTERS, _json.dumps(chapters_meta))
         else:
             self.progress_detail.emit(_(
                 'Loading data from cache and preparing user interface...'))
             import json as _json
-            raw = cache.get_info('novel_chapters_meta')
+            raw = cache.get_info(INFO_NOVEL_CHAPTERS)
             try:
                 chapters_meta = _json.loads(raw) if raw else []
             except (ValueError, TypeError):
@@ -208,11 +211,17 @@ class NovelTranslationWorker(QObject):
     chapter_done = pyqtSignal(int, str, list)  # index, summary, glossary
     finished = pyqtSignal(bool, str)           # success, message
 
-    def __init__(self, engine_class, ebook, cache_id):
+    def __init__(self, engine_class, ebook, cache_id, retranslate=False):
+        """
+        :retranslate: send every paragraph to the model again instead of
+            keeping the translations the cache holds. What "Re-run all"
+            asks for once a book is done.
+        """
         QObject.__init__(self)
         self.engine_class = engine_class
         self.ebook = ebook
         self.cache_id = cache_id
+        self.retranslate = retranslate
         self.canceled = False
         self.start.connect(self.run)
 
@@ -221,6 +230,10 @@ class NovelTranslationWorker(QObject):
 
     def set_canceled(self, value):
         self.canceled = value
+        translator = getattr(self, 'translator', None)
+        if value and translator is not None:
+            # Do not wait for the model: cut the request short.
+            translator.abort()
 
     @pyqtSlot()
     def run(self):
@@ -254,6 +267,7 @@ class NovelTranslationWorker(QObject):
             return None
         by_id = {p.id: p for p in cache.all_paragraphs()}
         chapters = []
+        placed = set()
         for meta in chapters_meta:
             chapters.append(Chapter(
                 index=meta['index'],
@@ -261,7 +275,12 @@ class NovelTranslationWorker(QObject):
                 page_ids=meta.get('page_ids') or [],
                 paragraphs=[by_id[pid] for pid in meta['paragraph_ids']
                             if pid in by_id]))
-        return chapters
+            placed.update(meta['paragraph_ids'])
+        # Whatever no chapter claimed -- metadata, table of contents,
+        # the pages the front-matter filter set aside -- is translated
+        # apart from the narrative.
+        aux = [p for pid, p in by_id.items() if pid not in placed]
+        return chapters, aux
 
     def _chapters_from_ebook(self, cache):
         """Rebuild the chapters by converting the ebook again.
@@ -301,31 +320,35 @@ class NovelTranslationWorker(QObject):
             'novel_chapter_source', 'toc_level_1') or 'toc_level_1'
         front_matter_min = int(
             get_config().get('novel_front_matter_min_chars', 100) or 0)
-        return ChapterBuilder(
+        builder = ChapterBuilder(
             page_ids, oeb.toc.nodes, list(oeb.manifest.items),
             paragraphs, source=source,
-            front_matter_min_chars=front_matter_min).build()
+            front_matter_min_chars=front_matter_min)
+        chapters = builder.build()
+        return chapters, builder.auxiliary_paragraphs()
 
     def _do_run(self):
         cache = get_cache(self.cache_id)
         translator = get_translator(self.engine_class)
         translator.set_source_lang(self.ebook.source_lang)
         translator.set_target_lang(self.ebook.target_lang)
+        self.translator = translator
 
         # Rebuild the chapters the preparation worker had already built.
         import json as _json
-        raw = cache.get_info('novel_chapters_meta')
+        raw = cache.get_info(INFO_NOVEL_CHAPTERS)
         try:
             chapters_meta = _json.loads(raw) if raw else []
         except (ValueError, TypeError):
             chapters_meta = []
 
-        chapters = self._chapters_from_meta(cache, chapters_meta)
-        if chapters is None:
+        rebuilt = self._chapters_from_meta(cache, chapters_meta)
+        if rebuilt is None:
             self.logging.emit(_(
                 'Chapter metadata was written by an older version: '
                 'reading the ebook again to rebuild the chapters.'), False)
-            chapters = self._chapters_from_ebook(cache)
+            rebuilt = self._chapters_from_ebook(cache)
+        chapters, aux_paragraphs = rebuilt
 
         ctx = ContextManager(
             cache,
@@ -341,11 +364,21 @@ class NovelTranslationWorker(QObject):
                 self.ebook.custom_title or self.ebook.title or ''),
             'novel_book_author': self.ebook.get_author(),
         })
+        if self.retranslate:
+            novel_config['novel_reuse_translated_paragraphs'] = False
 
         translator_novel = NovelTranslator(
-            translator, chapters, ctx, cache, config=novel_config)
-        translator_novel.set_logging(
-            lambda text, error=False: self.logging.emit(text, error))
+            translator, chapters, ctx, cache, config=novel_config,
+            aux_paragraphs=aux_paragraphs)
+        # Every line goes to the window and, at the end, to the cache,
+        # so the log of a run survives the window being closed.
+        lines = [cache.get_info(INFO_NOVEL_LOG) or '', '=' * 38,
+                 time.strftime('%Y-%m-%d %H:%M:%S')]
+
+        def logging(text, error=False):
+            lines.append(('[ERROR] ' if error else '') + text)
+            self.logging.emit(text, error)
+        translator_novel.set_logging(logging)
         translator_novel.set_progress(
             lambda frac, msg: self.progress.emit(frac, msg))
         translator_novel.set_cancel_request(self.cancel_request)
@@ -355,13 +388,18 @@ class NovelTranslationWorker(QObject):
             lambda chapter, summary, delta:
                 self.chapter_done.emit(chapter.index, summary, delta or []))
 
-        translator_novel.run()
-        cache.close()
+        try:
+            translator_novel.run()
+        finally:
+            # The last 300 KB: enough for the run that matters, not a
+            # transcript of every attempt ever made on the book.
+            cache.set_info(INFO_NOVEL_LOG, '\n'.join(
+                line for line in lines if line)[-300000:])
+            cache.close()
 
 
 # ---------------------------------------------------------------------------
-# CreateNovelProject: initial setup dialog (analogous to
-# advanced.CreateTranslationProject)
+# CreateNovelProject: the setup dialog before the window opens
 # ---------------------------------------------------------------------------
 
 
@@ -390,10 +428,10 @@ class CreateNovelProject(QDialog):
         # Warning if the engine does not support novel mode.
         if not getattr(engine_class, 'supports_novel_mode', False):
             warn = QLabel(_(
-                'Novel Mode requires an LLM engine (ChatGPT / Claude / '
-                'Gemini / Ollama via ChatGPT-compatible endpoint). '
-                'The current engine "{}" does not support it. '
-                'Please switch engine in Setting.').format(engine_class.name))
+                'A language model is required (OpenRouter, an '
+                'OpenAI-compatible provider, Claude or Gemini). The '
+                'current engine "{}" is not one. Please switch engine in '
+                'Setting.').format(engine_class.name))
             warn.setWordWrap(True)
             warn.setStyleSheet('color:crimson;font-weight:bold;')
             layout.addWidget(warn, 0, 0, 1, 6)
@@ -489,9 +527,6 @@ class NovelTranslation(QDialog):
     STATUS_DONE = 2
     STATUS_ERROR = 3
 
-    prep_thread = QThread()
-    trans_thread = QThread()
-
     def __init__(self, plugin, parent, worker, ebook):
         QDialog.__init__(self, parent)
         self.ui_settings = plugin.ui_settings
@@ -509,6 +544,18 @@ class NovelTranslation(QDialog):
         self.chapter_items = {}   # index -> QListWidgetItem
         self.status_by_chapter = {}
         self.output_ready = False
+        # Whether a worker is busy, and whether the window is waiting
+        # for it to stop so it can close. See ``done``.
+        self.preparing = True
+        self.translating = False
+        self.closing = False
+
+        # One pair of threads per window. As class attributes they were
+        # shared by every book open at once and never stopped, so the
+        # work went on after the window was gone and calibre aborted on
+        # exit with a thread still running.
+        self.prep_thread = QThread()
+        self.trans_thread = QThread()
 
         self.prep_worker = NovelPreparationWorker(
             self.current_engine, self.ebook)
@@ -582,6 +629,7 @@ class NovelTranslation(QDialog):
 
     @pyqtSlot(str, object)
     def _on_prep_finished(self, cache_id, chapters_meta):
+        self.preparing = False
         self.cache_id = cache_id
         self.chapters_meta = chapters_meta or []
         if not self.chapters_meta:
@@ -597,6 +645,7 @@ class NovelTranslation(QDialog):
 
     @pyqtSlot(str)
     def _on_prep_failed(self, message):
+        self.preparing = False
         self.alert.pop(
             _('Failed to prepare novel mode: {}').format(message), 'error')
         self.done(0)
@@ -691,8 +740,9 @@ class NovelTranslation(QDialog):
         self.style_view.setReadOnly(True)
         self.style_view.setPlaceholderText(_(
             'The brief on how this book is written appears here once the '
-            'translation has started. Turn it off, or stop it searching '
-            'the web, under Novel Mode in the plugin settings.'))
+            'translation has started, or a note on why there is none. '
+            'How it is obtained is set under Novel Mode in the plugin '
+            'settings ("How the author writes").'))
         self.tabs.addTab(self.style_view, _('Author'))
 
         # Log tab.
@@ -766,8 +816,9 @@ class NovelTranslation(QDialog):
             return
         item.setText(self._chapter_label(meta, status))
         color_hex = self._STATUS_COLOR.get(status)
-        if color_hex:
-            item.setForeground(QColor(color_hex))
+        # A pending chapter gets the default colour back: after "Reset
+        # context" the list used to stay green with pending markers.
+        item.setForeground(QColor(color_hex) if color_hex else QBrush())
 
     def _refresh_chapter_list_from_cache(self):
         """Restore chapter statuses from cache progress (for resume)."""
@@ -780,6 +831,9 @@ class NovelTranslation(QDialog):
             if meta['index'] <= progress:
                 self._set_chapter_status(meta['index'], self.STATUS_DONE)
         self._refresh_context_views(cache)
+        stored_log = cache.get_info(INFO_NOVEL_LOG)
+        if stored_log:
+            self.log_view.setPlainText(stored_log)
         cache.close()
 
         completed = sum(1 for s in self.status_by_chapter.values()
@@ -838,7 +892,10 @@ class NovelTranslation(QDialog):
 
             # --- Author brief: always from cache, written once per
             # book before the first chapter.
-            style = cache.get_info('novel_author_style')
+            style = cache.get_info(INFO_NOVEL_STYLE)
+            if not isinstance(style, str) or not style:
+                # No brief: say why, rather than show an empty tab.
+                style = cache.get_info(INFO_NOVEL_STYLE_NOTE)
             self.style_view.setPlainText(
                 style if isinstance(style, str) else '')
 
@@ -874,6 +931,11 @@ class NovelTranslation(QDialog):
 
     # -- controls ----------------------------------------------------------
 
+    def _all_chapters_done(self):
+        return bool(self.chapters_meta) and all(
+            self.status_by_chapter.get(m['index']) == self.STATUS_DONE
+            for m in self.chapters_meta)
+
     def _on_start(self):
         # Sanity: engine must still support novel mode (user may have
         # changed it in Setting).
@@ -883,9 +945,29 @@ class NovelTranslation(QDialog):
                 'Novel mode requires a GenAI engine. Please choose one '
                 'in Setting.'), 'warning')
             return
-        self._start_translation_worker()
+        retranslate = False
+        if self._all_chapters_done():
+            # "Re-run all". The button used to just start the worker,
+            # which found every chapter done and stopped at once.
+            action = self.alert.ask(_(
+                'Every chapter is done. Translate the whole book again?\n\n'
+                'The summaries, the glossary and the author brief are '
+                'kept; every paragraph is sent to the model again.'))
+            if action != 'yes':
+                return
+            cache = get_cache(self.cache_id)
+            try:
+                ContextManager(cache).load().reset_progress()
+            finally:
+                cache.close()
+            for index in list(self.status_by_chapter):
+                self._set_chapter_status(index, self.STATUS_PENDING)
+            self.progress_bar.setValue(0)
+            self.start_button.setText(_('Start / Resume'))
+            retranslate = True
+        self._start_translation_worker(retranslate)
 
-    def _start_translation_worker(self):
+    def _start_translation_worker(self, retranslate=False):
         # Terminate any previous worker: disconnect its signals so we don't
         # accidentally receive events for it after we start a new one.
         if self.trans_worker is not None:
@@ -904,7 +986,7 @@ class NovelTranslation(QDialog):
         if not self.trans_thread.isRunning():
             self.trans_thread.start()
         self.trans_worker = NovelTranslationWorker(
-            self.current_engine, self.ebook, self.cache_id)
+            self.current_engine, self.ebook, self.cache_id, retranslate)
         self.trans_worker.moveToThread(self.trans_thread)
         self.trans_worker.logging.connect(self._on_log)
         self.trans_worker.progress.connect(self._on_progress)
@@ -915,6 +997,7 @@ class NovelTranslation(QDialog):
         self.start_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.output_button.setEnabled(False)
+        self.translating = True
         self.trans_worker.start.emit()
 
     def _on_cancel(self):
@@ -958,6 +1041,10 @@ class NovelTranslation(QDialog):
         self._refresh_context_views()
 
     def _on_worker_finished(self, success, message):
+        self.translating = False
+        if self.closing:
+            self.done(0)
+            return
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.progress_label.setText(message)
@@ -969,11 +1056,55 @@ class NovelTranslation(QDialog):
                 if s == self.STATUS_DONE)
             if done_count >= len(self.chapters_meta):
                 self.output_button.setEnabled(True)
+                self.start_button.setText(_('Re-run all'))
                 self.alert.pop(_(
                     'Novel mode: all chapters translated. Click '
                     '"Build translated ebook" to produce the output.'))
         else:
             self.alert.pop(message, 'warning')
+
+    # -- closing -------------------------------------------------------------
+
+    def done(self, result):
+        """Close only once nothing is running any more.
+
+        Closing used to leave the translation going on in the background
+        with no window to cancel it from, and the plugin thinking no job
+        was running. A translation in flight is cancelled first and the
+        window closes when the worker reports back; the preparation is
+        short and cannot be interrupted, so it is waited for.
+        """
+        if self.preparing:
+            self.alert.pop(_(
+                'The book is still being prepared. Please wait a moment.'),
+                'warning')
+            return
+        if self.translating:
+            if not self.closing:
+                action = self.alert.ask(_(
+                    'The translation is still running. Stop it and close '
+                    'the window? What is already translated stays in the '
+                    'cache and the next start resumes from there.'))
+                if action != 'yes':
+                    return
+                self.closing = True
+                self.trans_worker.set_canceled(True)
+                self.cancel_button.setEnabled(False)
+                self.close_button.setEnabled(False)
+                self.progress_label.setText(_('Stopping...'))
+            return
+        for thread in (self.prep_thread, self.trans_thread):
+            thread.quit()
+            thread.wait()
+        # With the cache turned off the work lives in a temporary
+        # database; it goes with the window, as the other modes do.
+        if self.cache_id is not None:
+            cache = get_cache(self.cache_id)
+            if cache.is_persistence():
+                cache.close()
+            else:
+                cache.destroy()
+        QDialog.done(self, result)
 
     # -- context -----------------------------------------------------------
 
@@ -1002,16 +1133,13 @@ class NovelTranslation(QDialog):
     # -- final ebook build -------------------------------------------------
 
     def _on_build_output(self):
-        # Reuse ConversionWorker.translate_ebook_novel with cache_only=True:
-        # the cache is already fully populated by the interactive pipeline,
-        # so this will just re-emit the DOM through Plumber. Uses a
-        # dedicated ``convert_item_novel`` entry point (see lib/conversion.py)
-        # to avoid colliding with the classic pipeline's argument layout.
+        # The cache is already fully populated by the interactive
+        # pipeline, so the job only puts the translations back into the
+        # DOM and lets Plumber write the ebook.
         try:
             self.ebook.set_output_format(
                 self.ebook.output_format or 'epub')
-            self.worker.translate_ebook_novel(
-                self.ebook, cache_only=True)
+            self.worker.translate_ebook(self.ebook, cache_only=True)
             self.alert.pop(_(
                 'Building translated ebook in background. Watch the '
                 'jobs panel for progress.'))

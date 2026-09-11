@@ -11,13 +11,15 @@ from ...lib.novel import (
     tag_paragraphs, parse_tagged_response, _extract_json_object,
     _extract_entities_fallback,
     novel_cache_id, _href_to_page_id,
-    detect_dialogue_style, dialogue_instruction, collapse_blank_lines,
+    detect_dialogue_style, detect_book_dialogue_style,
+    dialogue_convention_style, dialogue_instruction, collapse_blank_lines,
+    DIALOGUE_CONVENTIONS,
     NO_AUTHOR_INFORMATION,
     INFO_NOVEL_SUMMARIES, INFO_NOVEL_GLOSSARY, INFO_NOVEL_PROGRESS,
-    INFO_NOVEL_MODE, INFO_NOVEL_STYLE)
+    INFO_NOVEL_MODE, INFO_NOVEL_STYLE, INFO_NOVEL_STYLE_NOTE)
 
 
-module_name = 'calibre_plugins.ebook_translator_novel.lib.novel'
+module_name = 'calibre_plugins.novel_translator.lib.novel'
 
 
 def make_paragraph(pid, text, page='p1', ignored=False):
@@ -315,6 +317,12 @@ class TestChapterBuilder(unittest.TestCase):
             for p in ch.paragraphs:
                 self.assertNotEqual('cover', p.page,
                     'Cover page paragraph leaked into chapter content')
+        # ...but it is not lost either: it is handed back with the
+        # metadata and the TOC entries, to be translated apart from the
+        # narrative. A title page left in the source language is a hole.
+        self.assertEqual(
+            ['THE BOOK'],
+            [p.original for p in builder.auxiliary_paragraphs()])
 
     def test_front_matter_filter_zero_disables(self):
         """Setting front_matter_min_chars=0 disables the filter entirely."""
@@ -585,6 +593,28 @@ class TestContextManager(unittest.TestCase):
         self.assertIn(INFO_NOVEL_SUMMARIES, keys)
         self.assertIn(INFO_NOVEL_GLOSSARY, keys)
         self.assertIn(INFO_NOVEL_PROGRESS, keys)
+
+    def test_append_chapter_again_replaces_its_summary(self):
+        # A chapter translated a second time ("Re-run all") must not
+        # leave two entries that every later prompt would then carry.
+        ctx = ContextManager(self.cache).load()
+        ctx.append_chapter(1, 'One', 'First take.', [])
+        ctx.append_chapter(2, 'Two', 'Second chapter.', [])
+        ctx.append_chapter(1, 'One', 'Second take.', [])
+        self.assertEqual(
+            [(1, 'Second take.'), (2, 'Second chapter.')],
+            [(s['chapter'], s['summary']) for s in ctx.get_summaries()])
+
+    def test_reset_progress_keeps_what_was_learned(self):
+        ctx = ContextManager(self.cache).load()
+        ctx.append_chapter(1, 'One', 'Summary.', [
+            {'source': 'Aslan', 'translation': 'Aslan'}])
+        ctx.set_style('Dry and ironic.')
+        ctx.reset_progress()
+        self.assertEqual(0, ctx.get_progress())
+        self.assertEqual(1, len(ctx.get_summaries()))
+        self.assertIn('Aslan', ctx.get_glossary())
+        self.assertEqual('Dry and ironic.', ctx.get_style())
 
     def test_append_chapter_ignores_malformed_entities(self):
         ctx = ContextManager(self.cache).load()
@@ -1065,6 +1095,43 @@ class TestPromptComposition(unittest.TestCase):
         self.assertEqual('Summarise.', composed)
 
 
+class TestMarkerShapes(unittest.TestCase):
+    def test_marker_and_text_on_one_line(self):
+        parsed = parse_tagged_response(
+            '[1] «Ciao», disse.\n[2] Poi tacque.\n\n[3]\nTerzo.', [1, 2, 3])
+        self.assertEqual(
+            {1: '«Ciao», disse.', 2: 'Poi tacque.', 3: 'Terzo.'}, parsed)
+
+    def test_bold_markers(self):
+        parsed = parse_tagged_response(
+            '**[1]**\nUno.\n\n**[2]** Due.', [1, 2])
+        self.assertEqual({1: 'Uno.', 2: 'Due.'}, parsed)
+
+    def test_a_reply_numbered_from_one_is_matched_by_order(self):
+        # A retry asks for paragraphs 34 to 36 under those numbers; the
+        # model numbers what it was given from 1.
+        parsed = parse_tagged_response(
+            '[1]\nA.\n\n[2]\nB.\n\n[3]\nC.', [34, 35, 36])
+        self.assertEqual({34: 'A.', 35: 'B.', 36: 'C.'}, parsed)
+
+    def test_no_renumbering_when_some_numbers_match(self):
+        parsed = parse_tagged_response(
+            '[1]\nA.\n\n[35]\nB.', [34, 35, 36])
+        self.assertEqual({35: 'B.'}, parsed)
+
+
+class TestEmptyMarkers(unittest.TestCase):
+    def test_marker_without_a_body_is_missing(self):
+        # Stored as '', it blanked the paragraph in the output ebook and
+        # the alignment retry never asked for it.
+        parsed = parse_tagged_response('[1]\n\n[2]\nTesto.', [1, 2])
+        self.assertEqual({2: 'Testo.'}, parsed)
+
+    def test_a_later_empty_duplicate_does_not_erase_the_first(self):
+        parsed = parse_tagged_response('[1]\nTesto.\n\n[1]\n', [1])
+        self.assertEqual({1: 'Testo.'}, parsed)
+
+
 class TestNovelTranslator(unittest.TestCase):
     def setUp(self):
         self.cache = Mock()
@@ -1248,15 +1315,20 @@ class TestNovelTranslator(unittest.TestCase):
         engine.model_max_output_tokens = 4096
         translator = self._make_translator(
             engine, config={'novel_chunk_tokens': 16000})
+        # What fits under a 4096-token reply once the reply's own
+        # scaffolding and the growth of a translation are taken out.
         self.assertEqual(
-            int(4096 * NovelTranslator.OUTPUT_BUDGET_RATIO),
-            translator._effective_chunk_tokens())
+            int((4096 - 1500) / 2.2), translator._effective_chunk_tokens())
 
-        # A model that writes more than the configured budget changes
-        # nothing: the cap only ever lowers.
+        # A model that writes more than the cap in the settings is held
+        # to the cap; with both out of the way the budget stands.
         engine.model_max_output_tokens = 128000
         translator = self._make_translator(
             engine, config={'novel_chunk_tokens': 16000})
+        self.assertEqual(
+            int((16384 - 1500) / 2.2), translator._effective_chunk_tokens())
+        translator = self._make_translator(engine, config={
+            'novel_chunk_tokens': 16000, 'novel_reply_max_tokens': 0})
         self.assertEqual(16000, translator._effective_chunk_tokens())
 
         # And it can be turned off.
@@ -1266,11 +1338,25 @@ class TestNovelTranslator(unittest.TestCase):
             'novel_output_aware_chunking': False})
         self.assertEqual(16000, translator._effective_chunk_tokens())
 
-    def test_unknown_reply_limit_leaves_the_budget_alone(self):
+    def test_an_impossible_reply_limit_is_not_believed(self):
+        engine = FakeEngine()
+        engine.model_max_output_tokens = 943718
+        translator = self._make_translator(engine)
+        self.assertEqual(0, translator.model_output_limit)
+        engine.model_max_output_tokens = 65536
+        self.assertEqual(65536, translator.model_output_limit)
+
+    def test_unknown_reply_limit_leaves_the_budget_to_the_cap(self):
         engine = FakeEngine()
         translator = self._make_translator(
             engine, config={'novel_chunk_tokens': 16000})
         self.assertEqual(0, translator.model_output_limit)
+        self.assertEqual(16384, translator.reply_room_limit)
+        self.assertEqual(
+            int((16384 - 1500) / 2.2), translator._effective_chunk_tokens())
+        translator = self._make_translator(engine, config={
+            'novel_chunk_tokens': 16000, 'novel_reply_max_tokens': 0})
+        self.assertEqual(0, translator.reply_room_limit)
         self.assertEqual(16000, translator._effective_chunk_tokens())
 
     def test_cancel_stops_run(self):
@@ -1280,26 +1366,203 @@ class TestNovelTranslator(unittest.TestCase):
         with self.assertRaises(TranslationCanceled):
             translator.run()
 
-    def test_missing_tags_are_logged(self):
-        # Engine that returns only marker 1 -> alignment retries kick in
-        # but still miss marker 2.
+    def _engine_that_never_returns_the_second_paragraph(self):
+        # Marker 2 never comes back: not from the alignment retries, and
+        # not from the second pass either, which asks for that paragraph
+        # alone and gets an empty reply.
         def side_effect(text, prompt):
-            if _is_translation_call(prompt):
-                return '[1]\nOnly first.'
-            return '{"entities": []}'
-        engine = FakeEngine(translate_side_effect=side_effect)
+            if not _is_translation_call(prompt):
+                return '{"entities": []}'
+            # Two paragraphs asked: the first comes back. One asked, at
+            # any number: nothing does.
+            both = '[1]' in text and '[2]' in text
+            return '[1]\nOnly first.' if both else ''
+        return FakeEngine(translate_side_effect=side_effect)
+
+    def test_missing_paragraphs_stop_the_run_by_default(self):
+        engine = self._engine_that_never_returns_the_second_paragraph()
         translator = self._make_translator(engine)
         log = Mock()
         translator.set_logging(log)
-        translator.run()
-        # The paragraph that was translated is stored, the missing one is
-        # left as None but progress still advances (soft failure).
+        with self.assertRaises(TranslationFailed) as raised:
+            translator.run()
+        self.assertIn('positions 2', str(raised.exception))
+        # What the model did translate is in the cache...
         self.assertEqual('Only first.', self.paragraphs[0].translation)
-        # Missing-marker warning was logged at some point.
-        warning_seen = any(
-            'missing' in (c.args[0] if c.args else '').lower()
-            for c in log.call_args_list)
-        self.assertTrue(warning_seen)
+        # ...the chapter is not recorded as done, so a resume asks for
+        # the missing paragraph again instead of skipping past it...
+        self.assertEqual(0, self.ctx.get_progress())
+        # ...and the missing paragraph was tried once more on its own,
+        # in a smaller chunk, before giving up.
+        self.assertTrue(any(
+            'smaller chunks' in (c.args[0] if c.args else '')
+            for c in log.call_args_list))
+        second_pass = [c for c in engine.translate_calls
+                       if _is_translation_call(c['prompt'])
+                       and '[2]' not in c['text']]
+        self.assertTrue(second_pass)
+
+    def test_missing_paragraphs_can_be_skipped(self):
+        engine = self._engine_that_never_returns_the_second_paragraph()
+        translator = self._make_translator(
+            engine, config={'novel_on_missing_paragraphs': 'continue'})
+        log = Mock()
+        translator.set_logging(log)
+        translator.run()
+        self.assertEqual('Only first.', self.paragraphs[0].translation)
+        self.assertIsNone(self.paragraphs[1].translation)
+        # Progress advanced over the hole, as asked.
+        self.assertEqual(2, self.ctx.get_progress())
+        self.assertTrue(any(
+            'could not be translated' in (c.args[0] if c.args else '')
+            for c in log.call_args_list))
+
+    def test_chunks_are_sized_by_the_reply_limit_not_collapsed_by_it(self):
+        # A model that writes 4096 tokens gets chunks of about 1180
+        # source tokens, what a 4096-token reply can hold. The reserve
+        # for the running context is input and must not be taken off
+        # the reply limit as well: it used to be, and with the default
+        # reserve every chunk came out at the 200-token floor, one
+        # paragraph each.
+        paragraphs = [
+            make_paragraph(i, 'word ' * 30, page='a') for i in range(120)]
+        self.chapters = [Chapter(1, 'Long', ['a'], paragraphs)]
+        engine = FakeEngine(translate_side_effect=lambda text, prompt:
+                            _echo_markers(text)
+                            if _is_translation_call(prompt)
+                            else '{"entities": []}')
+        engine.model_max_output_tokens = 4096
+        translator = self._make_translator(engine, config={
+            'novel_chunk_tokens': 16000,
+            'novel_max_paragraphs_per_chunk': 0})
+        translator.run()
+        chunk_calls = [c for c in engine.translate_calls
+                       if _is_translation_call(c['prompt'])]
+        # 120 paragraphs of 37 tokens, 31 to a chunk: four chunks.
+        self.assertEqual(4, len(chunk_calls))
+        self.assertTrue(all(p.translation for p in paragraphs))
+
+    def test_effective_budget_subtracts_the_reserve_once(self):
+        engine = FakeEngine()
+        translator = self._make_translator(engine, config={
+            'novel_chunk_tokens': 16000, 'novel_reply_max_tokens': 0})
+        self.assertEqual(16000 - 4840,
+                         translator._effective_chunk_tokens(4840))
+        # The reply room is a ceiling on that, not something the
+        # reserve is subtracted from again.
+        engine.model_max_output_tokens = 4096
+        translator = self._make_translator(
+            engine, config={'novel_chunk_tokens': 16000})
+        self.assertEqual(int((4096 - 1500) / 2.2),
+                         translator._effective_chunk_tokens(4840))
+
+    def test_the_two_sizes_agree(self):
+        # The room asked for a chunk sized under the reply limit is the
+        # reply limit, never more: the numbers come from one pair.
+        engine = FakeEngine()
+        engine.model_max_output_tokens = 8192
+        translator = self._make_translator(engine)
+        source = translator.source_for_reply(8192)
+        self.assertLessEqual(translator.reply_for_source(source), 8192)
+
+    def test_the_sizing_is_said_once_at_the_start(self):
+        engine = FakeEngine(translate_side_effect=lambda text, prompt:
+                            _echo_markers(text)
+                            if _is_translation_call(prompt)
+                            else '{"entities": []}')
+        engine.model_max_output_tokens = 8192
+        translator = self._make_translator(engine)
+        translator.run()
+        lines = [c.args[0] for c in translator.log.call_args_list if c.args]
+        sizing = [line for line in lines if line.startswith('Sizing:')]
+        self.assertEqual(1, len(sizing))
+        self.assertIn('8192', sizing[0])
+        self.assertIn('75 paragraphs', sizing[0])
+
+    def test_a_chunk_asks_for_room_to_reply(self):
+        # Sent without max_tokens, a provider applied its own default
+        # of 4096 and a chunk came back cut at a third.
+        seen = []
+
+        def side_effect(text, prompt):
+            seen.append(engine.max_tokens)
+            return _echo_markers(text) if _is_translation_call(prompt) \
+                else '{"entities": []}'
+        engine = FakeEngine(translate_side_effect=side_effect)
+        engine.max_tokens = 0
+        translator = self._make_translator(engine)
+        translator.run()
+        chunk_calls = [m for m in seen if m]
+        self.assertTrue(chunk_calls)
+        self.assertTrue(all(1500 < m <= 16384 for m in chunk_calls))
+        # Put back afterwards.
+        self.assertEqual(0, engine.max_tokens)
+
+    def test_reply_room_respects_a_limit_set_by_the_user(self):
+        seen = []
+
+        def side_effect(text, prompt):
+            seen.append(engine.max_tokens)
+            return _echo_markers(text) if _is_translation_call(prompt) \
+                else '{"entities": []}'
+        engine = FakeEngine(translate_side_effect=side_effect)
+        engine.max_tokens = 2048
+        translator = self._make_translator(engine)
+        translator.run()
+        self.assertTrue(all(m == 2048 for m in seen))
+
+    def test_reply_room_can_be_turned_off(self):
+        seen = []
+
+        def side_effect(text, prompt):
+            if _is_translation_call(prompt):
+                seen.append(engine.max_tokens)
+                return _echo_markers(text)
+            return '{"entities": []}'
+        engine = FakeEngine(translate_side_effect=side_effect)
+        engine.max_tokens = 0
+        translator = self._make_translator(
+            engine, config={'novel_reply_max_tokens': 0})
+        translator.run()
+        self.assertTrue(seen)
+        self.assertTrue(all(m == 0 for m in seen))
+
+    def test_auxiliary_paragraphs_are_translated_before_the_chapters(self):
+        aux = [
+            make_paragraph(10, 'The Book Title', page='content.opf'),
+            make_paragraph(11, 'Chapter One', page='toc.ncx'),
+            make_paragraph(12, 'For my mother', page='dedication'),
+            make_paragraph(13, 'Already done', page='dedication'),
+        ]
+        aux[3].translation = 'Gia fatto'
+        aux[3].engine_name = 'FakeEngine'
+        aux[3].target_lang = 'Italian'
+        calls = []
+
+        def side_effect(text, prompt):
+            calls.append(prompt)
+            if _is_translation_call(prompt):
+                return _echo_markers(text)
+            return '{"entities": []}'
+        engine = FakeEngine(translate_side_effect=side_effect)
+        translator = NovelTranslator(
+            engine, self.chapters, self.ctx, self.cache,
+            config={'novel_min_chars_for_context': 0}, aux_paragraphs=aux)
+        translator.set_logging(Mock())
+        translator.run()
+
+        self.assertEqual('The Book Title (IT)', aux[0].translation)
+        self.assertEqual('Chapter One (IT)', aux[1].translation)
+        self.assertEqual('For my mother (IT)', aux[2].translation)
+        # The one the cache already held was not sent again.
+        self.assertEqual('Gia fatto', aux[3].translation)
+        first = engine.translate_calls[0]['text']
+        self.assertIn('The Book Title', first)
+        self.assertNotIn('Already done', first)
+        # In one request, with no running context, ahead of chapter 1.
+        self.assertIn('For my mother', first)
+        self.assertNotIn('Alpha 1', first)
+        self.assertEqual(2, self.ctx.get_progress())
 
     def test_summary_and_glossary_persisted(self):
         # The default asks for both in one reply.
@@ -1414,30 +1677,30 @@ class TestNovelTranslator(unittest.TestCase):
         # At least one entity should have been recovered via the fallback.
         self.assertGreater(len(glossary), 0)
 
-    def test_head_and_tail_short_text_unchanged(self):
+    def test_head_short_text_unchanged(self):
         # Short text under the budget is returned verbatim.
         engine = FakeEngine()
         translator = self._make_translator(engine)
         text = 'This is short.'
-        self.assertEqual(text, translator._head_and_tail(text, 100))
+        self.assertEqual(text, translator._head(text, 100))
 
-    def test_head_and_tail_long_text_truncated(self):
+    def test_head_long_text_truncated(self):
         engine = FakeEngine()
         translator = self._make_translator(engine)
         text = 'HEAD_START' + ('x' * 5000) + 'TAIL_END'
-        clipped = translator._head_and_tail(text, 500)
+        clipped = translator._head(text, 500)
         self.assertLess(len(clipped), len(text))
         self.assertEqual(len(clipped), 500)
         self.assertIn('HEAD_START', clipped)
         self.assertNotIn('TAIL_END', clipped)
         self.assertNotIn('middle omitted', clipped)
 
-    def test_head_and_tail_zero_disables(self):
+    def test_head_zero_disables(self):
         # max_chars <= 0 disables truncation.
         engine = FakeEngine()
         translator = self._make_translator(engine)
         text = 'x' * 100000
-        self.assertEqual(text, translator._head_and_tail(text, 0))
+        self.assertEqual(text, translator._head(text, 0))
 
     def test_translation_failure_after_retries(self):
         engine = FakeEngine(
@@ -1449,13 +1712,13 @@ class TestNovelTranslator(unittest.TestCase):
 
     # -- overlap chunking -------------------------------------------------
 
-    def test_overlap_default_is_three(self):
-        # Default from configuration is 3 sliding paragraphs.
+    def test_overlap_default_is_five(self):
+        # Default from configuration is 5 sliding paragraphs.
         engine = FakeEngine()
         translator = self._make_translator(engine, config={})
         # _make_translator forces novel_min_chars_for_context=0 but not
         # the overlap; it should fall back to the runtime default.
-        self.assertEqual(3, translator.overlap_paragraphs)
+        self.assertEqual(5, translator.overlap_paragraphs)
 
     def test_overlap_can_be_disabled(self):
         engine = FakeEngine()
@@ -1826,6 +2089,14 @@ class TestStructuredOutputParser(unittest.TestCase):
         # Empty translation is dropped; the alignment retry will fill it.
         self.assertEqual({2: 'OK'}, parsed)
 
+    def test_parse_renumbered_reply_by_order(self):
+        translator = self._make_translator()
+        response = ('{"paragraphs": ['
+                    '{"n": 1, "translation": "A"},'
+                    '{"n": 2, "translation": "B"}]}')
+        parsed = translator._parse_structured_response(response, [40, 41])
+        self.assertEqual({40: 'A', 41: 'B'}, parsed)
+
     def test_parse_preserves_inline_placeholders(self):
         # {id_00001} placeholders must survive the JSON round-trip.
         translator = self._make_translator()
@@ -1954,7 +2225,7 @@ class TestStructuredEnginePayloads(unittest.TestCase):
     """Verify each engine builds the correct provider-specific body.
 
     These tests exercise the real engine classes and therefore need the
-    ``calibre_plugins.ebook_translator_novel`` package to be importable. They
+    ``calibre_plugins.novel_translator`` package to be importable. They
     are skipped in isolated dev environments (where only ``lib/novel.py``
     is loaded standalone) but run normally under ``calibre-debug``.
     """
@@ -1962,8 +2233,8 @@ class TestStructuredEnginePayloads(unittest.TestCase):
     @classmethod
     def _can_import_engines(cls):
         try:
-            import calibre_plugins.ebook_translator_novel.engines.openai  # noqa
-            import calibre_plugins.ebook_translator_novel.engines.google  # noqa
+            import calibre_plugins.novel_translator.engines.openai  # noqa
+            import calibre_plugins.novel_translator.engines.google  # noqa
             return True
         except ImportError:
             return False
@@ -1975,7 +2246,7 @@ class TestStructuredEnginePayloads(unittest.TestCase):
 
     def test_openai_response_format_json_schema(self):
         # Import lazily to avoid loading engine chain at module scope.
-        from calibre_plugins.ebook_translator_novel.engines.openai import (
+        from calibre_plugins.novel_translator.engines.openai import (
             ChatgptTranslate)
         engine = ChatgptTranslate.__new__(ChatgptTranslate)
         engine.model = 'gpt-x'
@@ -2009,7 +2280,7 @@ class TestStructuredEnginePayloads(unittest.TestCase):
         self.assertNotIn('reasoning_effort', body)
 
     def test_openai_response_format_json_object_when_no_schema(self):
-        from calibre_plugins.ebook_translator_novel.engines.openai import (
+        from calibre_plugins.novel_translator.engines.openai import (
             ChatgptTranslate)
         engine = ChatgptTranslate.__new__(ChatgptTranslate)
         engine.model = 'gpt-x'
@@ -2029,7 +2300,7 @@ class TestStructuredEnginePayloads(unittest.TestCase):
         self.assertEqual('json_object', body['response_format']['type'])
 
     def test_openai_structured_honors_reasoning_effort(self):
-        from calibre_plugins.ebook_translator_novel.engines.openai import (
+        from calibre_plugins.novel_translator.engines.openai import (
             ChatgptTranslate)
         engine = ChatgptTranslate.__new__(ChatgptTranslate)
         engine.model = 'gpt-x'
@@ -2051,7 +2322,7 @@ class TestStructuredEnginePayloads(unittest.TestCase):
         self.assertEqual('low', body['reasoning_effort'])
 
     def test_gemini_response_mime_and_schema(self):
-        from calibre_plugins.ebook_translator_novel.engines.google import (
+        from calibre_plugins.novel_translator.engines.google import (
             GeminiTranslate)
         engine = GeminiTranslate.__new__(GeminiTranslate)
         engine.model = 'gemini-x'
@@ -2462,17 +2733,23 @@ class TestCombinedContextCall(unittest.TestCase):
         self.assertEqual(1, sent.count('Alpha walked home.'))
         self.assertEqual(1, sent.count('Alpha cammina a casa.'))
 
-    def test_a_custom_summary_prompt_keeps_the_two_calls(self):
-        # Otherwise the prompt the user typed would never be used.
+    def test_the_structural_prompts_are_not_settings(self):
+        # A prompt typed for the summary or the glossary used to be a
+        # setting, and broke the shape the code parses more often than
+        # it helped. Whatever a configuration still carries is ignored.
         engine = self._engine()
         translator = self._make_translator(
-            engine, {'novel_summary_prompt': 'Riassumi in due righe.'})
+            engine, {'novel_summary_prompt': 'Riassumi in due righe.',
+                     'novel_glossary_prompt': 'Elenca i nomi.',
+                     'novel_context_prompt': 'Tutto insieme.'})
         translator._translate_chapter(self.chapters[0])
 
         aux = self._aux_calls(engine)
-        self.assertEqual(2, len(aux))
-        self.assertTrue(
-            any('Riassumi in due righe.' in c['text'] for c in aux))
+        self.assertEqual(1, len(aux))
+        sent = ' '.join(c['text'] + c['prompt'] for c in aux)
+        for typed in ('Riassumi in due righe.', 'Elenca i nomi.',
+                      'Tutto insieme.'):
+            self.assertNotIn(typed, sent)
 
     def test_the_last_chapter_skips_the_call(self):
         engine = self._engine()
@@ -2514,7 +2791,100 @@ class TestCombinedContextCall(unittest.TestCase):
 
     def test_shipped_combined_prompt_is_literal(self):
         self.assertNotIn('{{', DEFAULT_NOVEL_CONTEXT_PROMPT)
-        self.assertIn('{"summary"', DEFAULT_NOVEL_CONTEXT_PROMPT)
+        self.assertIn('"summary"', DEFAULT_NOVEL_CONTEXT_PROMPT)
+        self.assertIn('"narrative"', DEFAULT_NOVEL_CONTEXT_PROMPT)
+
+    def _engine_reporting(self, narrative):
+        reply = json.dumps({
+            'narrative': narrative,
+            'summary': 'A list of the other books by the author.',
+            'entities': [{'source': 'Hachette', 'translation': 'Hachette',
+                          'type': 'organization', 'notes': ''}]})
+        return FakeEngine(translate_side_effect=lambda text, prompt:
+                          _echo_markers(text)
+                          if _is_translation_call(prompt) else reply)
+
+    def test_a_chapter_outside_the_story_leaves_no_context(self):
+        # The case seen on a real book: "Also by ..." and the copyright
+        # page were summarised and carried into every later prompt.
+        engine = self._engine_reporting(narrative=False)
+        translator = self._make_translator(engine)
+        translator._translate_chapter(self.chapters[0])
+
+        self.assertEqual(
+            '', self.ctx.get_summaries()[0]['summary'])
+        self.assertNotIn('Hachette', self.ctx.get_glossary())
+        self.assertTrue(any(
+            'not part of the story' in (c.args[0] if c.args else '')
+            for c in translator.log.call_args_list))
+        # The chapter itself is done and counted.
+        self.assertEqual(1, self.ctx.get_progress())
+
+    def test_a_story_chapter_keeps_its_context(self):
+        engine = self._engine_reporting(narrative=True)
+        translator = self._make_translator(engine)
+        translator._translate_chapter(self.chapters[0])
+        self.assertIn('other books', self.ctx.get_summaries()[0]['summary'])
+        self.assertIn('Hachette', self.ctx.get_glossary())
+
+    def test_a_reply_cut_before_the_summary_asks_for_it_again(self):
+        # The names came first and the reply was cut at the output
+        # limit: the entries are kept and the summary is asked on its
+        # own instead of leaving a hole in every later prompt.
+        calls = []
+
+        def side_effect(text, prompt):
+            calls.append(prompt)
+            if _is_translation_call(prompt):
+                return _echo_markers(text)
+            if _is_glossary_call(prompt):
+                return ('{"narrative": true, "entities": [{"source": '
+                        '"Alpha", "translation": "Alpha", "type": '
+                        '"character", "notes": ""}], "summary": "Alph')
+            return 'Riassunto a parte.'
+        engine = FakeEngine(translate_side_effect=side_effect)
+        translator = self._make_translator(engine)
+        translator._translate_chapter(self.chapters[0])
+        self.assertEqual(
+            'Riassunto a parte.', self.ctx.get_summaries()[0]['summary'])
+        self.assertIn('Alpha', self.ctx.get_glossary())
+        self.assertTrue(any(_is_summary_call(p) for p in calls))
+
+    def test_a_missing_flag_is_read_as_story(self):
+        # A model that ignored the field is no reason to drop a summary.
+        engine = self._engine()
+        translator = self._make_translator(engine)
+        translator._translate_chapter(self.chapters[0])
+        self.assertEqual('Alpha cammina.', self.ctx.get_summaries()[0]['summary'])
+
+    def test_the_check_can_be_turned_off(self):
+        engine = self._engine_reporting(narrative=False)
+        translator = self._make_translator(
+            engine, {'novel_context_narrative_only': False})
+        translator._translate_chapter(self.chapters[0])
+        self.assertIn('other books', self.ctx.get_summaries()[0]['summary'])
+        self.assertIn('Hachette', self.ctx.get_glossary())
+
+    def test_the_separate_summary_call_answers_the_same_way(self):
+        calls = []
+
+        def side_effect(text, prompt):
+            calls.append(prompt)
+            if _is_translation_call(prompt):
+                return _echo_markers(text)
+            if _is_glossary_call(prompt):
+                return ('{"entities": [{"source": "Hachette", '
+                        '"translation": "Hachette"}]}')
+            return 'Not a story chapter.'
+        engine = FakeEngine(translate_side_effect=side_effect)
+        translator = self._make_translator(
+            engine, {'novel_combined_context_call': False})
+        translator._translate_chapter(self.chapters[0])
+
+        self.assertEqual('', self.ctx.get_summaries()[0]['summary'])
+        # No glossary call was made for a chapter outside the story.
+        self.assertFalse(any(_is_glossary_call(p) for p in calls))
+        self.assertNotIn('Hachette', self.ctx.get_glossary())
 
 
 class TestExtractJsonString(unittest.TestCase):
@@ -2618,6 +2988,66 @@ class TestDetectDialogueStyle(unittest.TestCase):
         self.assertIn('every chapter', text)
 
 
+class TestDetectBookDialogueStyle(unittest.TestCase):
+    """A preface that quotes at length must not decide for the novel."""
+
+    def test_most_chapters_win_not_most_marks(self):
+        # Eighty straight marks in the preface against forty guillemets
+        # in the novel: the raw count picked the preface.
+        preface = ['The critic wrote: "a masterpiece", "unmatched".'] * 40
+        novel = [['«Buongiorno», disse Anna.'] * 8 + ['Prosa.'] * 10] * 5
+        style = detect_book_dialogue_style([preface] + novel)
+        self.assertEqual('«', style['primary'])
+        self.assertEqual(5, style['votes'])
+        self.assertEqual(6, style['voters'])
+        # The counts come from the chapters that follow the convention,
+        # so the preface's marks do not turn up as a nested pair.
+        self.assertIsNone(style['nested'])
+        self.assertNotIn('"', style['counts'])
+
+    def test_dash_dialogue_can_win_the_vote(self):
+        chapters = [['\u2014Hola \u2014dijo Juan.'] * 12
+                    + ['El sol estaba alto.'] * 20] * 3
+        chapters.append(['She said "no" and "never".'] * 20)
+        style = detect_book_dialogue_style(chapters)
+        self.assertTrue(style['dash'])
+        self.assertIsNone(style['primary'])
+        self.assertEqual(3, style['votes'])
+
+    def test_a_book_without_dialogue_votes_for_nothing(self):
+        style = detect_book_dialogue_style([['Prose.'] * 10] * 4)
+        self.assertIsNone(style['primary'])
+        self.assertFalse(style['dash'])
+        self.assertEqual(0, style['voters'])
+
+    def test_a_single_chapter_is_read_as_before(self):
+        style = detect_book_dialogue_style([['«Ciao», disse.'] * 10])
+        self.assertEqual('«', style['primary'])
+        self.assertEqual(1, style['votes'])
+
+
+class TestDialogueConventions(unittest.TestCase):
+    def test_every_convention_yields_an_instruction_naming_its_pair(self):
+        for key, convention in DIALOGUE_CONVENTIONS.items():
+            with self.subTest(convention=key):
+                text = dialogue_instruction(dialogue_convention_style(key))
+                self.assertIn('every chapter', text)
+                if convention['primary']:
+                    self.assertIn(convention['primary'][0], text)
+                self.assertIn(convention['nested'][0], text)
+                if convention['dash']:
+                    self.assertIn('dash', text)
+
+    def test_reversed_guillemets_are_not_looked_up_in_the_marks(self):
+        text = dialogue_instruction(
+            dialogue_convention_style('reversed_guillemets'))
+        self.assertIn('»…«', text)
+        self.assertIn('›…‹', text)
+
+    def test_unknown_key_is_none(self):
+        self.assertIsNone(dialogue_convention_style('nonsense'))
+
+
 class TestDialogueRules(unittest.TestCase):
     def _translator(self, config=None, chapters=()):
         cache = Mock()
@@ -2647,6 +3077,21 @@ class TestDialogueRules(unittest.TestCase):
             chapters=[self._chapter(['«Ciao», disse.'] * 10)])
         self.assertEqual('', translator.dialogue_rules)
         self.assertNotIn('«…»', translator._translation_system_prompt('C'))
+
+    def test_a_convention_from_the_settings_replaces_detection(self):
+        translator = self._translator(
+            {'novel_dialogue_convention': 'guillemets'},
+            chapters=[self._chapter(['"Hi," she said.'] * 10)])
+        self.assertIn('«…»', translator.dialogue_rules)
+        self.assertNotIn('straight', translator.dialogue_rules)
+        self.assertEqual('guillemets', translator.dialogue_convention)
+
+    def test_an_unknown_convention_falls_back_to_detection(self):
+        translator = self._translator(
+            {'novel_dialogue_convention': 'nonsense'},
+            chapters=[self._chapter(['"Hi," she said.'] * 10)])
+        self.assertEqual('auto', translator.dialogue_convention)
+        self.assertIn('"…"', translator.dialogue_rules)
 
     def test_a_rule_from_the_settings_replaces_the_detected_one(self):
         translator = self._translator(
@@ -2721,7 +3166,8 @@ class TestAuthorBrief(unittest.TestCase):
         return translator
 
     def test_a_capable_engine_searches_the_web(self):
-        translator = self._translator()
+        # When asked to: the default asks the model alone.
+        translator = self._translator({'novel_author_style': 'auto'})
         self.assertEqual(BRIEF, translator._ensure_author_style())
         self.assertEqual(['search+plain'], translator.translator.bodies)
         # The raised timeout is put back afterwards.
@@ -2731,6 +3177,70 @@ class TestAuthorBrief(unittest.TestCase):
         translator = self._translator({'novel_author_style': 'model'})
         translator._ensure_author_style()
         self.assertEqual(['plain'], translator.translator.bodies)
+
+    def _note(self, translator):
+        calls = [c for c in translator.cache.set_info.call_args_list
+                 if c.args and c.args[0] == INFO_NOVEL_STYLE_NOTE]
+        return calls[-1].args[1] if calls else None
+
+    def test_an_admission_of_ignorance_leaves_a_note_for_the_window(self):
+        # The tab used to stay empty; it says what happened instead.
+        translator = self._translator(
+            {'novel_author_style': 'model'},
+            engine=SearchingEngine(NO_AUTHOR_INFORMATION))
+        self.assertEqual('', translator._ensure_author_style())
+        note = self._note(translator)
+        self.assertIn('Italo Calvino', note)
+        self.assertIn('no reliable information', note)
+        self.assertIn('Search the web', note)
+        self.assertIn('Reset context', note)
+
+    def test_a_brief_replaces_the_note(self):
+        translator = self._translator()
+        translator.ctx.set_style_note('No brief: earlier attempt.')
+        translator._ensure_author_style()
+        self.assertEqual('', self._note(translator))
+        self.assertEqual(BRIEF, translator.ctx.get_style())
+
+    def test_every_other_way_to_end_without_a_brief_says_why(self):
+        cases = (
+            ({'novel_author_style': 'off'}, None, 'turned off'),
+            ({'novel_book_author': ''}, None, 'no author'),
+            ({}, SearchingEngine('Bello.'), 'too little'),
+        )
+        for config, engine, expected in cases:
+            with self.subTest(expected=expected):
+                translator = self._translator(config, engine=engine)
+                self.assertEqual('', translator._ensure_author_style())
+                self.assertIn(expected, self._note(translator))
+
+    def test_the_prompt_says_where_the_brief_may_come_from(self):
+        # A model with no search behind it was told to search the web
+        # and to reply NO INFORMATION when it could not find anything,
+        # and did exactly that, every time.
+        engine = FakeEngine(translate_side_effect=lambda text, prompt: BRIEF)
+        translator = self._translator(
+            {'novel_author_style': 'model'}, engine=engine)
+        translator._ensure_author_style()
+        sent = engine.translate_calls[-1]['text']
+        self.assertIn('Rely on what you know', sent)
+        self.assertNotIn('Search the web', sent)
+        self.assertNotIn('{sources}', sent)
+
+        engine = SearchingEngine(BRIEF)
+        engine.translate_calls = []
+        original = engine.translate
+
+        def translate(text):
+            engine.translate_calls.append({'text': text})
+            return original(text)
+        engine.translate = translate
+        translator = self._translator(
+            {'novel_author_style': 'auto'}, engine=engine)
+        translator._ensure_author_style()
+        sent = engine.translate_calls[-1]['text']
+        self.assertIn('Search the web', sent)
+        self.assertNotIn('Rely on what you know', sent)
 
     def test_off_asks_nothing(self):
         translator = self._translator({'novel_author_style': 'off'})

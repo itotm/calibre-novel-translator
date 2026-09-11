@@ -6,7 +6,7 @@ from qt.core import ( # type: ignore
 from calibre.library.comments import markdown # type: ignore
 from calibre.utils.localization import get_lang # type: ignore
 
-from . import EbookTranslator
+from . import NovelTranslatorPlugin
 from .components import Footer
 
 
@@ -29,12 +29,12 @@ class AboutDialog(QDialog):
         logo.setPixmap(self.icon.pixmap(80, 80))
         logo.setAlignment(Qt.AlignCenter)
         brand_layout.addWidget(logo)
-        name = QLabel(EbookTranslator.title.upper())
+        name = QLabel(NovelTranslatorPlugin.title.upper())
         name.setStyleSheet('font-size:20px;font-weight:300;')
         name.setAlignment(Qt.AlignCenter)
         name.setTextFormat(Qt.RichText)
         brand_layout.addWidget(name)
-        version = QLabel(EbookTranslator.__version__)
+        version = QLabel(NovelTranslatorPlugin.__version__)
         version.setStyleSheet('font-size:14px;')
         version.setAlignment(Qt.AlignCenter)
         version.setTextFormat(Qt.RichText)

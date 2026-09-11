@@ -9,15 +9,13 @@ from calibre.ebooks.oeb.base import TOC, Metadata  # type: ignore
 from ...lib.utils import ns, create_xpath
 from ...lib.cache import Paragraph
 from ...lib.element import (
-    get_string, get_name, Extraction, ElementHandler, ElementHandlerMerge,
-    Element, SrtElement, PgnElement, TocElement, PageElement, MetadataElement,
-    get_srt_elements, get_pgn_elements, get_toc_elements,
+    get_string, get_name, Extraction, ElementHandler,
+    Element, TocElement, PageElement, MetadataElement, get_toc_elements,
     get_metadata_elements)
-from ...engines import DeeplFreeTranslate
 from ...engines.base import Base
 
 
-module_name = 'calibre_plugins.ebook_translator_novel.lib.element'
+module_name = 'calibre_plugins.novel_translator.lib.element'
 
 
 class TestFunction(unittest.TestCase):
@@ -40,24 +38,6 @@ class TestFunction(unittest.TestCase):
     def test_get_name(self):
         xhtml = '<p xmlns="http://www.w3.org/1999/xhtml">a</p>'
         self.assertEqual('p', get_name(etree.XML(xhtml)))
-
-    @patch('calibre_plugins.ebook_translator_novel.lib.element.open_file')
-    def test_get_srt_elements(self, mock_open_file):
-        mock_open_file.return_value = '01:00\n0\na\nb\n\n02:00\n1\nc\n\n'
-        elements = get_srt_elements('/path/to/srt', 'utf-8')
-        mock_open_file.assert_called_once_with('/path/to/srt', 'utf-8')
-        self.assertEqual(2, len(elements))
-        self.assertEqual(['01:00', '0', 'a\nb'], elements[0].element)
-        self.assertEqual(['02:00', '1', 'c'], elements[1].element)
-
-    @patch('calibre_plugins.ebook_translator_novel.lib.element.open_file')
-    def test_get_pgn_elements(self, mock_open_file):
-        mock_open_file.return_value = '1\n2\n3\n\nabc{abc}abc\n\ndef{def}def'
-        elements = get_pgn_elements('/path/to/pgn', 'utf-8')
-        mock_open_file.assert_called_once_with('/path/to/pgn', 'utf-8')
-        self.assertEqual(2, len(elements))
-        self.assertEqual(['{abc}', None], elements[0].element)
-        self.assertEqual(['{def}', None], elements[1].element)
 
     def test_get_toc_elements(self):
         toc = TOC()
@@ -184,100 +164,6 @@ class TestElement(unittest.TestCase):
 
     def test_get_translation(self):
         self.assertIsNone(self.element.get_translation())
-
-
-class TestSrtElement(unittest.TestCase):
-    def setUp(self):
-        self.element = SrtElement(['1', '00:01 --> 00:02', 'a'])
-        self.element.position = 'below'
-
-    def test_get_raw(self):
-        self.assertEqual('a', self.element.get_raw())
-
-    def test_get_text(self):
-        self.assertEqual('a', self.element.get_text())
-
-    def test_get_content(self):
-        self.assertEqual('a', self.element.get_content())
-
-    def test_add_translation_none(self):
-        self.element.add_translation()
-        self.assertEqual('a', self.element.element[2])
-
-    def test_add_translation_below(self):
-        self.element.add_translation('A')
-        self.assertEqual('a\nA', self.element.element[2])
-
-    def test_add_translation_right(self):
-        self.element.position = 'right'
-        self.element.add_translation('A')
-        self.assertEqual('a\nA', self.element.element[2])
-
-    def test_add_translation_above(self):
-        self.element.position = 'above'
-        self.element.add_translation('A')
-        self.assertEqual('A\na', self.element.element[2])
-
-    def test_add_translation_left(self):
-        self.element.position = 'left'
-        self.element.add_translation('A')
-        self.assertEqual('A\na', self.element.element[2])
-
-    def test_add_translation_only(self):
-        self.element.position = 'only'
-        self.element.add_translation('A')
-        self.assertEqual('A', self.element.element[2])
-
-
-class TestPgnElement(unittest.TestCase):
-    def setUp(self):
-        self.item = ['{a}', None]
-        self.element = PgnElement(self.item)
-        self.element.position = 'below'
-
-    def test_create_element(self):
-        self.assertIsInstance(self.element, Element)
-        self.assertIsInstance(self.element, PgnElement)
-
-    def test_get_raw(self):
-        self.assertEqual('{a}', self.element.get_raw())
-
-    def test_get_text(self):
-        self.assertEqual('a', self.element.get_text())
-
-    def test_get_content(self):
-        self.assertEqual('a', self.element.get_content())
-
-    def test_add_translation_only(self):
-        self.element.position = 'only'
-        self.element.add_translation('A')
-        self.assertEqual('A', self.element.element[1])
-
-    def test_add_translation_below(self):
-        self.element.add_translation('A')
-        self.assertEqual('a | A', self.element.element[1])
-
-    def test_add_translation_right(self):
-        self.element.position = 'right'
-        self.element.add_translation('A')
-        self.assertEqual('a | A', self.element.element[1])
-
-    def test_add_translation_above(self):
-        self.element.position = 'above'
-        self.element.add_translation('A')
-        self.assertEqual('A | a', self.element.element[1])
-
-    def test_add_translation_left(self):
-        self.element.position = 'left'
-        self.element.add_translation('A')
-        self.assertEqual('A | a', self.element.element[1])
-
-    def test_get_translation(self):
-        self.element.add_translation('A')
-        self.assertEqual('{a | A}', self.element.get_translation())
-
-    def test_get_translation_none(self):
-        self.assertEqual('{a}', self.element.get_translation())
 
 
 class TestMetadataElement(unittest.TestCase):
@@ -552,7 +438,8 @@ class TestPageElement(unittest.TestCase):
         self.assertEqual('abc', elements[1].get('class'))
 
     def test_add_translation_with_markup(self):
-        self.element.placeholder = DeeplFreeTranslate.placeholder
+        # A placeholder shaped like a tag, as DeepL's used to be.
+        self.element.placeholder = ('<m id={} />', r'<m\s+id={}\s*/>')
         self.element.get_content()
         translation = (
             '<m id=00000 /> Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa '
@@ -1367,7 +1254,6 @@ class TestElementHandler(unittest.TestCase):
         self.assertEqual(Base.placeholder, self.handler.placeholder)
         self.assertEqual(Base.separator, self.handler.separator)
         self.assertEqual('below', self.handler.position)
-        self.assertEqual(0, self.handler.merge_length)
         self.assertIsNone(self.handler.target_direction)
         self.assertIsNone(self.handler.translation_lang)
         self.assertIsNone(self.handler.original_color)
@@ -1377,9 +1263,6 @@ class TestElementHandler(unittest.TestCase):
         self.assertIsNone(self.handler.reserve_pattern)
         self.assertEqual({}, self.handler.elements)
         self.assertEqual([], self.handler.originals)
-
-    def test_get_merge_length(self):
-        self.assertEqual(0, self.handler.merge_length)
 
     def test_set_target_direction(self):
         self.handler.set_target_direction('ltr')
@@ -1415,7 +1298,7 @@ class TestElementHandler(unittest.TestCase):
         self.handler.load_reserve_rules()
         self.assertIsNotNone(self.handler.reserve_pattern)
 
-    @patch('calibre_plugins.ebook_translator_novel.lib.element.uid')
+    @patch('calibre_plugins.novel_translator.lib.element.uid')
     def test_prepare_original(self, mock_uid):
         self.handler.translation_lang = 'en'
         self.handler.original_color = 'red'
@@ -1442,7 +1325,7 @@ class TestElementHandler(unittest.TestCase):
                 self.assertEqual('green', element.translation_color)
                 self.assertEqual(('percentage', 20), element.column_gap)
 
-    @patch('calibre_plugins.ebook_translator_novel.lib.element.uid')
+    @patch('calibre_plugins.novel_translator.lib.element.uid')
     def test_prepare_translation_contains_ignored_element(self, mock_uid):
         self.xhtml = etree.XML(b"""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
@@ -1549,323 +1432,3 @@ class TestElementHandler(unittest.TestCase):
         self.assertEqual('C', elements[3].text)
         self.assertEqual('c', elements[3].get('id'))
         self.assertEqual('c', elements[3].get('class'))
-
-
-class TestElementHandlerMerge(unittest.TestCase):
-    def setUp(self):
-        self.xhtml = etree.XML(b"""<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
-    <head><title>Test Document</title></head>
-    <body>
-        <p id="a">a</p>
-        <p id="b">b</p>
-        <p><img src="abc.jpg" /></p>
-        <p id="c" class="c">c</p>
-        <p></p>
-    </body>
-</html>""")
-
-        self.elements = [
-            PageElement(element, 'p1') for element
-            in self.xhtml.findall('./x:body/*', namespaces=ns)]
-        self.elements[-1].set_ignored(True)
-        self.elements[-3].set_ignored(True)
-        self.handler = ElementHandlerMerge(
-            Base.placeholder, Base.separator, 'below')
-        self.handler.set_merge_length(1000)
-
-    def test_create_element_handler_merge(self):
-        self.assertIsInstance(self.handler, ElementHandler)
-        self.assertIsInstance(self.handler, ElementHandlerMerge)
-        self.assertEqual(1000, self.handler.merge_length)
-
-    def test_align_paragraph(self):
-        self.handler.prepare_original(self.elements)
-
-        paragraph = Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>',
-            'a {{id_0}} b {{id_1}} c {{id_3}}', False, None, None,
-            'A {{id_0}} B {{id_1}} C {{id_3}}', 'ENGINE', 'LANG')
-        self.assertEqual(
-            [('a', 'A'), ('b', 'B'), ('c', 'C')],
-            self.handler.align_paragraph(paragraph))
-
-        paragraph = Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>',
-            'a {{id_0}} b {{id_1}} c {{id_3}}', False, None, None,
-            'A {{id_0}} B {{id_1}} C {{id_4}} D {{id_5}}', 'ENGINE', 'LANG')
-        self.handler.align_paragraph(paragraph)
-        self.assertEqual(
-            [('a', 'A'), ('b', 'B'), ('c', 'C\n\nD')],
-            self.handler.align_paragraph(paragraph))
-
-        paragraph = Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>',
-            'a {{id_0}} b {{id_1}} c {{id_3}}', False, None, None,
-            'A {{id_0}} B {{id_1}}', 'ENGINE', 'LANG')
-        self.assertEqual(
-            [('a', None), ('b', None), ('c', 'A\n\nB')],
-            self.handler.align_paragraph(paragraph))
-
-        paragraph = Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>',
-            'a\n\nb\n\nc\n\n', False, None, None, 'A\n\nB\n\nC\n\n',
-            'ENGINE', 'LANG')
-        self.assertEqual(
-            [('a', 'A'), ('b', 'B'), ('c', 'C')],
-            self.handler.align_paragraph(paragraph))
-
-        paragraph = Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>',
-            'a\n\nb\n\nc\n\n', False, None, None, 'A\n\nB\n\nC\n\nD\n\nE\n\n',
-            'ENGINE', 'LANG')
-        self.assertEqual(
-            [('a', 'A'), ('b', 'B'), ('c', 'C\n\nD\n\nE')],
-            self.handler.align_paragraph(paragraph))
-
-        paragraph = Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>',
-            'a\n\nb\n\nc\n\n', False, None, None, None,
-            'ENGINE', 'LANG')
-        self.assertEqual(
-            [('a', None), ('b', None), ('c', None)],
-            self.handler.align_paragraph(paragraph))
-
-        paragraph = Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>',
-            'a\n\nb\n\nc\n\n', False, None, None, 'A\n\nB\n\n',
-            'ENGINE', 'LANG')
-        self.assertEqual(
-            [('a', None), ('b', None), ('c', 'A\n\nB')],
-            self.handler.align_paragraph(paragraph))
-
-        self.handler.position = 'above'
-        self.assertEqual(
-            [('a', 'A\n\nB'), ('b', None), ('c', None)],
-            self.handler.align_paragraph(paragraph))
-
-    @patch('calibre_plugins.ebook_translator_novel.lib.element.uid')
-    def test_prepare_original_merge_separator(self, mock_uid):
-        mock_uid.return_value = 'm1'
-        self.handler.separator = Base.separator
-        self.handler.translation_lang = 'en'
-        self.handler.original_color = 'red'
-        self.handler.translation_color = 'green'
-        self.handler.column_gap = ('percentage', 20)
-        self.handler.load_remove_rules()
-        self.handler.load_reserve_rules()
-        self.assertEqual([(
-            0, 'm1', '<p id="a">a</p>\n\n<p id="b">b</p>\n\n<p id="c" '
-            'class="c">c</p>\n\n', 'a\n\nb\n\nc\n\n', False)],
-            self.handler.prepare_original(self.elements))
-        for element in [e for e in self.elements if not e.ignored]:
-            with self.subTest(element=element):
-                self.assertEqual(Base.placeholder, element.placeholder)
-                self.assertEqual('below', element.position)
-                self.assertEqual('en', element.translation_lang)
-                self.assertEqual('red', element.original_color)
-                self.assertEqual('green', element.translation_color)
-                self.assertEqual(('percentage', 20), element.column_gap)
-
-    @patch('calibre_plugins.ebook_translator_novel.lib.element.uid')
-    def test_prepare_original_merge_separator_multiple(self, mock_uid):
-        mock_uid.side_effect = ['m1', 'm2', 'm3']
-        self.handler.merge_length = 2
-        self.handler.separator = Base.separator
-        items = [
-            (0, 'm1', '<p id="a">a</p>', 'a\n\n', False),
-            (1, 'm2', '<p id="b">b</p>', 'b\n\n', False),
-            (2, 'm3', '<p id="c" class="c">c</p>', 'c\n\n', False)]
-        self.assertEqual(items, self.handler.prepare_original(self.elements))
-
-    def test_prepare_translation(self):
-        pass
-
-    def test_add_translations_merge_placeholder(self):
-        self.handler.prepare_original(self.elements)
-        self.handler.add_translations([Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>',
-            'a {{id_0}} b {{id_1}} c {{id_3}}', False, None, None,
-            'A {{id_0}} B {{id_1}} C {{id_3}}', 'ENGINE', 'LANG')])
-
-        elements = self.xhtml.findall('./x:body/*', namespaces=ns)
-
-        self.assertEqual(8, len(elements))
-        self.assertEqual('a', elements[0].text)
-        self.assertEqual('A', elements[1].text)
-        self.assertEqual('auto', elements[1].get('dir'))
-        self.assertEqual('b', elements[2].text)
-        self.assertEqual('B', elements[3].text)
-        self.assertEqual('auto', elements[3].get('dir'))
-
-        self.assertEqual('c', elements[5].text)
-        self.assertEqual('C', elements[6].text)
-        self.assertEqual('auto', elements[6].get('dir'))
-
-    def test_add_translations_merge_cached_placeholder(self):
-        self.handler.separator = Base.separator
-        self.handler.target_direction = 'rtl'
-        self.handler.prepare_original(self.elements)
-        self.handler.add_translations([Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>',
-            'a {{id_0}} b {{id_1}} c {{id_3}}', False, None, None,
-            'A {{id_0}} B {{id_1}} C {{id_3}}', 'ENGINE', 'LANG')])
-
-        elements = self.xhtml.findall('./x:body/*', namespaces=ns)
-
-        self.assertEqual(8, len(elements))
-        self.assertEqual('a', elements[0].text)
-        self.assertEqual('A', elements[1].text)
-        self.assertEqual('rtl', elements[1].get('dir'))
-        self.assertEqual('b', elements[2].text)
-        self.assertEqual('B', elements[3].text)
-        self.assertEqual('rtl', elements[3].get('dir'))
-
-        self.assertEqual('c', elements[5].text)
-        self.assertEqual('C', elements[6].text)
-        self.assertEqual('rtl', elements[6].get('dir'))
-
-    def test_add_translations_merge_separator(self):
-        self.handler.separator = Base.separator
-        self.handler.prepare_original(self.elements)
-        self.handler.add_translations([Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>',
-            'a\n\nb\n\nc\n\n', False, None, None,
-            'A B\n\n\nC', 'ENGINE', 'LANG')])  # missing or repeated \n
-
-        elements = self.xhtml.findall('./x:body/*', namespaces=ns)
-
-        self.assertEqual(6, len(elements))
-        self.assertEqual('a', elements[0].text)
-        self.assertEqual('b', elements[1].text)
-        self.assertEqual('c', elements[3].text)
-        self.assertEqual(
-            '<p class="c" dir="auto">A B<br/><br/>C</p>',
-            get_string(elements[4], True))
-
-    def test_add_translations_merge_separator_multiple(self):
-        self.handler.merge_length = 2
-        self.handler.separator = Base.separator
-        self.handler.prepare_original(self.elements)
-        paragraphs = [
-            Paragraph(0, 'm1', '<p id="a">a</p>', 'a\n\n', False, None, None,
-                      'A\n\n', 'ENGINE', 'LANG'),
-            Paragraph(1, 'm2', '<p id="b">b</p>', 'b\n\n', False, None, None,
-                      'B', 'ENGINE', 'LANG'),
-            Paragraph(2, 'm3', '<p id="c" class="c">c</p>', 'c\n\n', False,
-                      None, None, 'C\n\n', 'ENGINE', 'LANG')]
-        self.handler.add_translations(paragraphs)
-
-        elements = self.xhtml.findall('./x:body/*', namespaces=ns)
-
-        self.assertEqual(8, len(elements))
-        self.assertEqual('a', elements[0].text)
-        self.assertEqual('A', elements[1].text)
-        self.assertEqual('b', elements[2].text)
-        self.assertEqual('B', elements[3].text)
-
-        self.assertEqual('c', elements[5].text)
-        self.assertEqual('C', elements[6].text)
-
-    def test_add_translations_merge_placeholder_missing_id(self):
-        self.handler.prepare_original(self.elements)
-        self.handler.add_translations([Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>',
-            'a {{id_0}} b {{id_1}} c {{id_3}}', False, None, None,
-            'A B {{id_1}} C {{id_3}}', 'ENGINE', 'LANG')])
-
-        elements = self.xhtml.findall('./x:body/*', namespaces=ns)
-        self.assertEqual(6, len(elements))
-        self.assertEqual('a', elements[0].text)
-        self.assertEqual('b', elements[1].text)
-
-        self.assertEqual('c', elements[3].text)
-        self.assertEqual(
-            '<p class="c" dir="auto">A B<br/><br/>C</p>',
-            get_string(elements[4], True))
-
-    def test_add_translations_merge_placeholder_missing_newline(self):
-        self.handler.separator = Base.separator
-        self.handler.prepare_original(self.elements)
-        self.handler.add_translations([Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>',
-            'a\n\nb\n\nc\n\n', False, None, None,
-            'A B\n\nC\n\n', 'ENGINE', 'LANG')])
-
-        elements = self.xhtml.findall('./x:body/*', namespaces=ns)
-
-        self.assertEqual(6, len(elements))
-        self.assertEqual('a', elements[0].text)
-        self.assertEqual('b', elements[1].text)
-
-        self.assertEqual('c', elements[3].text)
-        self.assertEqual(
-            '<p class="c" dir="auto">A B<br/><br/>C</p>',
-            get_string(elements[4], True))
-
-    def test_add_translations_merge_placeholder_only(self):
-        self.handler.position = 'only'
-        self.handler.prepare_original(self.elements)
-        self.handler.add_translations([Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>'
-            '<a href="/a">a</a>',
-            'a {{id_0}} b {{id_1}} c {{id_3}}', False, None, None,
-            'A {{id_0} B {{id_1}} C {{id_3}}', 'ENGINE', 'LANG')])
-
-        elements = self.xhtml.findall('./x:body/*', namespaces=ns)
-        self.assertEqual(5, len(elements))
-        self.assertEqual('A', elements[0].text)
-        self.assertEqual('B', elements[1].text)
-
-        self.assertEqual('C', elements[3].text)
-
-    def test_add_translations_merge_separator_only(self):
-        self.handler.position = 'only'
-        self.handler.separator = Base.separator
-        self.handler.prepare_original(self.elements)
-        self.handler.add_translations([Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>'
-            '<a href="/a">a</a>',
-            'a\n\nb\n\nc\n\n', False, None, None,
-            'A\n\n B\n\nC\n\n', 'ENGINE', 'LANG')])
-
-        elements = self.xhtml.findall('./x:body/*', namespaces=ns)
-        self.assertEqual(5, len(elements))
-        self.assertEqual('A', elements[0].text)
-        self.assertEqual('B', elements[1].text)
-
-        self.assertEqual('C', elements[3].text)
-
-    def test_add_translations_merge_placeholder_only_missing_id(self):
-        self.handler.position = 'only'
-
-        self.handler.prepare_original(self.elements)
-        self.handler.add_translations([Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>'
-            '<a href="/a">a</a>',
-            'a {{id_0}} b {{id_1}} c {{id_3}}', False, None, None,
-            'A B {{id_1}} C {{id_3}}', 'ENGINE', 'LANG')])
-
-        elements = self.xhtml.findall('./x:body/*', namespaces=ns)
-        self.assertEqual(5, len(elements))
-        self.assertEqual(
-            '<p id="c" class="c" dir="auto">A B<br/><br/>C</p>',
-            get_string(elements[-2], True))
-
-    def test_add_translations_merge_separator_only_missing_id(self):
-        self.handler.position = 'only'
-        self.handler.separator = Base.separator
-        self.handler.prepare_original(self.elements)
-        self.handler.add_translations([Paragraph(
-            0, 'm1', '<p id="a">a</p><p id="b">b</p><p id="c">c</p>'
-            '<a href="/a">a</a>',
-            'a\n\nb\n\nc\n\n', False, None, None,
-            'A B\n\nC\n\n', 'ENGINE', 'LANG')])
-
-        elements = self.xhtml.findall('./x:body/*', namespaces=ns)
-
-        self.assertEqual(5, len(elements))
-        self.assertEqual(
-            '<p id="c" class="c" dir="auto">A B<br/><br/>C</p>',
-            get_string(elements[-2], True))

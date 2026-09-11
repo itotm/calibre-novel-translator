@@ -2,8 +2,7 @@ import unittest
 from typing import Any
 from unittest.mock import call, Mock
 
-from ...lib.config import (
-    Configuration, get_config, ver200_upgrade, ver203_upgrade)
+from ...lib.config import Configuration, get_config
 
 
 class TestFunction(unittest.TestCase):
@@ -12,10 +11,10 @@ class TestFunction(unittest.TestCase):
 
     def test_default(self):
         defaults: dict[str, Any] = {
-            'preferred_mode': None,
+            'toolbar_placed': False,
             'to_library': True,
             'output_path': None,
-            'translate_engine': None,
+            'translate_engine': 'OpenRouter',
             'engine_preferences': {},
             'proxy_enabled': False,
             'proxy_type': 'http',
@@ -24,7 +23,7 @@ class TestFunction(unittest.TestCase):
             'cache_path': None,
             'log_translation': True,
             'show_notification': True,
-            'translation_position': None,
+            'translation_position': 'only',
             'column_gap': {
                 '_type': 'percentage',
                 'percentage': 10,
@@ -38,19 +37,12 @@ class TestFunction(unittest.TestCase):
             'filter_rules': [],
             'ignore_rules': [],
             'reserve_rules': [],
-            'custom_engines': {},
-            'glossary_enabled': False,
-            'glossary_path': None,
-            'merge_enabled': False,
-            'merge_length': 1800,
-            'ebook_metadata': {},
-            'search_paths': [],
-            'novel_mode_enabled': False,
+            'ebook_metadata': {'lang_code': True},
             'openrouter_advanced_parameters': False,
             'novel_chunk_tokens': 16000,
-            'novel_max_paragraphs_per_chunk': 100,
+            'novel_max_paragraphs_per_chunk': 75,
             'novel_structured_output': 'auto',
-            'novel_overlap_paragraphs': 3,
+            'novel_overlap_paragraphs': 5,
             'novel_context_tokens': 4000,
             'novel_summary_tokens': 600,
             'novel_glossary_max_entries': 500,
@@ -58,104 +50,27 @@ class TestFunction(unittest.TestCase):
             'novel_glossary_prompt_max_entries': 150,
             'novel_context_max_tokens': 4000,
             'novel_summary_max_chars': 0,
+            'novel_summary_input_max_chars': 40000,
             'novel_combined_context_call': True,
-            'novel_context_prompt': None,
+            'novel_context_narrative_only': True,
             'novel_skip_context_last_chapter': True,
             'novel_context_reasoning': False,
             'novel_min_chars_for_context': 300,
             'novel_reuse_translated_paragraphs': True,
+            'novel_on_missing_paragraphs': 'stop',
+            'novel_rate_limit_max_wait': 600,
+            'novel_reply_max_tokens': 16384,
             'novel_output_aware_chunking': True,
             'novel_prompt_cache': True,
             'novel_chapter_source': 'toc_level_1',
             'novel_front_matter_min_chars': 100,
-            'novel_author_style': 'auto',
-            'novel_author_style_prompt': None,
+            'novel_author_style': 'model',
             'novel_dialogue_convention': 'auto',
             'novel_dialogue_rules': None,
             'novel_translation_prompt': None,
-            'novel_summary_prompt': None,
-            'novel_glossary_prompt': None,
         }
 
         self.assertEqual(defaults, self.config.preferences.defaults)
-
-    def test_ver200_upgrade(self):
-        data = {
-            'other_config': 'anything',
-            'chatgpt_prompt': {
-                'auto': 'Test auto prompt',
-                'lang': 'Test lang prompt'
-            },
-            'preferred_language': {
-                'ChatGPT': 'English',
-                'Google': 'Chinese',
-            },
-            'api_key': {
-                'ChatGPT': '12345',
-                'Google': '67890',
-            },
-        }
-
-        config = Mock()
-        config.get.side_effect = lambda key: data.get(key)
-        config.delete.side_effect = lambda key: data.pop(key)
-        config.update.side_effect = lambda **kwargs: data.update(**kwargs)
-
-        ver200_upgrade(config)
-        self.assertEqual(data, {
-            'other_config': 'anything',
-            'engine_preferences': {
-                'ChatGPT': {
-                    'prompt': 'Test lang prompt',
-                    'target_lang': 'English',
-                    'api_keys': ['12345'],
-                },
-                'Google': {
-                    'target_lang': 'Chinese',
-                    'api_keys': ['67890']
-                },
-            },
-        })
-
-        data = {'chatgpt_prompt': {}}
-
-        ver200_upgrade(config)
-        self.assertEqual(data, {})
-
-        config.commit.assert_called()
-
-    def test_ver203_upgrade(self):
-        data = {
-            'engine_preferences': {
-                'ChatGPT(Azure)': {
-                    'model': 'xxx'
-                }
-            },
-            'concurrency_limit': 2,
-            'request_attempt': 0,
-            'request_interval': 1,
-            'request_timeout': None,
-        }
-
-        self.assertIn('model', data['engine_preferences']['ChatGPT(Azure)'])
-
-        config = Mock()
-        config.get.side_effect = lambda key: data.get(key)
-        config.delete.side_effect = lambda key: key in data and data.pop(key)
-
-        ver203_upgrade(config)
-        engine = data['engine_preferences']['ChatGPT(Azure)']
-        self.assertNotIn('model', engine)
-        self.assertEqual(2, engine['concurrency_limit'])
-        self.assertEqual(0, engine['request_attempt'])
-        self.assertEqual(1, engine['request_interval'])
-        self.assertNotIn('request_timeout', engine)
-        self.assertNotIn('concurrency_limit', data)
-        self.assertNotIn('request_attempt', data)
-        self.assertNotIn('request_interval', data)
-        self.assertNotIn('request_timeout', data)
-
-        config.commit.assert_called()
 
 
 class TestConfig(unittest.TestCase):
@@ -171,7 +86,7 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(1, self.config.get('a.fake', 1))
         self.assertEqual({'b2': 2}, self.config.get('b.b1'))
         self.assertEqual(2, self.config.get('b.b1.b2'))
-        self.assertIsNone(self.config.get('translation_position'))
+        self.assertEqual('only', self.config.get('translation_position'))
 
     def test_set(self):
         self.config.preferences = {

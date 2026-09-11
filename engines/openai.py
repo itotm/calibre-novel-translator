@@ -1,16 +1,13 @@
-import io
+import re
 import json
-import uuid
 from typing import Any
 from urllib.parse import urlsplit
 from http.client import IncompleteRead
 
-from mechanize._response import response_seek_wrapper as Response
 from calibre.utils.localization import _  # type: ignore
 
-from .. import EbookTranslator
+from .. import NovelTranslatorPlugin
 from ..lib.utils import request
-from ..lib.exception import UnsupportedModel
 
 from .genai import GenAI
 from .languages import google
@@ -19,17 +16,109 @@ from .languages import google
 load_translations()  # type: ignore
 
 
+# The providers that speak the OpenAI chat-completions API, as presets
+# of the one engine below: each fills in the endpoint, the key hint and
+# a default model, and says how the request differs where it does. A
+# preset is a starting point -- the endpoint and the model stay
+# editable -- and 'custom' is the blank one for any other server.
+#
+#   endpoint       the chat-completions URL
+#   key            hint shown in the API key field; '' when the server
+#                  takes no key (local servers), in which case no
+#                  Authorization header is sent either
+#   model          the model to start with; '' leaves it to the server
+#   temperature    a default of the provider's own where it has one
+#   auth           'bearer' (the norm) or 'api-key' (Azure's header)
+#   model_in_body  False where the model is part of the URL (Azure)
+#   listing        False where /models is not offered (Azure)
+OPENAI_PROVIDERS = {
+    'openai': {
+        'label': 'OpenAI',
+        'endpoint': 'https://api.openai.com/v1/chat/completions',
+        'key': 'sk-...', 'model': 'gpt-4o'},
+    'deepseek': {
+        'label': 'DeepSeek',
+        'endpoint': 'https://api.deepseek.com/v1/chat/completions',
+        'key': 'sk-...', 'model': 'deepseek-chat',
+        # DeepSeek's own recommendation for translation, on the
+        # remapped scale its API uses.
+        'temperature': 1.3},
+    'groq': {
+        'label': 'Groq',
+        'endpoint': 'https://api.groq.com/openai/v1/chat/completions',
+        'key': 'gsk_...', 'model': 'llama-3.3-70b-versatile'},
+    'mistral': {
+        'label': 'Mistral',
+        'endpoint': 'https://api.mistral.ai/v1/chat/completions',
+        'key': '', 'model': 'mistral-large-latest'},
+    'together': {
+        'label': 'Together AI',
+        'endpoint': 'https://api.together.xyz/v1/chat/completions',
+        'key': '', 'model': 'meta-llama/Llama-3.3-70B-Instruct-Turbo'},
+    'fireworks': {
+        'label': 'Fireworks AI',
+        'endpoint': 'https://api.fireworks.ai/inference/v1/chat/completions',
+        'key': 'fw_...',
+        'model': 'accounts/fireworks/models/llama-v3p3-70b-instruct'},
+    'xai': {
+        'label': 'xAI',
+        'endpoint': 'https://api.x.ai/v1/chat/completions',
+        'key': 'xai-...', 'model': 'grok-3'},
+    'moonshot': {
+        'label': 'Moonshot AI (Kimi)',
+        'endpoint': 'https://api.moonshot.ai/v1/chat/completions',
+        'key': 'sk-...', 'model': 'kimi-k2-0905-preview'},
+    'azure': {
+        'label': 'Azure OpenAI',
+        'endpoint': (
+            'https://{resource}.openai.azure.com/openai/deployments/'
+            '{deployment}/chat/completions?api-version=2024-10-21'),
+        'key': '', 'model': '',
+        'auth': 'api-key', 'model_in_body': False, 'listing': False},
+    'ollama': {
+        'label': 'Ollama (local)',
+        'endpoint': 'http://localhost:11434/v1/chat/completions',
+        'key': None, 'model': 'gemma3'},
+    'lmstudio': {
+        'label': 'LM Studio (local)',
+        'endpoint': 'http://localhost:1234/v1/chat/completions',
+        'key': None, 'model': ''},
+    'custom': {
+        'label': 'Custom endpoint',
+        'endpoint': 'https://example.com/v1/chat/completions',
+        'key': '', 'model': ''},
+}
+
+
 class ChatgptTranslate(GenAI):
-    name = 'ChatGPT'
-    alias = 'ChatGPT (OpenAI)'
+    """Any server that speaks the OpenAI chat-completions API.
+
+    Which one is a preset in ``OPENAI_PROVIDERS``, chosen in the setting
+    dialog and stored as ``provider`` in the engine preferences; the
+    endpoint and the model it fills in can be overridden there like
+    before. OpenRouter inherits the request and reply handling from
+    here and carries no presets, being one provider.
+    """
+    name = 'OpenAI'
+    alias = 'OpenAI-compatible'
     lang_codes = GenAI.load_lang_codes(google)
     endpoint = 'https://api.openai.com/v1/chat/completions'
-    # api_key_hint = 'sk-xxx...xxx'
     # https://help.openai.com/en/collections/3808446-api-error-codes-explained
     api_key_errors = ['401', 'unauthorized', 'quota']
 
+    using_tip = _(
+        'Pick the provider and the endpoint, the key hint and a default '
+        'model follow; any other server that speaks the OpenAI chat API '
+        'works through "Custom endpoint". Ollama and LM Studio run on '
+        'this machine and take no key.')
+
+    providers: dict = OPENAI_PROVIDERS
+    provider = 'openai'
+
     concurrency_limit = 1
-    request_interval = 20.0
+    # One request at a time, so there is nothing to space out; a
+    # provider that rate-limits answers with a retry the loop handles.
+    request_interval = 0.0
     request_timeout = 60.0
 
     structured_output_mode = 'schema'
@@ -47,7 +136,11 @@ class ChatgptTranslate(GenAI):
 
     samplings = ['temperature', 'top_p']
     sampling = 'temperature'
-    temperature = 1.0
+    # Low on purpose: translation wants fidelity, not variety. See the
+    # OpenRouter engine for the measurements behind it. A preset may
+    # carry its own (DeepSeek), otherwise this is the default for
+    # every provider.
+    temperature = 0.2
     top_p = 1.0
     stream = True
 
@@ -68,21 +161,76 @@ class ChatgptTranslate(GenAI):
 
     def __init__(self):
         super().__init__()
-        self.endpoint = self.config.get('endpoint', self.endpoint)
+        preset = self.preset_for(self.config) or {}
+        self.provider = self.config.get('provider', self.provider)
+        self.auth = preset.get('auth', 'bearer')
+        self.model_in_body = preset.get('model_in_body', True)
+        self.endpoint = self.config.get('endpoint') \
+            or preset.get('endpoint') or self.endpoint
         self.prompt = self.config.get('prompt', self.prompt)
         self.sampling = self.config.get('sampling', self.sampling)
-        self.temperature = self.config.get('temperature', self.temperature)
+        self.temperature = self.config.get(
+            'temperature', preset.get('temperature', self.temperature))
         self.top_p = self.config.get('top_p', self.top_p)
         self.stream = self.config.get('stream', self.stream)
-        self.model = self.config.get('model', self.model)
+        self.model = self.config.get('model') \
+            or preset.get('model', self.model)
         self.reasoning_effort = self.config.get(
             'reasoning_effort', self.reasoning_effort)
 
+    @classmethod
+    def preset_for(cls, config=None):
+        """The provider preset ``config`` names, or the default one.
+
+        None on an engine that carries no presets (OpenRouter).
+        """
+        if not cls.providers:
+            return None
+        config = cls.config if config is None else config
+        key = config.get('provider') or cls.provider
+        return cls.providers.get(key) or cls.providers[cls.provider]
+
+    @classmethod
+    def needs_api_key(cls, config=None):
+        """Whether the provider takes a key at all: local servers do not."""
+        preset = cls.preset_for(config)
+        return cls.need_api_key if preset is None \
+            else preset.get('key') is not None
+
+    @classmethod
+    def key_hint(cls, config=None):
+        preset = cls.preset_for(config)
+        return cls.api_key_hint if not (preset and preset.get('key')) \
+            else preset['key']
+
+    def get_api_key(self):
+        if not self.needs_api_key():
+            return None
+        return super().get_api_key()
+
+    def get_model_endpoint(self):
+        """Where the model listing lives, worked out from the chat
+        endpoint: ``.../chat/completions`` becomes ``.../models``.
+
+        Rebuilding it from the host alone, as this used to, threw away
+        any path prefix -- Groq's ``/openai/v1``, Gemini's
+        ``/v1beta/openai``, an Ollama behind a reverse proxy -- and the
+        listing answered 404 on every gateway but OpenAI's own.
+        """
+        endpoint = (self.endpoint or '').rstrip('/')
+        model_endpoint = re.sub(r'/chat/completions$', '/models', endpoint)
+        if model_endpoint == endpoint:
+            parts = urlsplit(endpoint or 'https://api.openai.com', 'https')
+            model_endpoint = '%s://%s/v1/models' % (parts.scheme, parts.netloc)
+        return model_endpoint
+
     def get_models(self):
-        domain_name = '://'.join(urlsplit(self.endpoint or '', 'https')[:2])
-        model_endpoint = '%s/v1/models' % domain_name
+        preset = self.preset_for(self.config) or {}
+        if not preset.get('listing', True):
+            # Azure names the deployment in the URL and lists nothing.
+            return []
         response = request(
-            model_endpoint, headers=self.get_headers(),
+            self.get_model_endpoint(), headers=self.get_headers(),
             proxy_uri=self.proxy_uri)
         return [item['id'] for item in json.loads(response).get('data')]
 
@@ -92,18 +240,19 @@ class ChatgptTranslate(GenAI):
             prompt = prompt.replace('<slang>', 'detected language')
         else:
             prompt = prompt.replace('<slang>', self.source_lang)
-        # Recommend setting temperature to 0.5 for retaining the placeholder.
-        if self.merge_enabled:
-            prompt += (' Ensure that placeholders matching the pattern '
-                       '{{id_\\d+}} in the content are retained.')
         return prompt
 
     def get_headers(self):
-        return {
+        headers = {
             'Content-Type': 'application/json',
-            'Authorization': 'Bearer %s' % self.api_key,
-            'User-Agent': 'Ebook-Translator/%s' % EbookTranslator.__version__
+            'User-Agent': 'Novel-Translator/%s'
+                          % NovelTranslatorPlugin.__version__,
         }
+        if getattr(self, 'auth', 'bearer') == 'api-key':
+            headers['api-key'] = self.api_key or ''
+        elif self.api_key:
+            headers['Authorization'] = 'Bearer %s' % self.api_key
+        return headers
 
     def get_body(self, text):
         body: dict[str, Any] = {
@@ -113,6 +262,8 @@ class ChatgptTranslate(GenAI):
                 {'role': 'user', 'content': text}
             ],
         }
+        if not getattr(self, 'model_in_body', True):
+            del body['model']
         if self.stream:
             body.update(stream=True)
         sampling_value = getattr(self, self.sampling)
@@ -159,6 +310,8 @@ class ChatgptTranslate(GenAI):
             ],
             'stream': True,           # keep streaming to avoid client-timeout
         }
+        if not getattr(self, 'model_in_body', True):
+            del body['model']
         sampling_value = getattr(self, self.sampling)
         body.update({self.sampling: sampling_value})
         self.apply_reasoning_effort(body)
@@ -281,122 +434,3 @@ class ChatgptTranslate(GenAI):
                 except json.JSONDecodeError:
                     # Skip malformed JSON chunks
                     continue
-
-
-class ChatgptBatchTranslate:
-    """https://cookbook.openai.com/examples/batch_processing"""
-    boundary = uuid.uuid4().hex
-
-    def __init__(self, translator):
-        self.translator = translator
-        self.translator.stream = False
-
-        domain_name = '://'.join(
-            urlsplit(self.translator.endpoint, 'https')[:2])
-        self.file_endpoint = '%s/v1/files' % domain_name
-        self.batch_endpoint = '%s/v1/batches' % domain_name
-
-    def _create_multipart_form_data(self, body):
-        """https://www.rfc-editor.org/rfc/rfc2046#section-5.1"""
-        data = []
-        data.append('--%s' % self.boundary)
-        data.append('Content-Disposition: form-data; name="purpose"')
-        data.append('')
-        data.append('batch')
-        data.append('--%s' % self.boundary)
-        data.append(
-            'Content-Disposition: form-data; name="file"; '
-            'filename="original.jsonl"')
-        data.append('Content-Type: application/json')
-        data.append('')
-        data.append(body)
-        data.append('--%s--' % self.boundary)
-        return '\r\n'.join(data).encode('utf-8')
-
-    def supported_models(self):
-        return self.translator.get_models()
-
-    def headers(self, extra_headers={}):
-        headers = self.translator.get_headers()
-        headers.update(extra_headers)
-        return headers
-
-    def upload(self, paragraphs):
-        """Upload the original content and retrieve the file id.
-        https://platform.openai.com/docs/api-reference/files/create
-        """
-        if self.translator.model not in self.supported_models():
-            raise UnsupportedModel(
-                'The model "{}" does not support batch functionality.'
-                .format(self.translator.model))
-        body = io.StringIO()
-        for paragraph in paragraphs:
-            data = self.translator.get_body(paragraph.original)
-            body.write(json.dumps({
-                "custom_id": paragraph.md5,
-                "method": "POST",
-                "url": "/v1/chat/completions",
-                "body": json.loads(data)}))
-            if paragraph != paragraphs[-1]:
-                body.write('\n')
-        content_type = 'multipart/form-data; boundary="%s"' % self.boundary
-        headers = self.headers({'Content-Type': content_type})
-        body = self._create_multipart_form_data(body.getvalue())
-        response = request(
-            self.file_endpoint, body, headers, 'POST',
-            proxy_uri=self.translator.proxy_uri)
-        return json.loads(response).get('id')
-
-    def delete(self, file_id):
-        headers = self.translator.get_headers()
-        del headers['Content-Type']
-        response = request(
-            '%s/%s' % (self.file_endpoint, file_id), headers=headers,
-            method='DELETE', proxy_uri=self.translator.proxy_uri)
-        return json.loads(response).get('deleted')
-
-    def retrieve(self, output_file_id):
-        headers = self.translator.get_headers()
-        del headers['Content-Type']
-        response = request(
-            '%s/%s/content' % (self.file_endpoint, output_file_id),
-            headers=headers, raw_object=True,
-            proxy_uri=self.translator.proxy_uri)
-        assert isinstance(response, Response)
-
-        translations = {}
-        for line in io.BytesIO(response.read()):
-            result = json.loads(line)
-            response_item = result['response']
-            if response_item.get('status_code') == 200:
-                content = response_item[
-                    'body']['choices'][0]['message']['content']
-                translations[result.get('custom_id')] = content
-        return translations
-
-    def create(self, file_id):
-        headers = self.translator.get_headers()
-        body = json.dumps({
-            'input_file_id': file_id,
-            'endpoint': '/v1/chat/completions',
-            'completion_window': '24h'})
-        response = request(
-            self.batch_endpoint, body, headers, 'POST',
-            proxy_uri=self.translator.proxy_uri)
-        return json.loads(response).get('id')
-
-    def check(self, batch_id):
-        response = request(
-            '%s/%s' % (self.batch_endpoint, batch_id),
-            headers=self.translator.get_headers(),
-            proxy_uri=self.translator.proxy_uri)
-        return json.loads(response)
-
-    def cancel(self, batch_id):
-        headers = self.translator.get_headers()
-        response = request(
-            '%s/%s/cancel' % (self.batch_endpoint, batch_id),
-            headers=headers, method='POST',
-            proxy_uri=self.translator.proxy_uri)
-        return json.loads(response).get('status') in (
-            'cancelling', 'cancelled')

@@ -1,22 +1,16 @@
-import os
-import os.path
-import shutil
 from typing import Any
 
-from calibre.constants import config_dir  # type: ignore
-from calibre.utils.config_base import plugin_dir  # type: ignore
 from calibre.utils.config import JSONConfig  # type: ignore
-
-from .. import EbookTranslator
-from ..engines import (
-    GoogleFreeTranslateNew, ChatgptTranslate, AzureChatgptTranslate)
 
 
 defaults: dict[str, Any] = {
-    'preferred_mode': None,
+    # Whether the button has been put on calibre's toolbars once. The
+    # plugin does that on its first run; after that the toolbars are the
+    # user's to arrange.
+    'toolbar_placed': False,
     'to_library': True,
     'output_path': None,
-    'translate_engine': None,
+    'translate_engine': 'OpenRouter',
     'engine_preferences': {},
     'proxy_enabled': False,
     'proxy_type': 'http',
@@ -25,7 +19,10 @@ defaults: dict[str, Any] = {
     'cache_path': None,
     'log_translation': True,
     'show_notification': True,
-    'translation_position': None,
+    # Where the translation sits relative to the original in the output:
+    # 'below', 'above', 'right', 'left', or 'only' for a translated book
+    # with no original left in it, which is what a novel wants.
+    'translation_position': 'only',
     'column_gap': {
         '_type': 'percentage',
         'percentage': 10,
@@ -39,14 +36,10 @@ defaults: dict[str, Any] = {
     'filter_rules': [],
     'ignore_rules': [],
     'reserve_rules': [],
-    'custom_engines': {},
-    'glossary_enabled': False,
-    'glossary_path': None,
-    'merge_enabled': False,
-    'merge_length': 1800,
-    'ebook_metadata': {},
-    'search_paths': [],
-    'novel_mode_enabled': False,
+    # What the output book's metadata gets. 'lang_code' stamps the
+    # target language on the book, so calibre and readers treat it as
+    # what it is: a book in that language.
+    'ebook_metadata': {'lang_code': True},
     # Show the sampling and penalty parameters of the OpenRouter section.
     # Off by default: specialist knobs, each already at the neutral value
     # that leaves it out of the request. Visibility only -- a value set
@@ -55,10 +48,10 @@ defaults: dict[str, Any] = {
     # Sized for the context windows current models actually have,
     # but capped by what a model can *write* rather than read: the
     # reply is about as long as the chunk, and output limits are far
-    # lower than context windows (8k-32k tokens on most models). A
-    # hundred paragraphs is a comfortable answer for any of them.
+    # lower than context windows (8k-32k tokens on most models).
+    # Seventy-five paragraphs is a comfortable answer for any of them.
     'novel_chunk_tokens': 16000,
-    'novel_max_paragraphs_per_chunk': 100,
+    'novel_max_paragraphs_per_chunk': 75,
     # Structured output policy for the novel translator.
     #   'auto'  -> use JSON structured output when the engine advertises
     #              support (see engines.genai.GenAI.structured_output_mode),
@@ -67,7 +60,7 @@ defaults: dict[str, Any] = {
     #   'force' -> always use JSON structured output, even on engines that
     #              don't advertise it
     'novel_structured_output': 'auto',
-    'novel_overlap_paragraphs': 3,
+    'novel_overlap_paragraphs': 5,
     'novel_context_tokens': 4000,
     'novel_summary_tokens': 600,
     'novel_glossary_max_entries': 500,
@@ -89,6 +82,14 @@ defaults: dict[str, Any] = {
     # fills the context budget for the rest of the book. 0 derives the
     # limit from novel_summary_tokens (twice the target size).
     'novel_summary_max_chars': 0,
+    # Characters of chapter text handed to the summary and glossary
+    # calls, for the source and for the translation each. Their prompts
+    # open with the head of the chapter, where the characters and the
+    # setting are introduced; a whole chapter would cost input tokens
+    # the answer does not need. At 60000 a chapter's call was measured
+    # at 30000 tokens of input, every chapter; 40000 keeps the whole of
+    # most chapters and a third off the rest.
+    'novel_summary_input_max_chars': 40000,
     # Ask for the summary and the glossary in a single request. Both
     # read the chapter that was just translated, so two calls send it
     # twice: measured on a real book, the summary call carried 7000 to
@@ -96,7 +97,12 @@ defaults: dict[str, Any] = {
     # again. A summary or glossary prompt typed by the user turns this
     # off by itself, so that prompt is not silently ignored.
     'novel_combined_context_call': True,
-    'novel_context_prompt': None,
+    # Keep the summary and the glossary only for chapters that belong
+    # to the story. The model that summarises a chapter says whether it
+    # is one; a copyright page, a list of the author's other books, a
+    # preface or a note would otherwise be carried into every later
+    # prompt as if it were plot.
+    'novel_context_narrative_only': True,
     # The last chapter's summary and glossary are read by nobody: the
     # context of a chapter exists for the chapters that follow it.
     'novel_skip_context_last_chapter': True,
@@ -115,6 +121,24 @@ defaults: dict[str, Any] = {
     # translations are stored after every chunk, so a run cancelled at
     # chunk 7 of 9 would otherwise pay for those seven chunks twice.
     'novel_reuse_translated_paragraphs': True,
+    # What to do with paragraphs the model never returned, after the
+    # retries inside a chunk and one more pass in smaller chunks.
+    #   'stop'     -> end the run with the chapter unfinished; a resume
+    #                 asks for exactly those paragraphs again. Default.
+    #   'continue' -> log them and go on to the next chapter; they keep
+    #                 their source text and nothing comes back for them.
+    'novel_on_missing_paragraphs': 'stop',
+    # How long a rate-limited request may be waited out, in seconds,
+    # before it counts as a failure. A 429 says "not now", not
+    # "never": the attempts used to be spent in a second on a provider
+    # that asked for one second of patience. 0 treats it as an error.
+    'novel_rate_limit_max_wait': 600,
+    # The most a translation request may ask the model to write, in
+    # tokens, when the engine leaves the figure to the provider (0 on
+    # OpenRouter means "not sent"). Left out, many providers apply 4096
+    # and a chunk comes back cut at a third. Each chunk asks for twice
+    # its own size plus room for the JSON, up to this. 0 sends nothing.
+    'novel_reply_max_tokens': 16384,
     # Cap the chunk budget with the longest reply the chosen model can
     # write, as its provider reports it (OpenRouter publishes the figure
     # for every model it proxies). Reading room and writing room have
@@ -141,21 +165,20 @@ defaults: dict[str, Any] = {
     # towards neutral prose.
     #   'auto'  -> search the web on engines that can (OpenRouter, Claude,
     #              Gemini), fall back to what the model knows on the rest.
-    #   'model' -> never search, ask the model only.
+    #   'model' -> never search, ask the model only. Default: a search
+    #              is billed per result and a model knows the published
+    #              authors well enough.
     #   'off'   -> do not ask at all.
-    'novel_author_style': 'auto',
-    'novel_author_style_prompt': None,
-    # How direct speech is punctuated. 'auto' counts the marks over the
-    # whole book once and states the answer in every request; 'off'
-    # leaves the choice to the model, which is how the same book came
-    # back with guillemets in one chapter and quotation marks in the
-    # next. A rule typed in novel_dialogue_rules replaces the detected
-    # one.
+    'novel_author_style': 'model',
+    # How direct speech is punctuated. 'auto' reads it off the source,
+    # chapter by chapter, and states the answer in every request; a key
+    # of lib.novel.DIALOGUE_CONVENTIONS prescribes that convention;
+    # 'off' leaves the choice to the model, which is how the same book
+    # came back with guillemets in one chapter and quotation marks in
+    # the next. A rule typed in novel_dialogue_rules replaces either.
     'novel_dialogue_convention': 'auto',
     'novel_dialogue_rules': None,
     'novel_translation_prompt': None,
-    'novel_summary_prompt': None,
-    'novel_glossary_prompt': None,
 }
 
 
@@ -211,130 +234,6 @@ class Configuration:
 
 
 def get_config():
-    preferences = JSONConfig('plugins/ebook_translator_novel')
+    preferences = JSONConfig('plugins/novel_translator')
     preferences.defaults = defaults
     return Configuration(preferences)
-
-
-def upgrade_config():
-    config = get_config()
-    version = EbookTranslator.version
-    if version >= (2, 0, 0):  # type: ignore
-        ver200_upgrade(config)
-    if version >= (2, 0, 3):  # type: ignore
-        ver203_upgrade(config)
-    if version >= (2, 0, 5):  # type: ignore
-        ver205_upgrade(config)
-    if version >= (2, 4, 0):  # type: ignore
-        ver240_upgrade()
-
-
-def ver200_upgrade(config):
-    """Upgrade the configuration for version 2.0.0 or earlier."""
-    if config.get('engine_preferences'):
-        return
-
-    engine_preferences = {}
-
-    def get_engine_preference(engine_name):
-        if engine_name not in engine_preferences:
-            engine_preferences.update({engine_name: {}})
-        return engine_preferences.get(engine_name)
-
-    chatgpt_prompt = config.get('chatgpt_prompt')
-    if chatgpt_prompt is not None:
-        if len(chatgpt_prompt) > 0:
-            preference = get_engine_preference(ChatgptTranslate.name)
-            prompts = config.get('chatgpt_prompt')
-            if preference is not None and 'lang' in chatgpt_prompt:
-                preference.update(prompt=prompts.get('lang'))
-        config.delete('chatgpt_prompt')
-
-    languages = config.get('preferred_language')
-    if languages is not None:
-        for engine_name, language in languages.items():
-            preference = get_engine_preference(engine_name)
-            if preference is not None:
-                preference.update(target_lang=language)
-        config.delete('preferred_language')
-
-    api_keys = config.get('api_key')
-    if api_keys is not None:
-        for engine_name, api_key in api_keys.items():
-            preference = get_engine_preference(engine_name)
-            if preference is not None:
-                preference.update(api_keys=[api_key])
-        config.delete('api_key')
-
-    if len(engine_preferences) > 0:
-        config.update(engine_preferences=engine_preferences)
-        config.commit()
-
-
-def ver203_upgrade(config):
-    """Upgrade the configuration for version 2.0.3 or earlier."""
-    engine_config = config.get('engine_preferences')
-    azure_chatgpt = engine_config.get('ChatGPT(Azure)')
-    if azure_chatgpt and 'model' in azure_chatgpt:
-        model = azure_chatgpt.get('model')
-        if model not in AzureChatgptTranslate.models:
-            del azure_chatgpt['model']
-
-    if len(engine_config) < 1:
-        engine_config.update({GoogleFreeTranslateNew.name: {}})
-
-    old_concurrency_limit = config.get('concurrency_limit')
-    old_request_attempt = config.get('request_attempt')
-    old_request_interval = config.get('request_interval')
-    old_request_timeout = config.get('request_timeout')
-
-    for data in engine_config.values():
-        if old_concurrency_limit is not None and old_concurrency_limit != 1:
-            data.update(concurrency_limit=old_concurrency_limit)
-        if old_request_attempt is not None and old_request_attempt != 3:
-            data.update(request_attempt=old_request_attempt)
-        if old_request_interval is not None and old_request_interval != 5:
-            data.update(request_interval=old_request_interval)
-        if old_request_timeout is not None and old_request_timeout != 10:
-            data.update(request_timeout=old_request_timeout)
-
-    config.delete('concurrency_limit')
-    config.delete('request_attempt')
-    config.delete('request_interval')
-    config.delete('request_timeout')
-
-    config.commit()
-
-
-def ver205_upgrade(config):
-    """Upgrade the configuration for version 2.0.5 or earlier."""
-    if config.get('translate_engine') in ('GeminiPro', 'GeminiFlash'):
-        config.update(translate_engine='Gemini')
-    preferences = config.get('engine_preferences')
-    if 'GeminiPro' in preferences.keys():
-        preferences['Gemini'] = preferences.pop('GeminiPro')
-    if 'GeminiFlash' in preferences.keys():
-        preferences['Gemini'] = preferences.pop('GeminiFlash')
-        preferences['Gemini'].update(model='gemini-1.5-flash')
-    config.commit()
-
-
-def ver240_upgrade():
-    """Move the pre-2.4.0 configuration to the current location.
-
-    Only the upstream plugin ever wrote to the legacy directory, and
-    the official plugin may well be installed next to this fork, so a
-    fork must leave that directory to its owner instead of renaming
-    it out from under the plugin that created it.
-    """
-    if EbookTranslator.identifier != 'ebook-translator':
-        return
-    old_config_path = os.path.join(config_dir, EbookTranslator.author)
-    new_config_path = os.path.join(plugin_dir, EbookTranslator.identifier)
-    if os.path.exists(new_config_path) and os.path.exists(old_config_path):
-        shutil.rmtree(old_config_path)
-    if os.path.exists(old_config_path):
-        os.rename(old_config_path, new_config_path)
-        os.rename(
-            os.path.join(new_config_path, EbookTranslator.identifier + '.ini'),
-            os.path.join(new_config_path, 'settings.ini'))

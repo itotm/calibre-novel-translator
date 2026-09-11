@@ -1,248 +1,194 @@
-__English__ · [简体中文](README.zh-CN.md)
+# Novel Translator
+
+![Novel Translator](images/logo.png)
+
+A calibre plugin that translates a novel with a language model, chapter by
+chapter, and keeps the model informed about the book as it goes: a running
+summary of the story so far, a glossary of the names it has met, a brief on
+how the author writes. The result reads like one book translated by one
+translator, not like a thousand paragraphs translated by a thousand.
+
+It talks to [OpenRouter](https://openrouter.ai) out of the box, and to any
+provider that speaks the OpenAI chat API, to Claude and to Gemini.
 
 ---
 
-# Ebook Translator (Novel) — a Calibre plugin
+## How it works
 
-![Ebook Translator Calibre Plugin](images/logo.png)
+**Chapter by chapter, in order.** The book is split into chapters from its
+table of contents (level 1, level 2 for anthologies whose level-1 entry is a
+whole novel, or one XHTML file per chapter). Chapters are translated one
+after the other, never in parallel, because each one is translated with
+what the previous ones taught.
 
-A Calibre plugin to translate ebooks into a specified language.
+**A running summary and a dynamic glossary.** After every chapter one
+request asks for a summary of it and for the new names it introduced:
+characters, places, objects, how each is translated. Both are carried into
+the requests that follow, so names, pronouns, register and terminology stay
+consistent over the whole book. A prompt carries only the glossary entries
+the chapter mentions. The same request says whether the chapter is part of
+the story at all: a copyright page, a list of the author's other books, a
+preface or a note is translated but leaves nothing in the running context.
 
-> **This repository is a fork** of
-> [bookfere/Ebook-Translator-Calibre-Plugin](https://github.com/bookfere/Ebook-Translator-Calibre-Plugin).
-> The plugin is upstream's work and all the credit for it belongs there; this
-> repository only adds what is listed below. It registers under its own plugin
-> name, configuration file and cache directory, so it installs **side by side**
-> with the official plugin without either one touching the other's state.
+**The author is researched once.** Before the first chapter one request
+asks how this particular book is written, its register, the texture of its
+sentences, its use of irony, dialect or period language, and the answer is
+repeated in the prompt of every chapter. By default the model answers from
+what it knows; a setting lets the engines that can search the web do so
+(OpenRouter's web plugin, Claude's search tool, Gemini's grounding). A
+model that knows nothing reliable about the author says so, and the
+Author tab of the window says so too, rather than carry a brief the
+model made up.
 
-![Translation illustration](images/sample-en.png)
+**Dialogue punctuated like the source.** The quotation marks of the source
+are read once, chapter by chapter, and the convention most chapters use is
+stated in every request, nested quotations and dash dialogue included, so
+the same book does not come back with guillemets in one chapter and
+quotation marks in the next. A preface that quotes at length cannot
+outvote the novel. You can also prescribe a convention outright, from
+guillemets to corner brackets to dash dialogue, or write a rule of your
+own.
+
+**Chunks the model can finish.** A chapter goes to the model in chunks
+sized by a token budget, a paragraph count and, where the provider publishes
+it, the longest reply the model can write; each request asks for the room
+its reply needs, so a provider's default limit does not cut it short.
+Structured JSON output keeps the paragraphs aligned where the engine
+supports it, numbered text markers elsewhere. Missing paragraphs are asked
+for again, then once more in smaller chunks; what still comes back missing
+stops the run so that a resume picks it up, instead of leaving a hole in
+the book.
+
+**Resumable, and built from the cache.** Everything is written to the
+translation cache as it is produced, so an interrupted run resumes by
+chapter and, inside a chapter, by paragraph. The metadata, the table of
+contents and the front matter (title page, dedication, part dividers) are
+translated too, apart from the narrative. When every chapter is done the
+ebook is built from the cache with no further requests.
+
+The window shows the chapter list with its status, a progress bar, and tabs
+for the summaries, the glossary, the author brief and the log.
 
 ---
 
-## What this fork adds
+## Providers
 
-### Novel Mode
-
-A third translation mode, next to Advanced Mode and Batch Mode, for long-form
-narrative. It works chapter by chapter instead of paragraph by paragraph, and
-keeps the model informed about the book so far.
-
-It comes from
-[PR #590](https://github.com/bookfere/Ebook-Translator-Calibre-Plugin/pull/590)
-by [Simone Norcini (BiG86)](https://github.com/BiG86), still open upstream, and
-was extended here.
-
-**How it works**
-
-* A **running summary** and a **dynamic glossary** of characters, places and
-  objects are rebuilt after every chapter and carried into the requests that
-  follow, keeping names, pronouns, register and terminology consistent over a
-  whole book.
-* Chapters are split under a **dual cap**, a token budget *and* a paragraph
-  count, so short paragraphs (dialogue, lists) cannot make the model lose the
-  alignment markers. A **sliding overlap** replays the last few translated
-  paragraphs as context that is not to be translated again.
-* **Structured JSON output** is used where the engine supports it, so paragraph
-  alignment is enforced by the server rather than by prompt discipline, with a
-  text-marker path as fallback.
-* Chapter boundaries come from TOC level 1, TOC level 2 (anthologies whose
-  level-1 entry is a whole novel) or one XHTML file per chapter, with a
-  front-matter filter that keeps cover and title pages out of the narrative.
-* Its own dialog shows the chapter list with per-chapter status and tabs for
-  the summaries, the glossary, the author brief and the log.
-* Work is written to the translation cache as it is produced, so an interrupted
-  run **resumes** — by chapter, and inside a chapter by paragraph, so the chunks
-  that did finish are not paid for twice. The final ebook is built from the
-  cache with no further model calls.
-
-**How it reads**
-
-Three things the shipped defaults do to keep a book sounding like the book it
-was, all of them settings in *Preferences → Engine → Novel Mode*.
-
-* **The author is researched once, before the first chapter.** One request asks
-  how this particular book is written — its register, the texture of its
-  sentences, its use of irony, dialect or period language — and the answer is
-  repeated in the prompt of every chapter, so the translation keeps the
-  author's manner instead of settling into neutral prose. Engines that can
-  search the web do (OpenRouter's web plugin, Claude's search tool, Gemini's
-  Google Search grounding); the others answer from what the model already
-  knows. An answer that admits it knows nothing about the author is thrown
-  away rather than used, because a manner the model invented would misdirect
-  every paragraph of the book. The brief is stored with the summaries, so it is
-  paid for once per book and reused when you resume.
-* **Dialogue is punctuated the way the source punctuates it.** A chapter is
-  translated by several independent requests and none of them can see what the
-  others chose, which is how the same book came back with guillemets in one
-  chapter and quotation marks in the next. The marks are now counted over the
-  whole book once — it costs nothing, the text is already here — and the answer
-  is stated in every request, nested quotations and dash dialogue included.
-* **The shipped translation prompt** is longer and more specific: what to do
-  with register and narrative voice, how to keep characters' voices and forms
-  of address apart, what may not be added or dropped, how to handle period
-  terms and units, and how closely to follow the typography of the source.
-
-**What it costs**
-
-Everything below is a setting with a sensible default, in *Preferences →
-Engine → Novel Mode*.
-
-* The summary and the glossary of a chapter are asked for in **one request
-  instead of two** — both read the chapter that was just translated — and are
-  skipped entirely on the last chapter and on short front and back matter,
-  where nothing ever reads them.
-* A prompt carries **only the glossary entries the chapter mentions**, capped
-  per prompt. A glossary that keeps growing otherwise costs input tokens on
-  every request, and invites the model to copy back the list of names it was
-  told to skip.
-* Reasoning is turned **off for the summary and glossary calls**, which are not
-  reasoning tasks, their replies are capped, and a summary longer than expected
-  is truncated before it is stored — it would otherwise be re-read in every
-  later prompt.
-* The chunk size is capped by **what the model can actually write**. Reading
-  room and writing room are unrelated: context windows run to hundreds of
-  thousands of tokens while reply limits start at 4096, and a chunk the model
-  cannot finish is answered half-way and asked for again. The figure is read
-  from the provider's model listing and shown next to the model in the settings.
-* The parts of a request that never change are sent first so a provider's
-  **prompt cache** can serve them, with an explicit cache breakpoint on Claude.
-* Starting a translation no longer converts the ebook a second time, and
-  translated paragraphs are written to the cache in one transaction per chunk.
-
-### OpenRouter engine
-
-[OpenRouter](https://openrouter.ai) proxies hundreds of models behind one
-OpenAI-compatible endpoint. The engine inherits from the ChatGPT one and adds
-what is specific to the gateway. Every setting defaults to a neutral value that
-is simply left out of the request, because OpenRouter deliberately does not
-substitute defaults for absent parameters.
-
-| Group | Settings |
+| Engine | Notes |
 |---|---|
-| Reasoning | `effort` (default `none`), `max_tokens` budget, `exclude` |
-| Sampling ¹ | `top_k`, `min_p`, `top_a` |
-| Penalties ¹ | `frequency_penalty`, `presence_penalty`, `repetition_penalty` |
-| Limits | `max_tokens`, `seed` |
-| Provider routing | `only`, `order`, `ignore`, `quantizations`, `sort`, `data_collection`, `allow_fallbacks`, `require_parameters`, `zdr` |
-| Attribution | `HTTP-Referer`, `X-Title` |
-| Escape hatches | extra request headers and extra body fields, as JSON |
+| **OpenRouter** | The default. One key, hundreds of models. The model listing carries each model's context window, reply limit and accepted parameters; the plugin sizes its requests against them and sends only the parameters the model takes. Reasoning, provider routing, sampling and two escape hatches (extra headers, extra body) are settings. |
+| **OpenAI-compatible** | One engine, a provider to pick: OpenAI, DeepSeek, Groq, Mistral, Together AI, Fireworks AI, xAI, Moonshot AI, Azure OpenAI, Ollama and LM Studio on this machine, or any custom endpoint. The preset fills in the endpoint, the key hint and a default model; keys and models are kept per provider. |
+| **Claude** | Anthropic's Messages API, with prompt caching and the web search tool. The reply limit is a setting, sized for the model by default. |
+| **Gemini** | Google's API, with structured output and Google Search grounding. |
 
-¹ Hidden behind an *Advanced parameters* checkbox: specialist knobs a
-book-length translation has no use for.
-
-The escape hatches are merged into the request last, so anything the UI does
-not expose (`logit_bias`, `stop`, `transforms`, `plugins`, …) can still be
-sent; malformed JSON is flagged in the settings dialog and ignored at request
-time rather than breaking a translation.
-
-The model listing also reports, for every model, the context window, the
-longest reply it will write, whether it honours a JSON schema and which
-parameters it accepts. The first three are shown under the model in the
-settings, the reply limit is what Novel Mode sizes its chunks against, and the
-last one decides what the request carries.
-
-### Engine settings
-
-* **Reasoning is a preference**, not a hardcoded value, for ChatGPT, Azure
-  ChatGPT, DeepSeek and any custom OpenAI-compatible endpoint. *Default* omits
-  the field, which is what plain OpenAI models expect; `none` suppresses the
-  reasoning tokens some local servers emit unprompted (Ollama with Gemma); the
-  rest spend reasoning tokens on purpose.
-* **A low temperature on OpenRouter**, 0.3. Translation is a high-certainty
-  task where diversity is noise — measured over six temperatures, quality falls
-  as it rises — and a low value also keeps a model on the requested JSON shape
-  where the provider does not enforce it. Every engine that already existed
-  keeps the default it ships with upstream.
-* **Only the parameters the model accepts are sent.** A fifth of the OpenRouter
-  catalogue takes no `temperature` at all, and a parameter a model cannot take
-  is at best ignored and at worst, with `require_parameters` on, leaves the
-  request with no provider to route to. The same listing decides whether a JSON
-  schema can be asked for at all. Anything the listing does not mention can
-  still be forced through the extra body field.
-* **Prompts are plain prose.** No placeholder is mandatory in the Novel Mode
-  prompt fields: what a template does not place is appended under its own
-  label, and a stray brace no longer raises. The scaffolding built around a
-  prompt is kept out of the translation catalogs, so translating the interface
-  cannot hand the model instructions in one language wrapped around a prompt
-  written in another.
-
-### Fixes
-
-* The structured-output path forced `stream: true` in the request body without
-  telling the engine, so an engine with streaming disabled tried to parse a raw
-  SSE payload as JSON.
-* OpenRouter reports some upstream provider failures inside an HTTP 200 body;
-  the error message is surfaced instead of an opaque parsing error.
-* Test expectations left behind by the Novel Mode branch were brought back in
-  line with the code.
+Every behaviour is a setting with a sensible default, under *Preferences →
+Plugins → Novel Translator*, or from the plugin's own menu.
 
 ---
 
-## Installing side by side with the official plugin
+## Installation
 
-The fork registers as **Ebook Translator (Novel)** and keeps its own state, so
-nothing is shared with an installation of the official plugin:
+Novel Translator needs calibre 7.0 or later.
 
-| | Official | This fork |
-|---|---|---|
-| Plugin name | Ebook Translator | Ebook Translator (Novel) |
-| Import name | `ebook_translator` | `ebook_translator_novel` |
-| Settings | `plugins/ebook_translator.json` | `plugins/ebook_translator_novel.json` |
-| Cache directory | `…EbookTranslator` | `…EbookTranslator.Novel` |
-
-This fork carries no CI: the release archive is built locally, by the same
-script used for day-to-day installs.
+Build the plugin archive from a checkout of this repository:
 
 ```sh
 ./build_plugin.sh
 ```
 
-It writes `../ebook-translator-novel_v<version>.zip`, checks the archive is
-installable before handing it over, and prints the `calibre-customize -a …`
-line to run. In the GUI the equivalent is *Preferences → Plugins → Load plugin
-from file*.
+It writes `../novel-translator_v<version>.zip`, checks that the archive is
+installable and prints the command that installs it:
 
-Because the two plugins keep separate settings, engine API keys have to be
-entered again in the fork the first time you use it.
+```sh
+calibre-customize -a ../novel-translator_v1.0.0.zip
+```
 
----
-
-## Features
-
-* Support "Novel Mode" to better use LLM capabilities preserving a dynamic context.
-* Support both "Advanced Mode" and "Batch Mode" for different usage situations.
-* Support languages supported by the selected translation engine (e.g. Google Translate supports 134 languages)
-* Support multiple translation engines, including Google Translate, ChatGPT, Gemini, DeepL, OpenRouter, etc.
-* Support custom translation engines (you can configure to parse response in JSON or XML format)
-* Support all ebook formats supported by Calibre (48 input formats, 20 output formats), as well as additional formats such as .srt
-* Support to translate more than one ebooks. The translation process of each book is carried out simultaneously without affecting one another
-* Support caching translated content, with no need to re-translate after request failure or network interruption
-* Provide a large number of customization settings, such as saving translated ebooks to Calibre library or designated location
+In the GUI the equivalent is *Preferences → Plugins → Load plugin from
+file*. Restart calibre: the plugin puts its button on the main toolbar
+the first time it runs. If you take it off later it stays off; it is
+under *Preferences → Toolbars & menus* whenever you want it back.
 
 ---
 
-## Manual
+## Usage
 
-The upstream documentation applies to this fork as well, except for the
-fork-specific settings described above.
+1. Open the settings from the plugin's menu, choose the engine, paste the
+   API key, pick a model and save. OpenRouter is preselected.
+2. Select one book in the library and click the plugin's button.
+3. Choose the input and output formats and the languages, then *Start*.
+4. The window prepares the book, lists its chapters and waits. *Start /
+   Resume* runs the translation; *Cancel* stops it at once, cutting short
+   the request in flight, and everything done so far is kept. The log of
+   a run is kept with the book and shown again when the window reopens.
+5. When every chapter is done, *Build translated ebook* writes the
+   translated book into the library (or to the folder set in the General
+   tab). *Re-run all* translates the whole book again while keeping the
+   summaries, the glossary and the author brief; *Reset context* discards
+   those too.
 
-* [Tutorial](https://github.com/bookfere/Ebook-Translator-Calibre-Plugin/wiki#a-brief-tour)
-* [Installation](https://github.com/bookfere/Ebook-Translator-Calibre-Plugin/wiki/English#installation)
-* [Usage](https://github.com/bookfere/Ebook-Translator-Calibre-Plugin/wiki/English#usage)
-* [Settings](https://github.com/bookfere/Ebook-Translator-Calibre-Plugin/wiki/English#settings)
+The cache manager, in the plugin's menu, lists the books in the cache and
+lets you move, inspect or delete them. The cache lives under calibre's own
+cache directory and survives calibre being closed, so a book can be
+finished across several sessions.
 
 ---
 
-## Links
+## Settings worth knowing
 
-* [This fork](https://github.com/itotm/calibre-plugin-ebook-translator)
-* [Upstream project](https://github.com/bookfere/Ebook-Translator-Calibre-Plugin)
-* [Upstream homepage](https://translator.bookfere.com)
-* [MobileRead](https://www.mobileread.com/forums/showthread.php?t=353052)
-* [Contributing](CONTRIBUTING.md)
-* [Donate to the upstream author](https://www.paypal.com/paypalme/bookfere)
+*General*: where the output goes, preferred formats, proxy, cache, log and
+notifications.
+
+*Engine*: the engine, its key, the languages, the request timing, the model
+and the sampling, then a section for the engine's own options and the
+**Novel Mode** section, which holds among others:
+
+* chapter detection and the front-matter threshold;
+* the chunk caps: tokens, paragraphs, overlap, and whether the reply limit
+  of the model caps them;
+* structured output: automatic, off, or forced;
+* the context budget, the summary size, the glossary caps and whether the
+  prompt carries only the glossary entries the chapter uses;
+* whether the summary and the glossary are asked for in one request,
+  whether the last chapter skips them, and whether those calls may spend
+  reasoning tokens;
+* what to do with paragraphs the model never returns;
+* how the author brief is obtained (web search, the model alone, or not at
+  all) and how dialogue is punctuated;
+* the translation prompt, plain prose with no mandatory placeholder. The
+  summary, glossary and author-brief prompts are the plugin's own: they
+  ask for a shape the code parses, and are not settings.
+
+*Content*: where the translation sits relative to the original (alone by
+default, or below, above or beside it), colours, CSS rules for elements
+to prioritise, ignore or keep, and the metadata written into the output;
+by default the output book carries the target language as its language.
 
 ---
+
+## Development
+
+```sh
+tests/run_tests.sh                 # the whole suite, on the working tree
+tests/run_tests.sh test_novel.py   # one module
+python3 translations/update.py     # refresh the translation catalogs
+python3 images/artwork.py          # redraw the icon and the logo
+```
+
+The test runner needs a calibre: `calibre-debug` on the PATH, the one
+named in `$CALIBRE_DEBUG`, or the `com.calibre_ebook.calibre` flatpak.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
+## Credits
+
+Novel Translator is a fork of
+[Ebook Translator](https://github.com/bookfere/Ebook-Translator-Calibre-Plugin)
+by bookfere.com, whose code is still most of what runs here: the ebook
+handling, the caches, the settings dialog and the engines all come from
+there. Novel Mode, the idea this plugin is built around, originated in
+[pull request #590](https://github.com/bookfere/Ebook-Translator-Calibre-Plugin/pull/590)
+to that project by [Simone Norcini (BiG86)](https://github.com/BiG86).
+Thank you both.
 
 ## License
 

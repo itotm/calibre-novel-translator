@@ -7,7 +7,7 @@ from ...lib.conversion import ConversionWorker
 from ...lib.ebook import Ebook
 
 
-module_name = 'calibre_plugins.ebook_translator_novel.lib.conversion'
+module_name = 'calibre_plugins.novel_translator.lib.conversion'
 
 
 class TestConversionWorker(unittest.TestCase):
@@ -56,7 +56,6 @@ class TestConversionWorker(unittest.TestCase):
             'ebook_metadata': metadata_config,
             'to_library': True,
         }
-        self.ebook.is_extra_format.return_value = False
         self.ebook.title = 'test title'
         self.ebook.input_format = 'epub'
         self.ebook.output_format = 'epub'
@@ -83,8 +82,9 @@ class TestConversionWorker(unittest.TestCase):
         self.assertEqual('test custom title [German]', metadata.title)
         self.assertEqual('de', metadata.language)
         self.assertEqual([
-            'test subject 1', 'test subject 2', 'Translated by Ebook '
-            'Translator: https://translator.bookfere.com'], metadata.tags)
+            'test subject 1', 'test subject 2', 'Translated by Novel '
+            'Translator: https://github.com/itotm/'
+            'calibre-plugin-ebook-translator'], metadata.tags)
 
         self.worker.db.create_book_entry.assert_called_once_with(metadata)
         self.worker.api.add_format.assert_called_once_with(
@@ -119,13 +119,12 @@ class TestConversionWorker(unittest.TestCase):
 
 
     @patch(module_name + '.open')
-    @patch(module_name + '.open_path')
     @patch(module_name + '.os.rename')
     @patch(module_name + '.get_metadata')
     @patch(module_name + '.set_metadata')
     def test_translate_done_ebook_to_path(
             self, mock_set_metadata, mock_get_metadata, mock_os_rename,
-            mock_open_path, mock_open):
+            mock_open):
         self.job.failed = False
         self.job.description = 'test description'
         self.job.log_path = str(Path('/path/to/log'))
@@ -138,7 +137,6 @@ class TestConversionWorker(unittest.TestCase):
             'ebook_metadata': metadata_config,
             'to_library': False,
         }
-        self.ebook.is_extra_format.return_value = False
         self.ebook.title = 'test title'
         self.ebook.input_format = 'epub'
         self.ebook.output_format = 'epub'
@@ -179,124 +177,6 @@ class TestConversionWorker(unittest.TestCase):
             'ebook-viewer', kwargs={'args': [
                 'ebook-viewer',
                 str(Path('/path/to/test_ custom title_ [German].epub'))]})
-
-        arguments = self.worker.gui.proceed_question.mock_calls[0].kwargs
-        self.assertEqual(True, arguments.get('log_is_file'))
-        self.assertIs(self.icon, arguments.get('icon'))
-
-
-    @patch(module_name + '.open_path')
-    @patch(module_name + '.os.rename')
-    @patch(module_name + '.open')
-    def test_translate_done_other_to_library(
-            self, mock_open, mock_os_rename, mock_open_path):
-        self.job.failed = False
-        self.job.description = 'test description'
-        self.job.log_path = str(Path('/path/to/log'))
-        metadata_config = {'lang_mark': True}
-        self.worker.config = {
-            'ebook_metadata': metadata_config,
-            'to_library': True,
-        }
-        self.ebook.is_extra_format.return_value = True
-        self.ebook.id = 89
-        self.ebook.title = 'test title'
-        self.ebook.custom_title = 'test custom title'
-        self.ebook.input_format = 'srt'
-        self.ebook.output_format = 'srt'
-        self.ebook.custom_title = 'test custom title'
-        self.ebook.target_lang = 'German'
-        self.worker.working_jobs = {
-            self.job: (self.ebook, str(Path('/path/to/test.srt')))}
-        metadata = Mock()
-        self.worker.api.get_metadata.return_value = metadata
-        self.worker.api.format_abspath.return_value = \
-            str(Path('/path/to/test[m].srt'))
-        self.worker.db.create_book_entry.return_value = 90
-
-        self.worker.translate_done(self.job)
-
-        self.worker.api.get_metadata.assert_called_once_with(89)
-        self.worker.db.create_book_entry.assert_called_once_with(metadata)
-        self.worker.api.add_format.assert_called_once_with(
-            90, 'srt', str(Path('/path/to/test.srt')), run_hooks=False)
-        self.worker.gui.library_view.model.assert_called_once()
-        self.worker.gui.library_view.model().books_added \
-            .assert_called_once_with(1)
-        self.worker.api.format_abspath.assert_called_once_with(90, 'srt')
-        self.worker.gui.status_bar.show_message.assert_called_once_with(
-            'test description ' + 'completed', 5000)
-        self.assertEqual('test custom title [German]', metadata.title)
-
-        arguments = self.worker.gui.proceed_question.mock_calls[0].args
-        self.assertIsInstance(arguments[0], Callable)
-        self.assertIs(self.worker.gui.job_manager.launch_gui_app, arguments[1])
-        self.assertEqual(str(Path('/path/to/log')), arguments[2])
-        self.assertEqual('Ebook Translation Log', arguments[3])
-        self.assertEqual('Translation Completed', arguments[4])
-        self.assertEqual(
-            'The translation of "test custom title [German]" was completed. '
-            'Do you want to open the book?',
-            arguments[5])
-
-        mock_payload = Mock()
-        arguments[0](mock_payload)
-        mock_open_path.assert_called_once_with(
-            str(Path('/path/to/test[m].srt')))
-
-        arguments = self.worker.gui.proceed_question.mock_calls[0].kwargs
-        self.assertEqual(True, arguments.get('log_is_file'))
-        self.assertIs(self.icon, arguments.get('icon'))
-
-    @patch(module_name + '.open_path')
-    @patch(module_name + '.os.rename')
-    @patch(module_name + '.open')
-    def test_translate_done_other_to_path(
-            self, mock_open, mock_os_rename, mock_open_path):
-        self.job.failed = False
-        self.job.description = 'test description'
-        self.job.log_path = str(Path('/path/to/log'))
-        metadata_config = {'lang_mark': True}
-        self.worker.config = {
-            'ebook_metadata': metadata_config,
-            'to_library': False,
-        }
-        self.ebook.is_extra_format.return_value = True
-        self.ebook.id = 89
-        self.ebook.title = 'test title'
-        self.ebook.custom_title = 'test custom title'
-        self.ebook.input_format = 'srt'
-        self.ebook.output_format = 'srt'
-        self.ebook.custom_title = 'test: custom title*'
-        self.ebook.target_lang = 'German'
-        self.worker.working_jobs = {
-            self.job: (self.ebook, str(Path('/path/to/test.srt')))}
-        metadata = Mock()
-        self.worker.api.get_metadata.return_value = metadata
-
-        self.worker.translate_done(self.job)
-
-        self.worker.api.get_metadata.assert_called_once_with(89)
-        mock_os_rename.assert_called_once_with(
-            str(Path('/path/to/test.srt')),
-            str(Path('/path/to/test_ custom title_ [German].srt')))
-        self.worker.gui.status_bar.show_message.assert_called_once_with(
-            'test description ' + 'completed', 5000)
-        arguments = self.worker.gui.proceed_question.mock_calls[0].args
-        self.assertIsInstance(arguments[0], Callable)
-        self.assertIs(self.worker.gui.job_manager.launch_gui_app, arguments[1])
-        self.assertEqual(str(Path('/path/to/log')), arguments[2])
-        self.assertEqual('Ebook Translation Log', arguments[3])
-        self.assertEqual('Translation Completed', arguments[4])
-        self.assertEqual(
-            'The translation of "test: custom title* [German]" was completed. '
-            'Do you want to open the book?',
-            arguments[5])
-
-        mock_payload = Mock()
-        arguments[0](mock_payload)
-        mock_open_path.assert_called_once_with(
-            str(Path('/path/to/test_ custom title_ [German].srt')))
 
         arguments = self.worker.gui.proceed_question.mock_calls[0].kwargs
         self.assertEqual(True, arguments.get('log_is_file'))

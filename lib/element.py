@@ -8,7 +8,7 @@ from lxml import etree  # type: ignore
 from calibre import prepare_string_for_xml as xml_escape  # type: ignore
 
 from .utils import (
-    log, ns, uid, trim, sorted_mixed_keys, open_file, css_to_xpath,
+    log, ns, uid, trim, sorted_mixed_keys, css_to_xpath,
     create_xpath)
 from .config import get_config
 
@@ -100,55 +100,6 @@ class Element:
 
     def get_translation(self) -> str | None:
         return None
-
-
-class SrtElement(Element):
-    def get_raw(self):
-        return self.element[2]
-
-    def get_text(self):
-        return self.get_raw()
-
-    def get_content(self):
-        return self.get_text()
-
-    def add_translation(self, translation=None):
-        if translation is not None:
-            if self.position == 'only':
-                self.element[2] = translation
-            elif self.position in ('below', 'right'):
-                self.element[2] += '\n%s' % translation
-            else:
-                self.element[2] = '%s\n%s' % (translation, self.element[2])
-
-    def get_translation(self):
-        return '\n'.join(self.element)
-
-
-class PgnElement(Element):
-    def get_raw(self):
-        return self.element[0]
-
-    def get_text(self):
-        return self.get_raw().strip('{}')
-
-    def get_content(self):
-        return self.get_text()
-
-    def add_translation(self, translation=None):
-        if translation is not None:
-            if self.position == 'only':
-                self.element[1] = translation
-            else:
-                content = (self.get_content(), translation)
-                if self.position not in ('below', 'right'):
-                    content = tuple(reversed(content))
-                self.element[1] = ' | '.join(content)
-
-    def get_translation(self):
-        if self.element[1] is None:
-            return self.element[0]
-        return '{%s}' % self.element[1]
 
 
 class MetadataElement(Element):
@@ -773,7 +724,6 @@ class ElementHandler:
         self.separator = separator
         self.position = position
 
-        self.merge_length = 0
         self.target_direction = None
 
         self.translation_lang = None
@@ -786,12 +736,6 @@ class ElementHandler:
 
         self.elements = {}
         self.originals = []
-
-    def set_merge_length(self, length):
-        self.merge_length = length
-
-    def get_merge_length(self):
-        return self.merge_length
 
     def set_target_direction(self, direction):
         self.target_direction = direction
@@ -871,103 +815,6 @@ class ElementHandler:
             self.elements.pop(eid)
 
 
-class ElementHandlerMerge(ElementHandler):
-    def prepare_original(self, elements):
-        raw = ''
-        txt = ''
-        oid = 0
-        for eid, element in enumerate(elements):
-            self.elements[eid] = element
-            if element.ignored:
-                continue
-            element.set_placeholder(self.placeholder)
-            element.set_position(self.position)
-            element.set_target_direction(self.target_direction)
-            element.set_translation_lang(self.translation_lang)
-            element.set_original_color(self.original_color)
-            element.set_translation_color(self.translation_color)
-            if self.column_gap is not None:
-                element.set_column_gap(self.column_gap)
-            element.set_remove_pattern(self.remove_pattern)
-            element.set_reserve_pattern(self.reserve_pattern)
-            code = element.get_raw()
-            content = element.get_content()
-            content += self.separator
-            if len(txt + content) < self.merge_length:
-                raw += code + self.separator
-                txt += content
-                continue
-            elif txt:
-                md5 = uid('%s%s' % (oid, txt))
-                self.originals.append((oid, md5, raw, txt, False))
-                oid += 1
-            raw = code
-            txt = content
-        md5 = uid('%s%s' % (oid, txt))
-        if txt:
-            self.originals.append((oid, md5, raw, txt, False))
-        return self.originals
-
-    def align_paragraph(self, paragraph):
-        # Compatible with using the placeholder as the separator.
-        if paragraph.original[-2:] != self.separator:
-            pattern = re.compile(
-                r'\s*%s\s*' % self.placeholder[1].format(r'(0|[^0]\d*)'))
-            paragraph.original = pattern.sub(
-                self.separator, paragraph.original)
-            if paragraph.translation is not None:
-                paragraph.translation = pattern.sub(
-                    self.separator, paragraph.translation)
-        # Ensure the translation count matches the actual elements count.
-        originals = paragraph.original.strip().split(self.separator)
-        if paragraph.translation is None:
-            return list(zip(originals, [None] * len(originals)))
-        pattern = re.compile('%s+' % self.separator)
-        translation = pattern.sub(self.separator, paragraph.translation)
-        translations: list[Any] = translation.strip().split(self.separator)
-        offset = len(originals) - len(translations)
-        if offset > 0:
-            if self.position in ['left', 'right']:
-                addition = [None] * offset
-                translations += addition
-            else:
-                merged_translations = '\n\n'.join(translations)
-                translations = [None] * (len(originals) - 1)
-                if self.position in ['above']:
-                    translations.insert(0, merged_translations)
-                else:
-                    translations.append(merged_translations)
-        elif offset < 0:
-            offset = len(originals) - 1
-            translations = translations[:offset] + [
-                '\n\n'.join(translations[offset:])]
-        return list(zip(originals, translations))
-
-    def prepare_translation(self, paragraphs):
-        translations = []
-        for paragraph in paragraphs:
-            translations.extend(self.align_paragraph(paragraph))
-        return dict(translations)
-
-
-def get_srt_elements(path, encoding):
-    elements = []
-    content = open_file(path, encoding)
-    for section in content.strip().split('\n\n'):
-        lines = section.split('\n')
-        number = lines.pop(0)
-        time = lines.pop(0)
-        content = '\n'.join(lines)
-        elements.append(SrtElement([number, time, content]))
-    return elements
-
-
-def get_pgn_elements(path, encoding):
-    pattern = re.compile(r'\{[^}]*[a-zA-z][^}]*\}')
-    originals = pattern.findall(open_file(path, encoding))
-    return [PgnElement([original, None]) for original in originals]
-
-
 def get_metadata_elements(metadata):
     config = get_config()
     enable_translation = config.get(
@@ -1015,12 +862,9 @@ def get_page_elements(pages):
 def get_element_handler(placeholder, separator, direction):
     config = get_config()
     position_alias = {'before': 'above', 'after': 'below'}
-    position = config.get('translation_position') or 'below'
+    position = config.get('translation_position') or 'only'
     position = position_alias.get(position) or position
     handler = ElementHandler(placeholder, separator, position)
-    if config.get('merge_enabled'):
-        handler = ElementHandlerMerge(placeholder, separator, position)
-        handler.set_merge_length(config.get('merge_length'))
     handler.set_target_direction(direction)
     column_gap = config.get('column_gap') or {}
     gap_type = column_gap.get('_type')

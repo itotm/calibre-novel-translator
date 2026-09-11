@@ -13,18 +13,18 @@ from qt.core import (  # type: ignore
 from calibre.gui2 import error_dialog  # type: ignore
 from calibre.utils.localization import _  # type: ignore
 
+from . import NovelTranslatorPlugin
 from .lib.config import get_config
 from .lib.utils import (
     log, css, is_proxy_available, traceback_error, socks_proxy)
 from .lib.translation import get_engine_class, get_translator
+from .lib.novel import DIALOGUE_CONVENTIONS
 from .engines import (
-    builtin_engines, GeminiTranslate, ChatgptTranslate, AzureChatgptTranslate,
-    OpenRouterTranslate)
+    builtin_engines, GeminiTranslate, ChatgptTranslate, OpenRouterTranslate)
 from .engines.genai import GenAI
-from .engines.custom import CustomTranslate
 from .components import (
     Footer, AlertMessage, TargetLang, SourceLang, EngineList, EngineTester,
-    ManageCustomEngine, InputFormat, OutputFormat, set_shortcut)
+    InputFormat, OutputFormat, set_shortcut)
 
 
 load_translations()  # type: ignore
@@ -151,41 +151,6 @@ class TranslationSetting(QDialog):
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
-        # Preferred Method
-        mode_group = QGroupBox(_('Preferred Mode'))
-        mode_layout = QGridLayout(mode_group)
-        advanced_mode = QRadioButton(_('Advanced Mode'))
-        batch_mode = QRadioButton(_('Batch Mode'))
-        novel_mode = QRadioButton(_('Novel Mode'))
-        icon_button = QLabel()
-        icon_button.setPixmap(self.icon.pixmap(52, 52))
-        mode_layout.addWidget(icon_button, 0, 0, 3, 1)
-        mode_layout.addWidget(advanced_mode, 0, 1)
-        mode_layout.addWidget(batch_mode, 0, 2)
-        mode_layout.addWidget(novel_mode, 0, 3)
-        mode_layout.addItem(QSpacerItem(0, 0), 0, 4)
-        mode_layout.addWidget(self._divider(), 1, 1, 1, 4)
-        mode_layout.addWidget(QLabel(
-            _('Choose a translation mode for clicking the icon button.')),
-            2, 1, 1, 4)
-        mode_layout.setColumnStretch(4, 1)
-        layout.addWidget(mode_group)
-
-        mode_map = dict(enumerate(['advanced', 'batch', 'novel']))
-        mode_rmap = dict((v, k) for k, v in mode_map.items())
-        mode_btn_group = QButtonGroup(mode_group)
-        mode_btn_group.addButton(advanced_mode, 0)
-        mode_btn_group.addButton(batch_mode, 1)
-        mode_btn_group.addButton(novel_mode, 2)
-
-        preferred_mode = self.config.get('preferred_mode')
-        if preferred_mode is not None and preferred_mode in mode_rmap:
-            mode_btn_group.button(
-                mode_rmap.get(preferred_mode)).setChecked(True)
-        mode_btn_group.idClicked.connect(
-            lambda btn_id: self.config.update(
-                preferred_mode=mode_map.get(btn_id)))
-
         # Output Path
         radio_group = QGroupBox(_('Output Path'))
         radio_layout = QHBoxLayout()
@@ -243,27 +208,6 @@ class TranslationSetting(QDialog):
         input_format.currentTextChanged.connect(change_input_format)
         output_format.currentTextChanged.connect(
             lambda format: self.config.update(output_format=format))
-
-        # Merge Translate
-        merge_group = QGroupBox(
-            '%s %s' % (_('Merge to Translate'), _('(Beta)')))
-        merge_layout = QHBoxLayout(merge_group)
-        merge_enabled = QCheckBox(_('Enable'))
-        self.merge_length = QSpinBox()
-        self.merge_length.setRange(1, 999999)
-        merge_layout.addWidget(merge_enabled)
-        merge_layout.addWidget(self.merge_length)
-        merge_layout.addWidget(QLabel(_(
-            'The number of characters to translate at once.')))
-        merge_layout.addStretch(1)
-        layout.addWidget(merge_group)
-
-        self.disable_wheel_event(self.merge_length)
-
-        self.merge_length.setValue(self.config.get('merge_length'))
-        merge_enabled.setChecked(self.config.get('merge_enabled'))
-        merge_enabled.clicked.connect(
-            lambda checked: self.config.update(merge_enabled=checked))
 
         # Network Proxy
         proxy_group = QGroupBox(_('Network Proxy'))
@@ -384,21 +328,6 @@ class TranslationSetting(QDialog):
         notice.toggled.connect(
             lambda checked: self.config.update(show_notification=checked))
 
-        # Search path
-        path_group = QGroupBox(_('Search Paths'))
-        path_layout = QVBoxLayout(path_group)
-        path_desc = QLabel(
-            _('The plugin will search for external programs via these paths.'))
-        self.path_list = QPlainTextEdit()
-        self.path_list.setMinimumHeight(100)
-        path_layout.addWidget(path_desc)
-        path_layout.addWidget(self.path_list)
-
-        self.path_list.setPlainText(
-            '\n'.join(self.config.get('search_paths') or []))
-
-        layout.addWidget(path_group)
-
         layout.addStretch(1)
 
         return widget
@@ -413,10 +342,8 @@ class TranslationSetting(QDialog):
         engine_layout = QHBoxLayout(engine_group)
         engine_list = EngineList(self.current_engine.name)
         engine_test = QPushButton(_('Test'))
-        manage_engine = QPushButton(_('Custom'))
         engine_layout.addWidget(engine_list, 1)
         engine_layout.addWidget(engine_test)
-        engine_layout.addWidget(manage_engine)
         layout.addWidget(engine_group)
 
         self.model_worker.start.connect(
@@ -462,8 +389,6 @@ class TranslationSetting(QDialog):
 
         # Network Request
         request_group = QGroupBox(_('HTTP Request'))
-        concurrency_limit = QSpinBox()
-        concurrency_limit.setRange(0, 999999)
         request_interval = QDoubleSpinBox()
         request_interval.setRange(0, 999999)
         request_interval.setDecimals(1)
@@ -473,7 +398,6 @@ class TranslationSetting(QDialog):
         request_timeout.setRange(0, 999999)
         request_timeout.setDecimals(1)
         request_layout = QFormLayout(request_group)
-        request_layout.addRow(_('Concurrency limit'), concurrency_limit)
         request_layout.addRow(_('Interval (seconds)'), request_interval)
         request_layout.addRow(_('Attempt times'), request_attempt)
         request_layout.addRow(_('Timeout (seconds)'), request_timeout)
@@ -493,7 +417,6 @@ class TranslationSetting(QDialog):
         self.disable_wheel_event(max_error_count)
 
         self.apply_form_layout_policy(request_layout)
-        self.disable_wheel_event(concurrency_limit)
         self.disable_wheel_event(request_attempt)
         self.disable_wheel_event(request_interval)
         self.disable_wheel_event(request_timeout)
@@ -504,17 +427,20 @@ class TranslationSetting(QDialog):
         genai_layout = QFormLayout(genai_group)
         self.apply_form_layout_policy(genai_layout)
 
-        self.genai_prompt = QPlainTextEdit()
-        self.genai_prompt.setFixedHeight(100)
-        self.genai_prompt.setToolTip(_(
-            'System prompt used by Advanced Mode and Batch Mode.\n\n'
-            'Novel Mode ignores it and uses the "Translation prompt" of '
-            'the Novel Mode section below instead, so the two can be '
-            'written for what they actually do: one paragraph at a time '
-            'here, a whole chapter with its running context there.'))
-        genai_layout.addRow(_('Prompt'), self.genai_prompt)
+        provider_label = QLabel(_('Provider'))
+        provider_list = QComboBox()
+        provider_list.setToolTip(_(
+            'Which server to talk to. Every one of them speaks the OpenAI '
+            'chat API; the preset fills in the endpoint, the key hint and '
+            'a model to start with, and both stay editable below. The API '
+            'keys, the endpoint and the model are kept per provider, so '
+            'switching back finds them again.'))
+        genai_layout.addRow(provider_label, provider_list)
+        self.disable_wheel_event(provider_list)
+
         self.genai_endpoint = QLineEdit()
-        genai_layout.addRow(_('Endpoint'), self.genai_endpoint)
+        endpoint_label = QLabel(_('Endpoint'))
+        genai_layout.addRow(endpoint_label, self.genai_endpoint)
 
         genai_model = QWidget()
         genai_model_layout = QHBoxLayout(genai_model)
@@ -859,19 +785,22 @@ class TranslationSetting(QDialog):
 
         openrouter_row(
             _('Provider: routing'),
+            QLabel(_('sort by')),
             openrouter_combo(
                 'provider_sort', OpenRouterTranslate.provider_sorts,
                 _('Pick the endpoint by price, throughput or latency '
                   'instead of OpenRouter\'s balanced order. Defaults to '
-                  'throughput: a book is a long chain of large sequential '
-                  'requests, and the same model behind the same gateway '
-                  'has been measured at 200 tokens/s on one request and '
-                  '30 on another minutes later.')),
+                  'price: a book is hundreds of large requests, and the '
+                  'cheapest endpoint serving the model is felt end to '
+                  'end. Pick throughput when the run is too slow: the '
+                  'same model behind the same gateway has been measured '
+                  'at 200 tokens/s on one endpoint and 30 on another.')),
+            QLabel(_('data collection')),
             openrouter_combo(
                 'provider_data_collection',
                 OpenRouterTranslate.provider_data_collections,
-                _('"deny" only routes to providers that do not store your '
-                  'prompts.')))
+                _('Whether the provider may store your prompts: "deny" '
+                  'only routes to providers that do not.')))
 
         openrouter_row(
             _('Provider: policy'),
@@ -903,7 +832,7 @@ class TranslationSetting(QDialog):
                 _('Sent as the HTTP-Referer header, used by the OpenRouter '
                   'rankings. Optional.')),
             openrouter_edit(
-                'app_title', 'Ebook Translator (Novel)',
+                'app_title', NovelTranslatorPlugin.name,
                 _('Sent as the X-Title header, used by the OpenRouter '
                   'rankings. Optional.')))
 
@@ -1044,7 +973,7 @@ class TranslationSetting(QDialog):
             'are shown to the LLM as already-translated text (do NOT '
             'retranslate), so they consume some of the token budget but '
             'do not cause double translations.\n\n'
-            'Recommended: 3 for most novels; 5-10 for dense narrative '
+            'Recommended: 5 for most novels; up to 10 for dense narrative '
             'with long scenes. Set to 0 to disable overlap.'))
         novel_layout.addRow(
             _('Overlap paragraphs'), novel_overlap)
@@ -1060,10 +989,13 @@ class TranslationSetting(QDialog):
             '4096. A chunk that cannot be finished is cut mid-answer and '
             'the lost paragraphs are asked for again, so the request is '
             'paid twice.\n\n'
-            'The limit is the one the provider reported when the model '
-            'was picked in the Model row above, and it is only known for '
-            'engines that publish it (OpenRouter today). With no figure '
-            'to go on, the cap above is used as it stands.'))
+            'The reply room is the lower of the limit the provider '
+            'reported when the model was picked in the Model row above '
+            '(known for engines that publish it, OpenRouter today) and '
+            '"Reply room per chunk" below; a chunk carries about a 2.2th '
+            'of it in source, the rest being what the translation and '
+            'the JSON around it add. With neither figure, the cap above '
+            'is used as it stands.'))
         novel_layout.addRow(
             _('Chunk size against the reply limit'), novel_output_aware)
 
@@ -1088,7 +1020,7 @@ class TranslationSetting(QDialog):
             'billed at a fraction of the price.\n\n'
             'Only engines whose API needs an explicit cache breakpoint '
             '(Claude) read this. The ones that cache on their own '
-            '(ChatGPT, Gemini, DeepSeek) do it either way.'))
+            '(OpenAI, Gemini, DeepSeek, OpenRouter) do it either way.'))
         novel_layout.addRow(
             _('Prompt prefix'), novel_prompt_cache)
 
@@ -1099,7 +1031,7 @@ class TranslationSetting(QDialog):
         novel_structured.setToolTip(_(
             'How to format the LLM response for paragraph alignment.\n\n'
             '- Auto: use native JSON structured output when the engine '
-            'supports it (ChatGPT, Gemini, Ollama via OpenAI-compatible '
+            'supports it (OpenAI, Gemini, Ollama via OpenAI-compatible '
             'endpoint). Falls back to text markers [N] otherwise. '
             'Recommended.\n'
             '- Off: always use text markers [N]. Slightly less reliable '
@@ -1200,6 +1132,63 @@ class TranslationSetting(QDialog):
             _('Summary/glossary reply cap (tokens)'), novel_context_max_tokens)
         self.disable_wheel_event(novel_context_max_tokens)
 
+        novel_summary_input = QSpinBox()
+        novel_summary_input.setRange(0, 1000000)
+        novel_summary_input.setSingleStep(5000)
+        novel_summary_input.setToolTip(_(
+            'How much of the translated chapter the summary and glossary '
+            'requests read, in characters, counted from the top. The '
+            'opening of a chapter is where its characters and setting '
+            'are introduced; sending the whole chapter costs input tokens '
+            'the answer does not need. 0 sends it whole.'))
+        novel_layout.addRow(
+            _('Chapter text for the summary (chars)'), novel_summary_input)
+        self.disable_wheel_event(novel_summary_input)
+
+        novel_reply_max = QSpinBox()
+        novel_reply_max.setRange(0, 1000000)
+        novel_reply_max.setSingleStep(1024)
+        novel_reply_max.setToolTip(_(
+            'The most a translation request may ask the model to write, '
+            'in tokens, on engines that otherwise leave the figure to the '
+            'provider (OpenRouter with "max_tokens" at 0). Left out, many '
+            'providers apply 4096 and a chunk comes back cut at a third. '
+            'Each chunk asks for twice its own size plus room for the '
+            'JSON, up to this cap and to what the model can write. 0 '
+            'sends nothing.'))
+        novel_layout.addRow(
+            _('Reply room per chunk (tokens)'), novel_reply_max)
+        self.disable_wheel_event(novel_reply_max)
+
+        novel_rate_limit = QSpinBox()
+        novel_rate_limit.setRange(0, 86400)
+        novel_rate_limit.setSingleStep(60)
+        novel_rate_limit.setToolTip(_(
+            'How long a request refused for the moment (HTTP 429, a '
+            'provider at capacity) may be waited out, in seconds, before '
+            'it counts as a failed attempt. The wait follows what the '
+            'provider asks and grows a little each time. 0 treats a rate '
+            'limit like any other error.'))
+        novel_layout.addRow(
+            _('Wait out rate limits for (seconds)'), novel_rate_limit)
+        self.disable_wheel_event(novel_rate_limit)
+
+        novel_missing = QComboBox()
+        novel_missing.addItem(_('Stop, so a resume asks again'), 'stop')
+        novel_missing.addItem(_('Skip them and go on'), 'continue')
+        novel_missing.setToolTip(_(
+            'What to do with paragraphs the model never returns, once '
+            'the retries inside a chunk and one more pass in smaller '
+            'chunks have all been tried.\n\n'
+            'Stop leaves the chapter unfinished, so its progress is not '
+            'recorded and a resume asks for exactly those paragraphs '
+            'again. Skip logs them and goes on to the next chapter: they '
+            'keep their source text in the output, and nothing comes '
+            'back for them later.'))
+        novel_layout.addRow(
+            _('Paragraphs the model never returns'), novel_missing)
+        self.disable_wheel_event(novel_missing)
+
         novel_min_chars = QSpinBox()
         novel_min_chars.setRange(0, 100000)
         novel_min_chars.setSingleStep(50)
@@ -1240,6 +1229,20 @@ class TranslationSetting(QDialog):
         novel_layout.addRow(
             _('Summary and glossary'), novel_combined_context)
 
+        novel_narrative_only = QCheckBox(_('Story chapters only'))
+        novel_narrative_only.setToolTip(_(
+            'Keep the summary and the glossary only for chapters that '
+            'belong to the story. The model that summarises a chapter '
+            'is asked whether the chapter is part of the story at all; '
+            'a copyright page, a list of the author\'s other books, a '
+            'preface, an afterword or a note then gets no summary and '
+            'no glossary entries.\n\n'
+            'On by default: a summary of the copyright page was carried '
+            'into every later prompt as if it were plot. Turn it off to '
+            'keep a summary of everything.'))
+        novel_layout.addRow(
+            _('Summary and glossary of'), novel_narrative_only)
+
         novel_skip_last = QCheckBox(_('Skip'))
         novel_skip_last.setToolTip(_(
             'Do not ask for the summary and glossary of the last '
@@ -1279,6 +1282,8 @@ class TranslationSetting(QDialog):
 
         novel_dialogue = QComboBox()
         novel_dialogue.addItem(_('Follow the source'), 'auto')
+        for key, convention in DIALOGUE_CONVENTIONS.items():
+            novel_dialogue.addItem(convention['label'], key)
         novel_dialogue.addItem(_('Leave it to the model'), 'off')
         novel_dialogue.setToolTip(_(
             'How direct speech is punctuated. A chapter is translated by '
@@ -1286,16 +1291,19 @@ class TranslationSetting(QDialog):
             'the others chose, so a model left to itself opens one '
             'chapter with guillemets and the next with quotation '
             'marks.\n\n'
-            '"Follow the source" counts the marks over the whole book '
-            'once -- it costs nothing, the text is already here -- and '
-            'states the answer in every request. Fill the field below to '
-            'prescribe a rule of your own instead.'))
+            '"Follow the source" reads the marks off the book, chapter '
+            'by chapter, and goes with what most chapters use -- it '
+            'costs nothing, the text is already here -- and states the '
+            'answer in every request. Pick a convention instead when the '
+            'source is inconsistent or you want the translation to use '
+            'another one. Fill the field below to prescribe a rule of '
+            'your own in words.'))
         novel_layout.addRow(
             _('Dialogue punctuation'), novel_dialogue)
         self.disable_wheel_event(novel_dialogue)
 
         novel_dialogue_rules = QPlainTextEdit()
-        novel_dialogue_rules.setFixedHeight(50)
+        novel_dialogue_rules.setFixedHeight(60)
         novel_dialogue_rules.setPlaceholderText(_(
             'Empty: read the convention off the source text.'))
         novel_dialogue_rules.setToolTip(_(
@@ -1308,7 +1316,7 @@ class TranslationSetting(QDialog):
             _('Dialogue rule'), novel_dialogue_rules)
 
         novel_translation_prompt = QPlainTextEdit()
-        novel_translation_prompt.setFixedHeight(90)
+        novel_translation_prompt.setFixedHeight(320)
         novel_translation_prompt.setToolTip(_(
             'System prompt for Novel Mode. It replaces the engine prompt '
             'of the Fine-tuning section entirely; leave it empty to use '
@@ -1322,43 +1330,12 @@ class TranslationSetting(QDialog):
             'from the provider cache chapter after chapter.'))
         novel_layout.addRow(
             _('Translation prompt'), novel_translation_prompt)
-        novel_summary_prompt = QPlainTextEdit()
-        novel_summary_prompt.setFixedHeight(70)
-        novel_summary_prompt.setToolTip(_(
-            'Prompt asking the model to summarise a finished chapter. '
-            'Plain prose is enough: the chapter text is appended when '
-            'the prompt does not place it with {text}, and '
-            '{chapter_num} and {chapter_title} name the chapter.'))
-        novel_layout.addRow(
-            _('Summary prompt'), novel_summary_prompt)
-        novel_glossary_prompt = QPlainTextEdit()
-        novel_glossary_prompt.setFixedHeight(70)
-        novel_glossary_prompt.setToolTip(_(
-            'Prompt asking the model for the named entities of a '
-            'finished chapter, as JSON. Source, translation and the '
-            'entries already known are appended when the prompt does '
-            'not place them with {source_text}, {translated_text} and '
-            '{existing_keys}.'))
-        novel_layout.addRow(
-            _('Glossary prompt'), novel_glossary_prompt)
-        novel_author_style_prompt = QPlainTextEdit()
-        novel_author_style_prompt.setFixedHeight(70)
-        novel_author_style_prompt.setToolTip(_(
-            'Prompt asking for the brief on how the author writes, sent '
-            'once per book. {author} and {title} name the book; they are '
-            'appended when the prompt does not place them itself.'))
-        novel_layout.addRow(
-            _('Author brief prompt'), novel_author_style_prompt)
 
         layout.addWidget(novel_group)
 
         # Wire novel settings to config on change.
         def load_novel_settings():
-            from .lib.novel import (
-                DEFAULT_NOVEL_TRANSLATION_PROMPT,
-                DEFAULT_NOVEL_SUMMARY_PROMPT,
-                DEFAULT_NOVEL_GLOSSARY_PROMPT,
-                DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT)
+            from .lib.novel import DEFAULT_NOVEL_TRANSLATION_PROMPT
             src = self.config.get(
                 'novel_chapter_source', 'toc_level_1') or 'toc_level_1'
             idx = novel_chapter_source.findData(src)
@@ -1369,9 +1346,9 @@ class TranslationSetting(QDialog):
             novel_chunk_tokens.setValue(int(self.config.get(
                 'novel_chunk_tokens', 16000) or 16000))
             novel_max_paragraphs.setValue(int(self.config.get(
-                'novel_max_paragraphs_per_chunk', 100) or 0))
+                'novel_max_paragraphs_per_chunk', 75) or 0))
             novel_overlap.setValue(int(self.config.get(
-                'novel_overlap_paragraphs', 3) or 0))
+                'novel_overlap_paragraphs', 5) or 0))
             structured_mode = self.config.get(
                 'novel_structured_output', 'auto') or 'auto'
             idx = novel_structured.findData(structured_mode)
@@ -1397,26 +1374,30 @@ class TranslationSetting(QDialog):
                 'novel_context_max_tokens', 4000) or 0))
             novel_min_chars.setValue(int(self.config.get(
                 'novel_min_chars_for_context', 300) or 0))
+            novel_summary_input.setValue(int(self.config.get(
+                'novel_summary_input_max_chars', 40000) or 0))
+            novel_reply_max.setValue(int(self.config.get(
+                'novel_reply_max_tokens', 16384) or 0))
+            novel_rate_limit.setValue(int(self.config.get(
+                'novel_rate_limit_max_wait', 600) or 0))
+            idx = novel_missing.findData(self.config.get(
+                'novel_on_missing_paragraphs', 'stop') or 'stop')
+            if idx >= 0:
+                novel_missing.setCurrentIndex(idx)
             novel_context_reasoning.setChecked(bool(self.config.get(
                 'novel_context_reasoning', False)))
             novel_combined_context.setChecked(bool(self.config.get(
                 'novel_combined_context_call', True)))
+            novel_narrative_only.setChecked(bool(self.config.get(
+                'novel_context_narrative_only', True)))
             novel_skip_last.setChecked(bool(self.config.get(
                 'novel_skip_context_last_chapter', True)))
             novel_translation_prompt.setPlaceholderText(
                 DEFAULT_NOVEL_TRANSLATION_PROMPT)
             novel_translation_prompt.setPlainText(
                 self.config.get('novel_translation_prompt') or '')
-            novel_summary_prompt.setPlaceholderText(
-                DEFAULT_NOVEL_SUMMARY_PROMPT)
-            novel_summary_prompt.setPlainText(
-                self.config.get('novel_summary_prompt') or '')
-            novel_glossary_prompt.setPlaceholderText(
-                DEFAULT_NOVEL_GLOSSARY_PROMPT)
-            novel_glossary_prompt.setPlainText(
-                self.config.get('novel_glossary_prompt') or '')
             author_style = self.config.get(
-                'novel_author_style', 'auto') or 'auto'
+                'novel_author_style', 'model') or 'model'
             idx = novel_author_style.findData(author_style)
             if idx >= 0:
                 novel_author_style.setCurrentIndex(idx)
@@ -1427,10 +1408,6 @@ class TranslationSetting(QDialog):
                 novel_dialogue.setCurrentIndex(idx)
             novel_dialogue_rules.setPlainText(
                 self.config.get('novel_dialogue_rules') or '')
-            novel_author_style_prompt.setPlaceholderText(
-                DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT)
-            novel_author_style_prompt.setPlainText(
-                self.config.get('novel_author_style_prompt') or '')
         load_novel_settings()
 
         def _persist_novel(key, cast):
@@ -1479,12 +1456,24 @@ class TranslationSetting(QDialog):
             _persist_novel('novel_context_max_tokens', int))
         novel_min_chars.valueChanged.connect(
             _persist_novel('novel_min_chars_for_context', int))
+        novel_summary_input.valueChanged.connect(
+            _persist_novel('novel_summary_input_max_chars', int))
+        novel_missing.currentIndexChanged.connect(
+            lambda _idx: self.config.update(
+                novel_on_missing_paragraphs=novel_missing.currentData()))
+        novel_rate_limit.valueChanged.connect(
+            _persist_novel('novel_rate_limit_max_wait', int))
+        novel_reply_max.valueChanged.connect(
+            _persist_novel('novel_reply_max_tokens', int))
         novel_context_reasoning.toggled.connect(
             lambda checked: self.config.update(
                 novel_context_reasoning=bool(checked)))
         novel_combined_context.toggled.connect(
             lambda checked: self.config.update(
                 novel_combined_context_call=bool(checked)))
+        novel_narrative_only.toggled.connect(
+            lambda checked: self.config.update(
+                novel_context_narrative_only=bool(checked)))
         novel_skip_last.toggled.connect(
             lambda checked: self.config.update(
                 novel_skip_context_last_chapter=bool(checked)))
@@ -1507,29 +1496,30 @@ class TranslationSetting(QDialog):
         novel_translation_prompt.textChanged.connect(
             _persist_prompt(
                 novel_translation_prompt, 'novel_translation_prompt'))
-        novel_summary_prompt.textChanged.connect(
-            _persist_prompt(novel_summary_prompt, 'novel_summary_prompt'))
-        novel_glossary_prompt.textChanged.connect(
-            _persist_prompt(novel_glossary_prompt, 'novel_glossary_prompt'))
         novel_dialogue_rules.textChanged.connect(
             _persist_prompt(novel_dialogue_rules, 'novel_dialogue_rules'))
-        novel_author_style_prompt.textChanged.connect(
-            _persist_prompt(
-                novel_author_style_prompt, 'novel_author_style_prompt'))
 
         # Setup genAI model
-        def update_model_limits(model):
+        def update_model_limits(model, changed=False):
             """Show what the provider says the chosen model can do, and
             remember its reply limit.
 
             The limit is written into the engine preferences so a
             translation can size its requests against a real number
             without asking the provider again. It is only ever written
-            when a listing has actually been fetched: with no listing to
-            speak from, whatever was stored for this engine stands.
+            when a listing has actually been fetched. With no listing to
+            speak from, what was stored stands while the model is the
+            same and is forgotten when the model ``changed``: the old
+            model's parameter list applied to a new model filtered the
+            request wrongly, and with require_parameters on OpenRouter
+            found no provider for it.
             """
             details = getattr(self.current_engine, 'model_details', None)
             if not details:
+                if changed:
+                    config = self.current_engine.config
+                    config.pop('model_max_output_tokens', None)
+                    config.pop('model_supported_parameters', None)
                 genai_model_limits.setVisible(False)
                 return
             limits = self.current_engine.get_model_limits(model)
@@ -1573,8 +1563,9 @@ class TranslationSetting(QDialog):
             genai_model_list.addItems(models)
             genai_model_list.addItem(_('Custom'))
             # Fill data according to the passed model or the default model
+            previous = config.get('model', self.current_engine.model)
             if model is None:
-                model = config.get('model', self.current_engine.model)
+                model = previous
             elif model != _('Custom'):
                 config.update(model=model)
             if model in models:
@@ -1586,12 +1577,20 @@ class TranslationSetting(QDialog):
                 genai_model_input.setText(model)
                 if model in models or model == _('Custom'):
                     genai_model_input.clear()
-            update_model_limits(model)
+            update_model_limits(model, changed=model != previous)
             genai_model_list.currentTextChanged.connect(init_ai_models)
         self.model_worker.finished.connect(init_ai_models)
+
         def set_custom_model(model):
-            self.current_engine.config.update(model=model.strip())
-            update_model_limits(model.strip())
+            model = model.strip()
+            # The field is cleared when "Custom" is picked; the previous
+            # model stands until something is typed.
+            if not model:
+                return
+            config = self.current_engine.config
+            changed = model != config.get('model', self.current_engine.model)
+            config.update(model=model)
+            update_model_limits(model, changed=changed)
         genai_model_input.textChanged.connect(set_custom_model)
 
         def fetch_ai_models():
@@ -1607,8 +1606,12 @@ class TranslationSetting(QDialog):
             self.current_engine.set_config(self.get_engine_config())
             self.model_worker.start.emit(self.current_engine)
 
+        def has_api_key():
+            return self.api_keys.toPlainText().strip() != '' \
+                or not self.engine_needs_api_key()
+
         def manual_fetch_ai_models():
-            if self.api_keys.toPlainText().strip() != '':
+            if has_api_key():
                 fetch_ai_models()
             else:
                 self.alert.pop(_('You need to provide an API key to proceed.'))
@@ -1618,7 +1621,7 @@ class TranslationSetting(QDialog):
             if issubclass(self.current_engine, GenAI) \
                     and self.tabs.currentIndex() != 0 \
                     and len(self.current_engine.models) < 1 \
-                    and self.api_keys.toPlainText().strip() != '':
+                    and has_api_key():
                 fetch_ai_models()
             else:
                 init_ai_models()
@@ -1644,32 +1647,48 @@ class TranslationSetting(QDialog):
             # Temperature range
             is_chatgpt = issubclass(self.current_engine, ChatgptTranslate)
             temperature_value.setRange(0, 2 if is_chatgpt else 1)
-            # Prompt
-            self.genai_prompt.setPlaceholderText(self.current_engine.prompt)
-            self.genai_prompt.setPlainText(
-                config.get('prompt', self.current_engine.prompt))
-            # Endpoint
-            self.genai_endpoint.setPlaceholderText(
-                self.current_engine.endpoint)
+            # Provider
+            providers = getattr(self.current_engine, 'providers', None) or {}
+            provider_label.setVisible(bool(providers))
+            provider_list.setVisible(bool(providers))
+            try:
+                provider_list.currentIndexChanged.disconnect()
+            except TypeError:
+                pass
+            provider_list.clear()
+            preset = {}
+            if providers:
+                for key, item in providers.items():
+                    provider_list.addItem(item['label'], key)
+                current = config.get('provider') or self.current_engine.provider
+                provider_list.setCurrentIndex(
+                    max(0, provider_list.findData(current)))
+                provider_list.currentIndexChanged.connect(
+                    lambda index: change_provider(
+                        config, provider_list.itemData(index)))
+                preset = self.current_engine.preset_for(config)
+            # Endpoint. Not for OpenRouter: it is one server, and
+            # another one that speaks the same API is a provider of the
+            # OpenAI-compatible engine.
+            has_endpoint = self.engine_has_endpoint()
+            endpoint_label.setVisible(has_endpoint)
+            self.genai_endpoint.setVisible(has_endpoint)
+            default_endpoint = preset.get(
+                'endpoint') or self.current_engine.endpoint
+            self.genai_endpoint.setPlaceholderText(default_endpoint)
             self.genai_endpoint.setText(
-                config.get('endpoint', self.current_engine.endpoint))
+                config.get('endpoint') or default_endpoint)
             self.genai_endpoint.setCursorPosition(0)
             # Models
-            if issubclass(self.current_engine, AzureChatgptTranslate):
-                genai_model_list.clear()
-                genai_model_list.addItem(
-                    _('The model depends on your Azure project.'))
-                genai_model_list.setDisabled(True)
-                genai_model_input.setVisible(False)
-            else:
-                auto_fetch_ai_models()
+            auto_fetch_ai_models()
             # Sampling
             if not issubclass(self.current_engine, GeminiTranslate):
                 sampling = config.get('sampling', self.current_engine.sampling)
                 btn_id = self.current_engine.samplings.index(sampling)
                 sampling_btn_group.button(btn_id).setChecked(True)
-            temperature_value.setValue(
-                config.get('temperature', self.current_engine.temperature))
+            temperature_value.setValue(config.get(
+                'temperature',
+                preset.get('temperature', self.current_engine.temperature)))
             temperature_value.valueChanged.connect(
                 lambda value: config.update(temperature=round(value, 1)))
             top_p_value.setValue(
@@ -1705,6 +1724,39 @@ class TranslationSetting(QDialog):
                 reasoning_effort_list.blockSignals(False)
             genai_group.setVisible(True)
 
+        # What a provider keeps for itself when another one is chosen.
+        per_provider = (
+            'api_keys', 'endpoint', 'model', 'model_max_output_tokens',
+            'model_supported_parameters')
+
+        def change_provider(config, provider):
+            engine = self.current_engine
+            previous = config.get('provider') or engine.provider
+            if provider == previous:
+                return
+            stash = config.setdefault('providers', {})
+            # The keys as typed, so they are not lost with the switch.
+            if self.engine_needs_api_key():
+                config['api_keys'] = [
+                    k.strip() for k in
+                    self.api_keys.toPlainText().split('\n') if k.strip()]
+            stash[previous] = {
+                key: config[key] for key in per_provider if key in config}
+            for key in per_provider:
+                config.pop(key, None)
+            config.update(stash.get(provider, {}))
+            config['provider'] = provider
+            preset = engine.preset_for(config)
+            if 'model' not in config and preset.get('model'):
+                config['model'] = preset['model']
+            if 'temperature' in config and 'temperature' in preset:
+                config['temperature'] = preset['temperature']
+            # The listing belongs to the provider that answered it.
+            engine.models = []
+            engine.model_details = {}
+            self.reformat_api_keys()
+            show_genai_preferences(config)
+
         def choose_default_engine(index):
             engine_name = engine_list.itemData(index)
             self.config.update(translate_engine=engine_name)
@@ -1714,8 +1766,7 @@ class TranslationSetting(QDialog):
             source_lang = config.get('source_lang')
             self.source_lang.refresh.emit(
                 self.current_engine.lang_codes.get('source'),
-                source_lang,
-                not issubclass(self.current_engine, CustomTranslate))
+                source_lang, True)
             target_lang = config.get('target_lang')
             self.target_lang.refresh.emit(
                 self.current_engine.lang_codes.get('target'),
@@ -1728,10 +1779,6 @@ class TranslationSetting(QDialog):
             # show api key setting
             self.reformat_api_keys()
             # Request setting
-            value = config.get('concurrency_limit')
-            if value is None:
-                value = self.current_engine.concurrency_limit
-            concurrency_limit.setValue(value)
             value = config.get('request_interval')
             if value is None:
                 value = self.current_engine.request_interval
@@ -1748,8 +1795,6 @@ class TranslationSetting(QDialog):
             if value is None:
                 value = self.current_engine.max_error_count
             max_error_count.setValue(value)
-            concurrency_limit.valueChanged.connect(
-                lambda value: config.update(concurrency_limit=value))
             request_interval.valueChanged.connect(
                 lambda value: config.update(request_interval=round(value, 1)))
             request_attempt.valueChanged.connect(
@@ -1772,27 +1817,10 @@ class TranslationSetting(QDialog):
         choose_default_engine(engine_list.findData(self.current_engine.name))
         engine_list.currentIndexChanged.connect(choose_default_engine)
 
-        def refresh_engine_list():
-            """Prevent engine list auto intercept the text changed signal."""
-            engine_list.currentIndexChanged.disconnect(choose_default_engine)
-            engine_list.refresh()
-            index = engine_list.findData(self.config.get('translate_engine'))
-            index = 0 if index == -1 else index
-            choose_default_engine(index)
-            engine_list.setCurrentIndex(index)
-            engine_list.currentIndexChanged.connect(choose_default_engine)
-
-        def manage_custom_translation_engine():
-            manager = ManageCustomEngine(self)
-            manager.finished.connect(refresh_engine_list)
-            manager.show()
-        manage_engine.clicked.connect(manage_custom_translation_engine)
-
         def make_test_translator():
             # This gets the current settings from the UI, not the saved ones.
             self.current_engine.set_config(self.get_engine_config())
             translator = self.current_engine()
-            translator.set_search_paths(self.get_search_paths())
             translator.set_proxy(
                 self.proxy_type.currentText(),
                 self.proxy_host.text(),
@@ -1804,11 +1832,25 @@ class TranslationSetting(QDialog):
 
         return widget
 
+    def engine_has_endpoint(self):
+        """Whether the engine's endpoint is the user's to set."""
+        return not issubclass(
+            self.current_engine, (GeminiTranslate, OpenRouterTranslate))
+
+    def engine_needs_api_key(self):
+        engine = self.current_engine
+        if hasattr(engine, 'needs_api_key'):
+            return engine.needs_api_key(engine.config)
+        return engine.need_api_key
+
     def reformat_api_keys(self):
-        need_api_key = self.current_engine.need_api_key
+        need_api_key = self.engine_needs_api_key()
         self.keys_group.setVisible(need_api_key)
         if need_api_key:
-            self.api_keys.setPlaceholderText(self.current_engine.api_key_hint)
+            engine = self.current_engine
+            hint = engine.key_hint(engine.config) \
+                if hasattr(engine, 'key_hint') else engine.api_key_hint
+            self.api_keys.setPlaceholderText(hint)
             api_keys = self.current_engine.config.get('api_keys', [])
             self.api_keys.clear()
             for api_key in api_keys:
@@ -1824,7 +1866,6 @@ class TranslationSetting(QDialog):
         position_radios_layout = QVBoxLayout(position_radios)
         position_radios_layout.setContentsMargins(0, 0, 0, 0)
         below_original = QRadioButton(_('Below original'))
-        below_original.setChecked(True)
         above_original = QRadioButton(_('Above original'))
         right_to_original = QRadioButton(
             '%s (%s)' % (_('Right to original'), _('Beta')))
@@ -1930,9 +1971,9 @@ class TranslationSetting(QDialog):
         position_btn_group.addButton(left_to_original, 3)
         position_btn_group.addButton(delete_original, 4)
 
-        map_key = self.config.get('translation_position') or 'below'
+        map_key = self.config.get('translation_position') or 'only'
         if map_key not in position_rmap.keys():
-            map_key = 'below'
+            map_key = 'only'
         position_btn_group.button(position_rmap.get(map_key)).setChecked(True)
 
         names = ('TopToBottom', 'BottomToTop', 'LeftToRight', 'RightToLeft')
@@ -2024,29 +2065,6 @@ class TranslationSetting(QDialog):
         translation_color_picker = create_color_picker(
             self.translation_color, translation_color_show)
         translation_color_button.clicked.connect(translation_color_picker.open)
-
-        # Glossary
-        glossary_group = QGroupBox(_('Translation Glossary'))
-        glossary_layout = QHBoxLayout(glossary_group)
-        self.glossary_enabled = QCheckBox(_('Enable'))
-        self.glossary_path = QLineEdit()
-        self.glossary_path.setPlaceholderText(_('Choose a glossary file'))
-        glossary_choose = QPushButton(_('Choose'))
-        glossary_layout.addWidget(self.glossary_enabled)
-        glossary_layout.addWidget(self.glossary_path)
-        glossary_layout.addWidget(glossary_choose)
-        layout.addWidget(glossary_group)
-
-        self.glossary_enabled.setChecked(self.config.get('glossary_enabled'))
-        self.glossary_enabled.clicked.connect(
-            lambda checked: self.config.update(glossary_enabled=checked))
-
-        self.glossary_path.setText(self.config.get('glossary_path'))
-
-        def choose_glossary_file():
-            path = QFileDialog.getOpenFileName(filter="Text files (*.txt)")
-            self.glossary_path.setText(path[0])
-        glossary_choose.clicked.connect(choose_glossary_file)
 
         # Priority element
         priority_group = QGroupBox(_('Priority Element'))
@@ -2249,10 +2267,6 @@ class TranslationSetting(QDialog):
         state = validator.validate(value, 0)[0]
         return state.value == 2
 
-    def get_search_paths(self):
-        path_list = self.path_list.toPlainText()
-        return [p for p in path_list.split('\n') if os.path.exists(p)]
-
     def update_general_config(self):
         # Output path
         if not self.config.get('to_library'):
@@ -2262,9 +2276,6 @@ class TranslationSetting(QDialog):
                     _('The specified path does not exist.'), 'warning')
                 return False
             self.config.update(output_path=output_path.strip())
-
-        # Merge length
-        self.config.update(merge_length=self.merge_length.value())
 
         # Proxy setting
         proxy_setting = self.config.get('proxy_setting') or {}
@@ -2286,17 +2297,12 @@ class TranslationSetting(QDialog):
         if len(proxy_setting) < 1:
             self.config.delete('proxy_setting')
 
-        # Search paths
-        search_paths = self.get_search_paths()
-        self.config.update(search_paths=search_paths)
-        self.path_list.setPlainText('\n'.join(search_paths))
-
         return True
 
     def get_engine_config(self) -> dict:
         config = self.current_engine.config
         # API key
-        if self.current_engine.need_api_key:
+        if self.engine_needs_api_key():
             api_keys = []
             api_key_validator = QRegularExpressionValidator(
                 QRegularExpression(self.current_engine.api_key_pattern))
@@ -2309,11 +2315,10 @@ class TranslationSetting(QDialog):
 
         # GenAI preference
         if issubclass(self.current_engine, GenAI):
-            self.update_prompt(self.genai_prompt, config)
-            if not issubclass(self.current_engine, GeminiTranslate):
+            if 'endpoint' in config:
+                del config['endpoint']
+            if self.engine_has_endpoint():
                 endpoint = self.genai_endpoint.text().strip()
-                if 'endpoint' in config:
-                    del config['endpoint']
                 if endpoint and endpoint != self.current_engine.endpoint:
                     config.update(endpoint=endpoint)
         # Preferred Language
@@ -2326,20 +2331,6 @@ class TranslationSetting(QDialog):
 
         return config
 
-    def update_prompt(self, widget, config):
-        if not issubclass(self.current_engine, GenAI):
-            return
-        prompt = widget.toPlainText().strip()
-        if prompt and '<tlang>' not in prompt:
-            self.alert.pop(
-                _('the prompt must include {}.').format('<slang>'),
-                'warning')
-            return None
-        if 'prompt' in config:
-            del config['prompt']
-        if prompt and prompt != self.current_engine.prompt:
-            config.update(prompt=prompt)
-
     def update_engine_config(self):
         config = self.get_engine_config()
         # Do not update directly as you may get default preferences!
@@ -2348,8 +2339,6 @@ class TranslationSetting(QDialog):
         engine_config.update({self.current_engine.name: config})
         # Cleanup unused engine preferences
         engine_names = [engine.name for engine in builtin_engines]
-        if custom_engine_names := self.config.get('custom_engines'):
-            engine_names += custom_engine_names.keys()
         for name in engine_config.copy():
             if name not in engine_names:
                 engine_config.pop(name)
@@ -2371,16 +2360,6 @@ class TranslationSetting(QDialog):
             self.alert.pop(_('Invalid color value.'), 'warning')
             return False
         self.config.update(translation_color=translation_color or None)
-
-        # Glossary file
-        if self.config.get('glossary_enabled'):
-            glossary_path = self.glossary_path.text()
-            if not os.path.exists(glossary_path):
-                self.alert.pop(
-                    _('The specified glossary file does not exist.'),
-                    'warning')
-                return False
-            self.config.update(glossary_path=glossary_path)
 
         # Priority rules
         rule_content = self.priority_rules.toPlainText()

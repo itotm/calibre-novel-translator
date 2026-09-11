@@ -1,5 +1,4 @@
 import socket
-import os.path
 from typing import Any
 
 from mechanize import HTTPError
@@ -18,7 +17,6 @@ load_translations()  # type: ignore
 class Base:
     name: str | None = None
     alias: str | None = None
-    free: bool = False
 
     lang_codes: dict[str, Any] = {}
     config: dict[str, Any] = {}
@@ -32,7 +30,6 @@ class Base:
     api_key_pattern = r'^[^\s]+$'
     api_key_errors = ['401']
     separator = '\n\n'
-    support_html = False
     placeholder = ('{{{{id_{}}}}}', r'({{\s*)+id\s*_\s*{}\s*(\s*}})+')
     using_tip = None
 
@@ -52,13 +49,13 @@ class Base:
     def __init__(self):
         self.source_lang: str
         self.target_lang: str
-        self.search_paths: list = []
+        # The response being read, while one is; see ``abort``.
+        self.inflight = None
 
         self.proxy_type: str | None = None  # http, socks5
         self.proxy_host: str | None = None
         self.proxy_port: int | None = None
 
-        self.merge_enabled = False
         self.api_keys: list = self.config.get('api_keys', [])[:]
         self.bad_api_keys = []
         self.api_key = self.get_api_key()
@@ -140,20 +137,6 @@ class Base:
                 return True
         return False
 
-    def set_search_paths(self, paths):
-        self.search_paths = paths
-
-    def get_external_program(self, name: str, paths: list = []) -> str | None:
-        for path in paths + self.search_paths:
-            if not path.endswith('%s%s' % (os.path.sep, name)):
-                path = os.path.join(path, name)
-            if os.path.isfile(path):
-                return path
-        return None
-
-    def set_merge_enabled(self, enable):
-        self.merge_enabled = enable
-
     def set_source_lang(self, source_lang: str) -> None:
         self.source_lang = source_lang
 
@@ -221,18 +204,46 @@ class Base:
                 if self.proxy_type == 'http':
                     params['proxy_uri'] = self.proxy_uri
                 response = request(**params)
+            if self.stream:
+                self.inflight = response
             return self.get_result(response)
         except Exception as e:
-            # Combine the error messages for investigation.
-            error_message = traceback_error() + '\n\n' + str(e)
+            # What the provider said, for deciding whether the key is at
+            # fault. The traceback is kept out of it on purpose: matched
+            # as a substring, a "line 401" in a mechanize frame passed
+            # for an authentication failure and burnt every spare key.
+            error_text = str(e)
             if not self.stream and isinstance(response, str):
-                error_message += '\n\n' + response
+                error_text += '\n\n' + response
+            # Combine the error messages for investigation.
+            error_message = traceback_error() + '\n\n' + error_text
             # Swap a valid API key if necessary.
-            if self.need_swap_api_key(error_message) and self.swap_api_key():
+            if self.need_swap_api_key(error_text) and self.swap_api_key():
                 return self.translate(content)
-            raise UnexpectedResult(
+            error = UnexpectedResult(
                 _('Can not parse returned response. Raw data: {}')
                 .format('\n\n' + error_message))
+            # What went wrong, for whoever wants to act on it rather
+            # than read the traceback: a rate limit to wait out, a
+            # routing dead end to work around.
+            error.cause = e
+            raise error
+
+    def abort(self):
+        """Cut short the response being read, from another thread.
+
+        A cancel used to be noticed only between requests, and a model
+        that takes minutes over a chunk made the user wait them out.
+        Closing the response makes the read in the worker thread end
+        at once; the pipeline sees the cancel and stops.
+        """
+        response = self.inflight
+        if response is None:
+            return
+        try:
+            response.close()
+        except Exception:
+            pass
 
     def get_endpoint(self):
         return self.endpoint
@@ -248,9 +259,3 @@ class Base:
 
     def get_usage(self):
         return None
-
-    def allow_raw(self) -> bool:
-        """Allow raw content translation only if the engine supports HTML and
-        merge translation is disabled.
-        """
-        return self.support_html and not self.merge_enabled

@@ -3,22 +3,19 @@ from typing import Iterator, Iterable
 
 class Ebook:
     def __init__(self, id, title, files, input_format, source_lang,
-                 extra_formats=[], authors=None):
+                 authors=None):
         self.id = id
         self.files = files
         self.input_format = input_format
         self.source_lang = source_lang
-        self.extra_formats = extra_formats
 
         self.output_format = None
         self.target_lang = None
         self.lang_code = None
 
         self.title = title
-        # Who wrote the book, as calibre knows it. Novel Mode researches
-        # the author once per book to learn how they write; everything
-        # else in the plugin ignores it. Optional and last in the
-        # signature so the existing positional callers keep working.
+        # Who wrote the book, as calibre knows it: researched once per
+        # book to learn how they write.
         self.authors = list(authors or [])
         self.custom_title = None
         self.encoding = 'utf-8'
@@ -57,9 +54,6 @@ class Ebook:
 
     def get_input_path(self):
         return self.files.get(self.input_format)
-
-    def is_extra_format(self):
-        return self.input_format in self.extra_formats
 
 
 class Ebooks(Iterable):

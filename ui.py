@@ -1,38 +1,58 @@
 import os.path
 
 from qt.core import QMenu, QSettings  # type: ignore
+from calibre.gui2 import gprefs  # type: ignore
 from calibre.utils.localization import _  # type: ignore
 from calibre.gui2.actions import InterfaceAction  # type: ignore
 from calibre.utils.config_base import plugin_dir  # type: ignore
 from calibre.ebooks.conversion.config import (  # type: ignore
     get_input_format_for_book)
-from . import EbookTranslator
+from . import NovelTranslatorPlugin
 from .lib.utils import uid
 from .lib.ebook import Ebooks
-from .lib.config import get_config, upgrade_config
-from .lib.conversion import (
-    ConversionWorker, extra_formats as predefined_extra_formats)
-from .batch import BatchTranslation
+from .lib.config import get_config
+from .lib.conversion import ConversionWorker
 from .setting import TranslationSetting
 from .cache import CacheManager
 from .about import AboutDialog
-from .components import AlertMessage, ModeSelection
-from .advanced import CreateTranslationProject, AdvancedTranslation
+from .components import AlertMessage
 from .novel import CreateNovelProject, NovelTranslation
 
 
 load_translations()  # type: ignore
 
-upgrade_config()
+
+# The toolbars calibre lets an action sit in, as it stores their layouts.
+TOOLBAR_LAYOUTS = ('action-layout-toolbar', 'action-layout-toolbar-device')
 
 
-class EbookTranslatorGui(InterfaceAction):
-    name = EbookTranslator.name
+def place_on_toolbars(name, layouts):
+    """Append ``name`` to every toolbar layout in ``layouts`` that does
+    not carry it yet. Returns the layouts that were changed.
+
+    calibre only offers to put a freshly installed plugin on the toolbar
+    when the plugin is installed from its own dialog; installed from the
+    command line or from a file, the action exists but sits in no
+    toolbar until the user finds it under Preferences > Toolbars & menus.
+    """
+    changed = []
+    for key in TOOLBAR_LAYOUTS:
+        layout = list(layouts.get(key) or ())
+        if name in layout:
+            continue
+        layout.append(name)
+        layouts[key] = tuple(layout)
+        changed.append(key)
+    return changed
+
+
+class NovelTranslatorGui(InterfaceAction):
+    name = NovelTranslatorPlugin.name
     action_spec = (
         _('Translate Book'), None, _('Translate Ebook Content'), None)
-    title = '%s - %s' % (EbookTranslator.title, EbookTranslator.__version__)
+    title = '%s - %s' % (NovelTranslatorPlugin.title, NovelTranslatorPlugin.__version__)
     ui_settings = QSettings(os.path.join(
-        plugin_dir, EbookTranslator.identifier, 'settings.ini'),
+        plugin_dir, NovelTranslatorPlugin.identifier, 'settings.ini'),
         QSettings.Format.IniFormat)
 
     class Status:
@@ -45,11 +65,17 @@ class EbookTranslatorGui(InterfaceAction):
         except Exception:
             self.icon = get_icons('images/icon.png')  # type: ignore
 
+        # On the toolbar the first time the plugin runs, and only then:
+        # a user who takes the button off afterwards is not overruled.
+        # genesis runs before calibre builds its toolbars, so the layout
+        # written here is the one they are built from.
+        config = get_config()
+        if not config.get('toolbar_placed'):
+            place_on_toolbars(self.name, gprefs)
+            config.save(toolbar_placed=True)
+
         menu = QMenu(self.gui)
-        menu.addAction(
-            _('Advanced Mode'), self.show_advanced_translation)
-        menu.addAction(_('Batch Mode'), self.show_batch_translation)
-        menu.addAction(_('Novel Mode'), self.show_novel_translation)
+        menu.addAction(_('Translate'), self.show_novel_translation)
         menu.addSeparator()
         menu.addAction(_('Cache'), self.show_cache)
         menu.addSeparator()
@@ -58,55 +84,12 @@ class EbookTranslatorGui(InterfaceAction):
 
         self.qaction.setMenu(menu)
         self.qaction.setIcon(self.icon)
-        self.qaction.triggered.connect(self.select_preferred_mode)
+        self.qaction.triggered.connect(self.show_novel_translation)
 
         self.alert = AlertMessage(self.gui)
 
-        if not getattr(self.gui, 'ebook_translator_novel', False):
-            self.gui.ebook_translator_novel = self.Status()
-
-    def advanced_translation_window(self, ebook):
-        name = 'advanced_' + uid(ebook.get_input_path())
-        if self.show_window(name):
-            return
-        worker = ConversionWorker(self.gui, self.icon)
-        window = AdvancedTranslation(self, self.gui, worker, ebook)
-        window.setMinimumWidth(1200)
-        window.setMinimumHeight(680)
-        window.setWindowTitle(
-            '%s - %s' % (_('Advanced Mode'), self.title))
-        window.show()
-        self.add_window(name, window)
-
-    def show_advanced_translation(self):
-        ebooks = self.get_selected_ebooks()
-        if len(ebooks) < 1:
-            return self.alert.pop(
-                _('Please choose a book.'), 'warning')
-        window = CreateTranslationProject(self.gui, ebooks.first())
-        window.start_translation.connect(self.advanced_translation_window)
-        window.setModal(True)
-        window.setWindowTitle(
-            '%s - %s' % (_('Advanced Mode'), self.title))
-        window.setWindowTitle(self.title)
-        window.show()
-
-    def show_batch_translation(self):
-        if self.show_window('batch'):
-            return
-        ebooks = self.get_selected_ebooks()
-        if len(ebooks) < 1:
-            return self.alert.pop(
-                _('Please choose at least one book.'), 'warning')
-        worker = ConversionWorker(self.gui, self.icon)
-        window = BatchTranslation(self.gui, worker, ebooks)
-        window.setMinimumWidth(1000)
-        window.setMinimumHeight(600)
-        window.setWindowTitle(
-            '%s - %s' % (_('Batch Mode'), self.title))
-        window.setWindowIcon(self.icon)
-        window.show()
-        self.add_window('batch', window)
+        if not getattr(self.gui, 'novel_translator', False):
+            self.gui.novel_translator = self.Status()
 
     def novel_translation_window(self, ebook):
         name = 'novel_' + uid(ebook.get_input_path())
@@ -116,8 +99,7 @@ class EbookTranslatorGui(InterfaceAction):
         window = NovelTranslation(self, self.gui, worker, ebook)
         window.setMinimumWidth(1000)
         window.setMinimumHeight(640)
-        window.setWindowTitle(
-            '%s - %s' % (_('Novel Mode'), self.title))
+        window.setWindowTitle(self.title)
         window.setWindowIcon(self.icon)
         window.show()
         self.add_window(name, window)
@@ -129,13 +111,12 @@ class EbookTranslatorGui(InterfaceAction):
                 _('Please choose a book.'), 'warning')
         if len(ebooks) > 1:
             return self.alert.pop(
-                _('Novel Mode supports one book at a time. '
-                  'Please select a single book.'), 'warning')
+                _('One book at a time: please select a single book.'),
+                'warning')
         window = CreateNovelProject(self.gui, ebooks.first())
         window.start_translation.connect(self.novel_translation_window)
         window.setModal(True)
-        window.setWindowTitle(
-            '%s - %s' % (_('Novel Mode'), self.title))
+        window.setWindowTitle(self.title)
         window.show()
 
     def show_setting(self):
@@ -183,25 +164,6 @@ class EbookTranslatorGui(InterfaceAction):
         window.show()
         self.add_window('about', window)
 
-    def select_preferred_mode(self):
-        modes = {
-            'advanced': self.show_advanced_translation,
-            'batch': self.show_batch_translation,
-            'novel': self.show_novel_translation,
-        }
-        preferred_mode = get_config().get('preferred_mode')
-        if not preferred_mode:
-            window = ModeSelection(self.gui)
-            window.choose_action.connect(self.select_preferred_mode)
-            window.setModal(True)
-            window.setMaximumWidth(700)
-            window.setMaximumHeight(220)
-            window.setWindowTitle(
-                '%s - %s' % (_('Choose Translation Mode'), self.title))
-            window.show()
-        else:
-            modes[preferred_mode]()
-
     def add_window(self, name, window):
         identifier = name.split('_')[0]
 
@@ -215,7 +177,7 @@ class EbookTranslatorGui(InterfaceAction):
         if position:
             window.restoreGeometry(position)
 
-        windows = self.gui.ebook_translator_novel.windows
+        windows = self.gui.novel_translator.windows
         windows[name] = window
 
         def setup_window():
@@ -225,7 +187,7 @@ class EbookTranslatorGui(InterfaceAction):
         window.finished.connect(setup_window)
 
     def get_window(self, name):
-        return self.gui.ebook_translator_novel.windows.get(name)
+        return self.gui.novel_translator.windows.get(name)
 
     def show_window(self, name):
         window = self.get_window(name)
@@ -235,12 +197,12 @@ class EbookTranslatorGui(InterfaceAction):
         return True
 
     def has_running_jobs(self):
-        jobs = self.gui.ebook_translator_novel.jobs
+        jobs = self.gui.novel_translator.jobs
         if len(jobs) > 0:
             return True
-        windows = self.gui.ebook_translator_novel.windows
+        windows = self.gui.novel_translator.windows
         for name in windows:
-            if name.startswith('advanced_') or name.startswith('novel_'):
+            if name.startswith('novel_'):
                 return True
         return False
 
@@ -254,19 +216,7 @@ class EbookTranslatorGui(InterfaceAction):
             row_id = row.row()
             book_id = model.id(row)
             book_metadata = api.get_proxy_metadata(book_id)
-            fmt, fmts = None, []
-            extra_formats = []
-            try:
-                fmt, fmts = get_input_format_for_book(db, book_id, 'epub')
-            except Exception as e:
-                for extra_format in predefined_extra_formats.keys():
-                    if api.has_format(book_id, extra_format):
-                        if fmt is None:
-                            fmt = extra_format
-                        fmts.append(extra_format)
-                        extra_formats.append(extra_format)
-                if fmt is None:
-                    raise e
+            fmt, fmts = get_input_format_for_book(db, book_id, 'epub')
             ebooks.add(
                 book_id,  # Book ID in db
                 model.title(row_id),  # Title
@@ -277,7 +227,6 @@ class EbookTranslatorGui(InterfaceAction):
                 )),
                 fmt.lower(),  # Input format
                 book_metadata.language,  # Source language
-                extra_formats,
                 list(book_metadata.authors or []),  # Authors
             )
         return ebooks

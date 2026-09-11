@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# build_plugin.sh - Build the installable zip of the Ebook Translator
-# (Novel) Calibre plugin.
+# build_plugin.sh - Build the installable zip of the Novel Translator
+# Calibre plugin.
 #
-# This fork carries no CI: releases are cut by hand, so the archive that
-# the GitHub Actions workflows used to publish is built here instead.
+# Releases are cut by hand: this script builds the archive, checks it
+# and prints the line that installs it.
 #
 # Usage:
-#   ./build_plugin.sh                 # ../ebook-translator-novel_vX.Y.Z.zip
+#   ./build_plugin.sh                 # ../novel-translator_vX.Y.Z.zip
 #   ./build_plugin.sh some-name.zip   # write that file instead
 #   ./build_plugin.sh --no-check      # skip the preflight checks
 #   ./build_plugin.sh --help
@@ -44,7 +44,7 @@ VERSION="$(sed -n \
 [ -n "$VERSION" ] || fail "could not read the version from __init__.py"
 
 if [ -z "$OUTPUT" ]; then
-    OUTPUT="../ebook-translator-novel_v${VERSION}.zip"
+    OUTPUT="../novel-translator_v${VERSION}.zip"
 fi
 # Turn a relative output path into an absolute one.
 if [[ "$OUTPUT" != /* ]]; then

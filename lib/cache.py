@@ -9,6 +9,7 @@ import tempfile
 from datetime import datetime
 from glob import glob
 
+from calibre.constants import cache_dir  # type: ignore
 from calibre.utils.localization import _  # type: ignore
 
 from .utils import size_by_unit
@@ -69,39 +70,37 @@ class Paragraph:
 
 
 def default_cache_path():
-    if sys.platform == 'win32':
-        # Use LOCALAPPDATA for Windows to avoid temp directory changes
-        local_appdata = os.environ.get('LOCALAPPDATA')
-        if local_appdata:
-            path = os.path.join(
-                local_appdata,
-                'calibre-cache',
-                'plugins',
-                'ebook-translator-novel')
-        else:
-            # Fallback to user profile if LOCALAPPDATA is not available
-            path = os.path.join(
-                os.path.expanduser('~'),
-                'AppData',
-                'Local',
-                'calibre-cache',
-                'plugins',
-                'ebook-translator-novel')
-    else:
-        # For macOS and Linux, keep using temp directory
-        path = os.path.join(
-            tempfile.gettempdir(),
-            'com.bookfere.Calibre.EbookTranslator.Novel')
+    """Where the caches live unless the settings say otherwise: under
+    calibre's own cache directory, which survives calibre being closed.
 
+    It used to be the temporary directory on Linux and macOS, and inside
+    calibre that is not the system's but calibre's own, created for one
+    session and deleted at the end of it: every cache, and with it every
+    half-translated book, went with the session it was made in.
+    """
+    path = os.path.join(cache_dir(), 'plugins', 'novel-translator')
     if not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
     return path
 
 
+def is_temporary(path):
+    """Whether ``path`` lives under the temporary directory of this
+    process, which calibre deletes when it exits."""
+    try:
+        temp = os.path.realpath(tempfile.gettempdir())
+        return os.path.realpath(path).startswith(temp + os.sep)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 def custom_cache_path():
     config = get_config()
     path = config.get('cache_path')
-    if path and os.path.exists(path):
+    # A path written by an older version pointed into the session's
+    # temporary directory; it exists for as long as the session does,
+    # which is exactly the problem.
+    if path and os.path.exists(path) and not is_temporary(path):
         return path
     path = default_cache_path()
     config.save(cache_path=path)
@@ -175,11 +174,10 @@ class TranslationCache:
             title = cache.get_info('title') or '[%s]' % _('Unknown')
             engine = cache.get_info('engine_name')
             lang = cache.get_info('target_lang')
-            merge = int(cache.get_info('merge_length') or 0)
             size = size_by_unit(os.path.getsize(file_path), 'MB')
             time = datetime.fromtimestamp(os.path.getmtime(file_path)) \
                 .strftime('%Y-%m-%d %H:%M:%S')
-            names.append((title, engine, lang, merge, size, time, name))
+            names.append((title, engine, lang, size, time, name))
             cache.close()
         return names
 

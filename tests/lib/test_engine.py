@@ -1,6 +1,7 @@
 import io
 import re
 import json
+from http.client import IncompleteRead
 import unittest
 from pathlib import Path
 from types import GeneratorType
@@ -12,18 +13,14 @@ from mechanize._response import (  # type: ignore
 
 from ...lib.cache import Paragraph
 from ...engines.base import Base
-from ...lib.exception import UnexpectedResult, UnsupportedModel
+from ...lib.exception import UnexpectedResult
 from ...engines.genai import GenAI
-from ...engines.deepl import DeeplTranslate
-from ...engines.openai import ChatgptTranslate, ChatgptBatchTranslate
+from ...engines.openai import ChatgptTranslate
 from ...engines.openrouter import OpenRouterTranslate
-from ...engines.microsoft import AzureChatgptTranslate
 from ...engines.anthropic import ClaudeTranslate
-from ...engines.custom import (
-    create_engine_template, load_engine_data, CustomTranslate)
 
 
-module_name = 'calibre_plugins.ebook_translator_novel.engines'
+module_name = 'calibre_plugins.novel_translator.engines'
 
 
 class MockEngine(Base):
@@ -44,7 +41,6 @@ class TestBase(unittest.TestCase):
     def test_class(self):
         self.assertIsNone(Base.name)
         self.assertIsNone(Base.alias)
-        self.assertFalse(Base.free)
 
         self.assertEqual({}, Base.lang_codes)
         self.assertEqual({}, Base.config)
@@ -78,15 +74,10 @@ class TestBase(unittest.TestCase):
     def test_create_translator(self):
         translator = Base()
 
-        # self.assertIsNone(translator.source_lang)
-        # self.assertIsNone(translator.target_lang)
-        self.assertEqual([], translator.search_paths)
-
         self.assertIsNone(translator.proxy_type)
         self.assertIsNone(translator.proxy_host)
         self.assertIsNone(translator.proxy_port)
 
-        self.assertFalse(translator.merge_enabled)
         self.assertEqual(['b', 'c'], translator.api_keys)
         self.assertEqual([], translator.bad_api_keys)
         self.assertEqual('a', translator.api_key)
@@ -166,29 +157,6 @@ class TestBase(unittest.TestCase):
         self.translator.api_keys = ['a']
         self.translator.api_key_errors = ['error']
         self.assertTrue(self.translator.need_swap_api_key('test error'))
-
-    @patch(module_name + '.base.os.path.isfile')
-    def test_get_external_program(self, mock_os_path_isfile):
-        mock_os_path_isfile.side_effect = lambda path: path in [
-            str(Path('/path/to/real')), str(Path('/path/to/folder/real')),
-            str(Path('/path/to/specify/real'))]
-
-        self.translator.search_paths = [str(Path('/path/to/real'))]
-        self.assertEqual(
-            str(Path('/path/to/real')),
-            self.translator.get_external_program('real'))
-
-        self.translator.search_paths = [str(Path('/path/to/folder'))]
-        self.assertEqual(
-            str(Path('/path/to/folder/real')),
-            self.translator.get_external_program('real'))
-        self.assertEqual(
-            str(Path('/path/to/specify/real')),
-            self.translator.get_external_program(
-                'real', [str(Path('/path/to/specify'))]))
-
-        self.assertIsNone(
-            self.translator.get_external_program(str(Path('/path/to/fake'))))
 
     @patch(module_name + '.base.request')
     def test_translate(self, mock_request):
@@ -347,59 +315,6 @@ class TestBase(unittest.TestCase):
         self.assertRegex(calls[1].args[0], 'any unexpected error')
         self.assertRegex(calls[2].args[0], 'any unexpected error')
 
-    def test_allow_raw(self):
-        cases = (
-            (True, False, True),
-            (False, True, False),
-            (False, False, False),
-            (True, True, False),
-        )
-
-        for support_html, merge_enabled, expected in cases:
-            with self.subTest(
-                    support_html=support_html, merge_enabled=merge_enabled):
-                self.translator.support_html = support_html
-                self.translator.merge_enabled = merge_enabled
-                self.assertEqual(expected, self.translator.allow_raw())
-
-
-class TestDeepl(unittest.TestCase):
-    def setUp(self):
-        DeeplTranslate.set_config({'api_keys': ['a', 'b', 'c']})
-        DeeplTranslate.lang_codes = {
-            'source': {'English': 'EN'}, 'target': {'Chinese': 'ZH'}}
-
-        self.translator = DeeplTranslate()
-        self.translator.set_source_lang('English')
-        self.translator.set_target_lang('Chinese')
-
-    @patch(module_name + '.deepl.request')
-    def test_get_usage(self, mock_request):
-        mock_request.return_value = \
-            '{"character_count": 30, "character_limit": 100}'
-
-        self.assertEqual(
-            '100 total, 30 used, 70 left',
-            self.translator.get_usage(),)
-
-        mock_request.return_value = '<dummy info>'
-        self.assertIsNone(self.translator.get_usage())
-
-    @patch(module_name + '.base.request')
-    def test_translate(self, mock_request):
-        mock_request.return_value = '{"translations":[{' \
-            '"detected_source_language":"EN","text":"你好世界！"}]}'
-
-        self.assertEqual('你好世界！', self.translator.translate('Hello World!'))
-
-        mock_request.return_value = '<dummy info>'
-        error = re.compile(
-            'Can not parse returned response. Raw data: '
-            '\n\nTraceback.*\n\n<dummy info>',
-            re.S)
-        with self.assertRaisesRegex(Exception, error):
-            self.translator.translate('Hello World!')
-
 
 class TestChatgptTranslate(unittest.TestCase):
     def setUp(self):
@@ -475,7 +390,7 @@ class TestChatgptTranslate(unittest.TestCase):
                     {'role': 'user', 'content': 'test content'}
                 ],
                 'stream': True,
-                'temperature': 1.0
+                'temperature': 0.2
             }))
 
     def test_get_body_without_stream(self):
@@ -489,10 +404,10 @@ class TestChatgptTranslate(unittest.TestCase):
                     {'role': 'system', 'content': self.prompt},
                     {'role': 'user', 'content': 'test content'}
                 ],
-                'temperature': 1.0
+                'temperature': 0.2
             }))
 
-    @patch(module_name + '.openai.EbookTranslator')
+    @patch(module_name + '.openai.NovelTranslatorPlugin')
     @patch(module_name + '.base.request')
     def test_translate_stream(self, mock_request, mock_et):
         model = 'gpt-4o'
@@ -503,13 +418,13 @@ class TestChatgptTranslate(unittest.TestCase):
                 {'role': 'user', 'content': 'Hello World!'}
             ],
             'stream': True,
-            'temperature': 1.0,
+            'temperature': 0.2,
         })
         mock_et.__version__ = '1.0.0'
         headers = {
             'Content-Type': 'application/json',
             'Authorization': 'Bearer a',
-            'User-Agent': 'Ebook-Translator/1.0.0'}
+            'User-Agent': 'Novel-Translator/1.0.0'}
         template = b'data: {"choices":[{"delta":{"content":"%b"}}]}'
         mock_response = Mock()
         mock_response.readline.side_effect = [
@@ -679,7 +594,7 @@ class TestOpenRouterTranslate(unittest.TestCase):
 
         body = json.loads(translator.get_body('test content'))
 
-        self.assertEqual(0.3, body['temperature'])
+        self.assertEqual(0.2, body['temperature'])
         self.assertEqual(42, body['seed'])
         self.assertEqual(20, body['top_k'])
         self.assertEqual({'enabled': False}, body['reasoning'])
@@ -689,7 +604,7 @@ class TestOpenRouterTranslate(unittest.TestCase):
 
         body = json.loads(translator.get_body('test content'))
 
-        self.assertEqual(0.3, body['temperature'])
+        self.assertEqual(0.2, body['temperature'])
         self.assertEqual(42, body['seed'])
 
     def test_extra_body_forces_a_filtered_parameter(self):
@@ -735,13 +650,13 @@ class TestOpenRouterTranslate(unittest.TestCase):
         body = json.loads(self.translator.get_body('test content'))
 
         self.assertEqual('deepseek/deepseek-v4-flash', body['model'])
-        self.assertEqual(0.3, body['temperature'])
-        # Reasoning is off by default and routing asks for the fastest
+        self.assertEqual(0.2, body['temperature'])
+        # Reasoning is off by default and routing asks for the cheapest
         # endpoint that honours every parameter we send.
         self.assertEqual({'enabled': False}, body['reasoning'])
         self.assertNotIn('reasoning_effort', body)
         self.assertEqual(
-            {'sort': 'throughput', 'require_parameters': True},
+            {'sort': 'price', 'require_parameters': True},
             body['provider'])
         # Neutral values are omitted so the provider keeps its own default.
         for key in ('top_k', 'min_p', 'top_a', 'seed', 'max_tokens',
@@ -842,345 +757,6 @@ class TestOpenRouterTranslate(unittest.TestCase):
         self.assertIn('Insufficient credits', str(cm.exception))
 
 
-class TestChatgptBatchTranslate(unittest.TestCase):
-    def setUp(self):
-        self.mock_translator = Mock(ChatgptTranslate)
-        self.mock_translator.endpoint = 'https://api.openai.com/test'
-        self.mock_translator.proxy_uri = {}
-        self.mock_headers = {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer abc',
-            'User-Agent': 'Ebook-Translator/v1.0.0'}
-        self.mock_translator.get_headers.return_value = self.mock_headers
-        self.batch_translator = ChatgptBatchTranslate(self.mock_translator)
-
-    def test_class_object(self):
-        self.assertRegex(ChatgptBatchTranslate.boundary, r'(?a)^\w+$')
-
-    def test_created_translator(self):
-        self.assertIsInstance(self.batch_translator, ChatgptBatchTranslate)
-        self.assertIs(self.mock_translator, self.batch_translator.translator)
-        self.assertFalse(self.mock_translator.stream)
-        self.assertEqual(
-            self.batch_translator.file_endpoint,
-            'https://api.openai.com/v1/files')
-        self.assertEqual(
-            self.batch_translator.batch_endpoint,
-            'https://api.openai.com/v1/batches')
-
-    def test_supported_models(self):
-        self.mock_translator.get_models.return_value = [
-            'model-id-0', 'model-id-1', 'model-id-2']
-        self.assertEqual(
-            self.batch_translator.supported_models(),
-            ['model-id-0', 'model-id-1', 'model-id-2'])
-
-    @patch(module_name + '.openai.ChatgptBatchTranslate.supported_models')
-    def test_upload_with_unsupported_model(self, mock_supported_models):
-        model = 'gpt-4o'
-        mock_supported_models.return_value = [model]
-        self.mock_translator.model = 'fake-model'
-        self.mock_translator.stream = True
-        with self.assertRaises(UnsupportedModel) as cm:
-            self.batch_translator.upload([Mock(Paragraph)])
-        self.assertEqual(
-            str(cm.exception),
-            'The model "fake-model" does not support batch functionality.')
-
-    @patch.object(ChatgptBatchTranslate, 'boundary', new='xxxxxxxxxx')
-    @patch(module_name + '.openai.ChatgptBatchTranslate.supported_models')
-    @patch(module_name + '.openai.request')
-    def test_upload(self, mock_request, mock_supported_models):
-        mock_request.return_value = """
-{
-  "id": "test-file-id",
-  "object": "file",
-  "bytes": 120000,
-  "created_at": 1677610602,
-  "filename": "mydata.jsonl",
-  "purpose": "fine-tune"
-}
-"""
-        model = 'gpt-4o'
-        mock_supported_models.return_value = [model]
-
-        mock_paragraph_1 = Mock(Paragraph)
-        mock_paragraph_1.md5 = 'abc'
-        mock_paragraph_1.original = 'test content 1'
-        mock_paragraph_2 = Mock(Paragraph)
-        mock_paragraph_2.md5 = 'def'
-        mock_paragraph_2.original = 'test content 2'
-        self.mock_translator.model = model
-        self.mock_translator.api_key = 'abc'
-        self.mock_translator.proxy_uri = {}
-
-        def mock_get_body(text):
-            return json.dumps({
-                'model': model,
-                'messages': [
-                    {'role': 'system', 'content': 'some prompt...'},
-                    {'role': 'user', 'content': text}],
-                'temperature': 1.0
-            })
-        self.mock_translator.get_body.side_effect = mock_get_body
-
-        file_id = self.batch_translator.upload(
-            [mock_paragraph_1, mock_paragraph_2])
-
-        self.assertEqual(file_id, 'test-file-id')
-        mock_body = (
-            '--xxxxxxxxxx\r\n'
-            'Content-Disposition: form-data; name="purpose"\r\n'
-            '\r\nbatch\r\n'
-            '--xxxxxxxxxx\r\n'
-            'Content-Disposition: form-data; name="file"; '
-            'filename="original.jsonl"\r\n'
-            'Content-Type: application/json\r\n'
-            '\r\n{"custom_id": "abc", "method": "POST", '
-            '"url": "/v1/chat/completions", '
-            '"body": {"model": "' + model + '", '
-            '"messages": [{"role": "system", '
-            '"content": "some prompt..."}, {"role": "user", '
-            '"content": "test content 1"}], "temperature": 1.0}}\n'
-            '{"custom_id": "def", "method": "POST", '
-            '"url": "/v1/chat/completions", '
-            '"body": {"model": "' + model + '", '
-            '"messages": [{"role": "system", '
-            '"content": "some prompt..."}, {"role": "user", '
-            '"content": "test content 2"}], "temperature": 1.0}}\r\n'
-            '--xxxxxxxxxx--').encode()
-        mock_request.assert_called_once_with(
-            'https://api.openai.com/v1/files', mock_body, self.mock_headers,
-            'POST', proxy_uri=self.mock_translator.proxy_uri)
-
-    @patch(module_name + '.openai.request')
-    def test_delete(self, mock_request):
-        mock_request.return_value = json.dumps({
-            'id': 'test-file-id',
-            'object': 'file',
-            'deleted': True})
-
-        self.assertTrue(self.batch_translator.delete('test-file-id'))
-
-        headers = {
-            'Authorization': 'Bearer abc',
-            'User-Agent': 'Ebook-Translator/v1.0.0'}
-        mock_request.assert_called_once_with(
-            'https://api.openai.com/v1/files/test-file-id',
-            headers=headers, method='DELETE',
-            proxy_uri=self.mock_translator.proxy_uri)
-
-    @patch(module_name + '.openai.request')
-    def test_retrieve(self, mock_request):
-        line_1 = (
-            b'{"custom_id":"abc","response":{"status_code":200,"body":{'
-            b'"choices": [{"message": {"content": "A"}}]}}}')
-        line_2 = (
-            b'{"custom_id":"def","response":{"status_code":200,"body":{'
-            b'"choices": [{"message": {"content": "B"}}]}}}')
-        mock_request.return_value.read.return_value = line_1 + b'\n' + line_2
-        self.mock_translator.get_headers.return_value = {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer abc',
-            'User-Agent': 'Ebook-Translator/v1.0.0'}
-
-        self.assertEqual(
-            self.batch_translator.retrieve('test-batch-id'),
-            {'abc': 'A', 'def': 'B'})
-
-        headers = {
-            'Authorization': 'Bearer abc',
-            'User-Agent': 'Ebook-Translator/v1.0.0'}
-        mock_request.assert_called_once_with(
-            'https://api.openai.com/v1/files/test-batch-id/content',
-            headers=headers, raw_object=True,
-            proxy_uri=self.mock_translator.proxy_uri)
-        mock_request().read.assert_called_once()
-
-    @patch(module_name + '.openai.request')
-    def test_create(self, mock_request):
-        mock_response = {
-            'id': 'test-batch-id',
-            'object': 'batch',
-            'endpoint': '/v1/chat/completions',
-            'errors': None,
-            'input_file_id': 'test-file-id',
-            'completion_window': '24h',
-            'status': 'validating',
-            'output_file_id': None,
-            'error_file_id': None,
-            'created_at': 1711471533,
-            'in_progress_at': None,
-            'expires_at': None,
-            'finalizing_at': None,
-            'completed_at': None,
-            'failed_at': None,
-            'expired_at': None,
-            'cancelling_at': None,
-            'cancelled_at': None,
-            'request_counts': {
-                'total': 0,
-                'completed': 0,
-                'failed': 0
-            },
-            'metadata': {
-                'customer_id': 'user_123456789',
-                'batch_description': 'Nightly eval job'
-            }}
-        mock_request.return_value = json.dumps(mock_response)
-
-        self.assertEqual(
-            self.batch_translator.create('test-file-id'), 'test-batch-id')
-
-        body = json.dumps({
-            'input_file_id': 'test-file-id',
-            'endpoint': '/v1/chat/completions',
-            'completion_window': '24h'})
-        mock_request.assert_called_once_with(
-            'https://api.openai.com/v1/batches',
-            body, self.mock_headers, 'POST',
-            proxy_uri=self.mock_translator.proxy_uri)
-
-    @patch(module_name + '.openai.request')
-    def test_check(self, mock_request):
-        mock_response = {
-            'id': 'test-batch-id',
-            'object': 'batch',
-            'endpoint': '/v1/completions',
-            'errors': None,
-            'input_file_id': 'file-abc123',
-            'completion_window': '24h',
-            'status': 'completed',
-            'output_file_id': 'file-cvaTdG',
-            'error_file_id': 'file-HOWS94',
-            'created_at': 1711471533,
-            'in_progress_at': 1711471538,
-            'expires_at': 1711557933,
-            'finalizing_at': 1711493133,
-            'completed_at': 1711493163,
-            'failed_at': None,
-            'expired_at': None,
-            'cancelling_at': None,
-            'cancelled_at': None,
-            'request_counts': {
-                'total': 100,
-                'completed': 95,
-                'failed': 5
-            },
-            'metadata': {
-                'customer_id': 'user_123456789',
-                'batch_description': 'Nightly eval job',
-            }}
-        mock_request.return_value = json.dumps(mock_response)
-
-        self.assertEqual(
-            self.batch_translator.check('test-batch-id'), mock_response)
-
-        mock_request.assert_called_once_with(
-            'https://api.openai.com/v1/batches/test-batch-id',
-            headers=self.mock_headers,
-            proxy_uri=self.mock_translator.proxy_uri)
-
-    @patch(module_name + '.openai.request')
-    def test_cancel(self, mock_request):
-        mock_response = {
-            'id': 'test-batch-id',
-            'object': 'batch',
-            'endpoint': '/v1/chat/completions',
-            'errors': None,
-            'input_file_id': 'test-file-id',
-            'completion_window': '24h',
-            'status': 'cancelling',
-            'output_file_id': None,
-            'error_file_id': None,
-            'created_at': 1711471533,
-            'in_progress_at': 1711471538,
-            'expires_at': 1711557933,
-            'finalizing_at': None,
-            'completed_at': None,
-            'failed_at': None,
-            'expired_at': None,
-            'cancelling_at': 1711475133,
-            'cancelled_at': None,
-            'request_counts': {
-                'total': 100,
-                'completed': 23,
-                'failed': 1
-            },
-            'metadata': {
-                'customer_id': 'user_123456789',
-                'batch_description': 'Nightly eval job',
-            }}
-        mock_request.return_value = json.dumps(mock_response)
-
-        self.assertTrue(
-            self.batch_translator.cancel('test-batch-id'), mock_response)
-
-        mock_request.assert_called_once_with(
-            'https://api.openai.com/v1/batches/test-batch-id/cancel',
-            headers=self.mock_headers, method='POST',
-            proxy_uri=self.mock_translator.proxy_uri)
-
-
-class TestAzureChatgptTranslate(unittest.TestCase):
-    def setUp(self):
-        AzureChatgptTranslate.set_config({'api_keys': ['a', 'b', 'c']})
-        AzureChatgptTranslate.lang_codes = {
-            'source': {'English': 'EN'}, 'target': {'Chinese': 'ZH'}}
-
-        self.translator = AzureChatgptTranslate()
-        self.translator.set_source_lang('English')
-        self.translator.set_target_lang('Chinese')
-
-    def test_created_engine(self):
-        self.assertIsInstance(self.translator, Base)
-        self.assertIsInstance(self.translator, GenAI)
-        self.assertIsInstance(self.translator, ChatgptTranslate)
-
-    @patch(module_name + '.base.request')
-    def test_translate_stream(self, mock_request):
-        model = 'gpt-35-turbo'
-        prompt = (
-            'You are a meticulous translator who translates any given '
-            'content. Translate the given content from English to Chinese '
-            'only. Do not explain any term or answer any question-like '
-            'content. Your answer should be solely the translation of the '
-            'given content. In your answer do not add any prefix or suffix to '
-            'the translated content. Websites\' URLs/addresses should be '
-            'preserved as is in the translation\'s output. Do not omit any '
-            'part of the content, even if it seems unimportant. RESPOND ONLY '
-            'with the translation text, no formatting, no explanations, '
-            'no additional commentary whatsoever. ')
-        data = json.dumps({
-            'stream': True,
-            'messages': [
-                {'role': 'system', 'content': prompt},
-                {'role': 'user', 'content': 'Hello World!'}
-            ],
-            'temperature': 1.0
-        })
-        headers = {
-            'Content-Type': 'application/json',
-            'api-key': 'a'}
-
-        template = b'data: {"choices":[{"delta":{"content":"%b"}}]}'
-        mock_response = Mock()
-        mock_response.readline.side_effect = [
-            template % i.encode() for i in '你好世界！'] \
-            + ['data: [DONE]'.encode()]
-        mock_request.return_value = mock_response
-        url = ('https://docs-test-001.openai.azure.com/openai/deployments/'
-               f'{model}/chat/completions?api-version=2023-05-15')
-        self.translator.endpoint = url
-        result = self.translator.translate('Hello World!')
-
-        mock_request.assert_called_with(
-            url=url, data=data, headers=headers, method='POST', timeout=60.0,
-            proxy_uri=None, raw_object=True, keepalive=False)
-        self.assertIsInstance(result, GeneratorType)
-        self.assertEqual('你好世界！', ''.join(result))
-
-
 class TestClaudeTranslate(unittest.TestCase):
     def setUp(self):
         ClaudeTranslate.set_config({'api_keys': ['a', 'b', 'c']})
@@ -1196,7 +772,7 @@ class TestClaudeTranslate(unittest.TestCase):
         self.assertIsInstance(self.translator, Base)
         self.assertIsInstance(self.translator, GenAI)
 
-    @patch(module_name + '.anthropic.EbookTranslator')
+    @patch(module_name + '.anthropic.NovelTranslatorPlugin')
     @patch(module_name + '.base.request')
     def test_translate(self, mock_request, mock_et):
         model = 'claude-3-5-sonnet-20241022'
@@ -1212,19 +788,19 @@ class TestClaudeTranslate(unittest.TestCase):
             )
         data = json.dumps({
             'stream': False,
-            'max_tokens': 4096,
+            'max_tokens': 8192,
             'model': model,
             'top_k': 1,
             'system': prompt,
             'messages': [{'role': 'user', 'content': 'Hello World!'}],
-            'temperature': 1.0
+            'temperature': 0.2
             })
         mock_et.__version__ = '1.0.0'
         headers = {
             'Content-Type': 'application/json',
             'anthropic-version': '2023-06-01',
             'x-api-key': 'a',
-            'User-Agent': 'Ebook-Translator/1.0.0'}
+            'User-Agent': 'Novel-Translator/1.0.0'}
 
         data_sample = """
 {
@@ -1258,7 +834,7 @@ class TestClaudeTranslate(unittest.TestCase):
             proxy_uri=None, raw_object=False, keepalive=False)
         self.assertEqual('你好世界！', result)
 
-    @patch(module_name + '.anthropic.EbookTranslator')
+    @patch(module_name + '.anthropic.NovelTranslatorPlugin')
     @patch(module_name + '.base.request')
     def test_translate_stream(self, mock_request, mock_et):
         model = 'claude-3-5-sonnet-20241022'
@@ -1273,19 +849,19 @@ class TestClaudeTranslate(unittest.TestCase):
             'part of the content, even if it seems unimportant. ')
         data = json.dumps({
             'stream': True,
-            'max_tokens': 4096,
+            'max_tokens': 8192,
             'model': model,
             'top_k': 1,
             'system': prompt,
             'messages': [{'role': 'user', 'content': 'Hello World!'}],
-            'temperature': 1.0
+            'temperature': 0.2
             })
         mock_et.__version__ = '1.0.0'
         headers = {
             'Content-Type': 'application/json',
             'anthropic-version': '2023-06-01',
             'x-api-key': 'a',
-            'User-Agent': 'Ebook-Translator/1.0.0'}
+            'User-Agent': 'Novel-Translator/1.0.0'}
 
         data_sample = """
 event: message_start
@@ -1322,7 +898,11 @@ event: message_stop
 data: {"type":"message_stop"}
 """
         mock_response = Mock()
-        mock_response.readline.side_effect = data_sample.encode().splitlines()
+        # With the line endings kept, as readline() hands them over: a
+        # blank line of the stream is b'\n', and b'' means the body is
+        # over.
+        mock_response.readline.side_effect = \
+            data_sample.encode().splitlines(keepends=True)
         mock_request.return_value = mock_response
         url = 'https://api.anthropic.com/v1/messages'
         self.translator.endpoint = url
@@ -1336,155 +916,240 @@ data: {"type":"message_stop"}
         self.assertEqual('你好世界！', ''.join(result))
 
 
-class TestFunction(unittest.TestCase):
-    def test_create_engine_template(self):
-        expect = """{
-    "name": "New Engine",
-    "languages": {
-        "source": {
-            "Source Language": "code"
-        },
-        "target": {
-            "Target Language": "code"
-        }
-    },
-    "request": {
-        "url": "https://example.api",
-        "method": "POST",
-        "headers": {
-            "Content-Type": "application/json"
-        },
-        "data": {
-            "source": "<source>",
-            "target": "<target>",
-            "text": "<text>"
-        }
-    },
-    "response": "response"
-}"""
-
-        self.assertEqual(expect, create_engine_template('New Engine'))
-
-    def test_load_engine_data(self):
-        self.assertEqual(
-            (False, 'Engine data must be in valid JSON format.'),
-            load_engine_data('<fake data>'))
-        self.assertEqual(
-            (False, 'Invalid engine data.'), load_engine_data('""'))
-        self.assertEqual(
-            (False, 'Engine name is required.'), load_engine_data('{}'))
-        self.assertEqual(
-            (False, 'Engine name must be different from builtin engine name.'),
-            load_engine_data('{"name":"Google(Free)"}'))
-        self.assertEqual(
-            (False, 'Language codes are required.'),
-            load_engine_data('{"name":"Test"}'))
-        self.assertEqual(
-            (False, 'Language codes are required.'),
-            load_engine_data('{"name":"Test","languages":{}}'))
-        self.assertEqual(
-            (False, 'Source and target must be added in pair.'),
-            load_engine_data('{"name":"Test","languages":{"source":{}}}'))
-        self.assertEqual(
-            (False, 'Source and target must be added in pair.'),
-            load_engine_data('{"name":"Test","languages":{"target":{}}}'))
-        self.assertEqual(
-            (False, 'Request information is required.'),
-            load_engine_data('{"name":"Test","languages":{"English":"EN"}}'))
-        self.assertEqual(
-            (False, 'API URL is required.'), load_engine_data(
-                '{"name":"Test","languages":{"English":"EN"},'
-                '"request":{"test":null}}'))
-        self.assertEqual(
-            (False, 'Placeholder <text> is required.'), load_engine_data(
-                '{"name":"Test","languages":{"English":"EN"},'
-                '"request":{"url":"https://test.api","data":{}}}'))
-        self.assertEqual(
-            (False, 'Request headers must be an JSON object.'),
-            load_engine_data(
-                '{"name":"Test","languages":{"English":"EN"},'
-                '"request":{"url":"https://test.api","data":"<text>",'
-                '"headers":"abc"}}'))
-        self.assertEqual(
-            (False, 'A appropriate Content-Type in headers is required.'),
-            load_engine_data(
-                '{"name":"Test","languages":{"English":"EN"},'
-                '"request":{"url":"https://test.api","data":"<text>"}}'))
-        self.assertEqual(
-            (False, 'Expression to parse response is required.'),
-            load_engine_data(
-                '{"name":"Test","languages":{"English":"EN"},'
-                '"request":{"url":"https://test.api","data":"<text>",'
-                '"headers":{"Content-Type":"application/anything"}}}'))
-        json_data = (
-            '{"name":"Test","languages":{"English":"EN"},'
-            '"request":{"url":"https://test.api","data":{"test":"<text>"},'
-            '"headers":{"Content-Type":"application/anything"}},'
-            '"response":"response"}')
-        self.assertEqual(
-            (True, json.loads(json_data)), load_engine_data(json_data))
-
-
-class TestCustom(unittest.TestCase):
+class TestClaudeReplyLimit(unittest.TestCase):
     def setUp(self):
-        engine_data = """{
-    "name": "New Engine",
-    "languages": {
-        "source": {
-            "English": "en"
-        },
-        "target": {
-            "Chinese": "zh"
-        }
-    },
-    "request": {
-        "url": "https://example.api",
-        "method": "POST",
-        "headers": {
-            "Content-Type": "application/json"
-        },
-        "data": {
-            "source": "<source>",
-            "target": "<target>",
-            "text": "<text>"
-        }
-    },
-    "response": "response['text']"
-}"""
+        ClaudeTranslate.set_config({'api_keys': ['a']})
+        self.translator = ClaudeTranslate()
 
-        engine_data = json.loads(engine_data)
-        CustomTranslate.set_engine_data(engine_data)
-
-    @patch(module_name + '.base.request')
-    def test_translate(self, mock_request):
-        translator = CustomTranslate()
-        translator.set_source_lang('English')
-        translator.set_target_lang('Chinese')
-        # JSON response
-        mock_request.return_value = '{"text": "你好世界"}'
-        self.assertEqual('你好世界', translator.translate('Hello "World"'))
-        mock_request.assert_called_with(
-            url='https://example.api', data=b'{"source": "en", "target": "zh",'
-            b' "text": "Hello \\"World\\""}',
-            headers={'Content-Type': 'application/json'}, method='POST',
-            timeout=10.0, proxy_uri=None, raw_object=False,
-            keepalive=False)
-        # XML response
-        translator.response = 'response.text'
-        mock_request.return_value = '<test>你好世界</test>'
-        self.assertEqual('你好世界', translator.translate('Hello World'))
-        # Plain response
-        translator.response = 'response'
-        mock_request.return_value = '你好世界'
-        self.assertEqual('你好世界', translator.translate('Hello World'))
-
-    @patch(module_name + '.base.request')
-    def test_translate_urlencoded(self, mock_request):
-        translator = CustomTranslate()
-        # Mock content type: application/x-www-form-urlencoded
-        del translator.request['headers']
-        translator.set_source_lang('English')
-        translator.set_target_lang('Chinese')
-        mock_request.return_value = '{"text": "\\"你好\\"\\n世界"}'
+    def test_default_follows_the_model(self):
         self.assertEqual(
-            '\"你好\"\n世界', translator.translate('\"Hello\"\nWorld'))
+            8192, ClaudeTranslate.default_reply_limit('claude-3-5-haiku'))
+        self.assertEqual(
+            64000, ClaudeTranslate.default_reply_limit('claude-3-7-sonnet'))
+        self.assertEqual(
+            32000, ClaudeTranslate.default_reply_limit('claude-sonnet-4-5'))
+        self.assertEqual(32000, ClaudeTranslate.default_reply_limit(None))
+
+    def test_setting_overrides_the_default(self):
+        ClaudeTranslate.set_config({'api_keys': ['a'], 'max_tokens': 2048})
+        translator = ClaudeTranslate()
+        translator.model = 'claude-sonnet-4-5'
+        translator.set_source_lang('English')
+        translator.set_target_lang('Italian')
+        self.assertEqual(2048, translator.reply_limit())
+        self.assertEqual(2048, translator.model_max_output_tokens)
+        self.assertEqual(
+            2048, json.loads(translator.get_body('x'))['max_tokens'])
+
+    def test_pipeline_can_lower_it_for_one_call(self):
+        # What lib/novel.py does around a summary call.
+        self.translator.model = 'claude-sonnet-4-5'
+        self.translator.set_source_lang('English')
+        self.translator.set_target_lang('Italian')
+        self.translator.max_tokens = 4000
+        self.assertEqual(
+            4000, json.loads(self.translator.get_body('x'))['max_tokens'])
+        self.translator.max_tokens = 0
+        self.assertEqual(
+            32000, json.loads(self.translator.get_body('x'))['max_tokens'])
+
+
+class TestClaudeStreamParsing(unittest.TestCase):
+    def setUp(self):
+        ClaudeTranslate.set_config({'api_keys': ['a']})
+        self.translator = ClaudeTranslate()
+
+    def _stream(self, lines):
+        response = Mock()
+        response.readline.side_effect = list(lines)
+        return self.translator._parse_stream(response)
+
+    def test_stream_ends_without_message_stop(self):
+        # A provider that just closes the body: readline hands back b''
+        # from then on, which used to be read forever.
+        chunks = self._stream([
+            b'data: {"type":"content_block_delta","delta":{"text":"ciao"}}',
+            b'', b'', b''])
+        self.assertEqual('ciao', ''.join(chunks))
+
+    def test_incomplete_read_ends_the_stream(self):
+        chunks = self._stream([
+            b'data: {"type":"content_block_delta","delta":{"text":"ciao"}}',
+            IncompleteRead(b'')])
+        self.assertEqual('ciao', ''.join(chunks))
+
+    def test_payload_containing_the_prefix_survives(self):
+        chunks = self._stream([
+            b'data: {"type":"content_block_delta",'
+            b'"delta":{"text":"the data: point"}}',
+            b'data: {"type":"message_stop"}'])
+        self.assertEqual('the data: point', ''.join(chunks))
+
+    def test_prefix_without_a_space(self):
+        chunks = self._stream([
+            b'data:{"type":"content_block_delta","delta":{"text":"x"}}',
+            b'data:{"type":"message_stop"}'])
+        self.assertEqual('x', ''.join(chunks))
+
+
+class TestOpenAIProviders(unittest.TestCase):
+    """One engine, many servers: the preset fills in what differs."""
+
+    def engine(self, **preferences):
+        preferences.setdefault('api_keys', ['k'])
+        ChatgptTranslate.set_config(preferences)
+        translator = ChatgptTranslate()
+        translator.set_source_lang('English')
+        translator.set_target_lang('Italian')
+        return translator
+
+    def test_openai_is_the_default(self):
+        translator = self.engine()
+        self.assertEqual('openai', translator.provider)
+        self.assertEqual(
+            'https://api.openai.com/v1/chat/completions', translator.endpoint)
+        self.assertEqual('gpt-4o', translator.model)
+        self.assertEqual(
+            'Bearer k', translator.get_headers()['Authorization'])
+
+    def test_preset_fills_endpoint_model_and_temperature(self):
+        translator = self.engine(provider='deepseek')
+        self.assertEqual(
+            'https://api.deepseek.com/v1/chat/completions',
+            translator.endpoint)
+        self.assertEqual('deepseek-chat', translator.model)
+        self.assertEqual(1.3, translator.temperature)
+        self.assertEqual(
+            'https://api.deepseek.com/v1/models',
+            translator.get_model_endpoint())
+
+    def test_overrides_win_over_the_preset(self):
+        translator = self.engine(
+            provider='groq', endpoint='https://proxy.local/v1/chat/completions',
+            model='mixtral', temperature=0.2)
+        self.assertEqual(
+            'https://proxy.local/v1/chat/completions', translator.endpoint)
+        self.assertEqual('mixtral', translator.model)
+        self.assertEqual(0.2, translator.temperature)
+
+    def test_unknown_provider_falls_back_to_openai(self):
+        translator = self.engine(provider='nonsense')
+        self.assertEqual(
+            'https://api.openai.com/v1/chat/completions', translator.endpoint)
+
+    def test_local_server_takes_no_key(self):
+        translator = self.engine(provider='ollama', api_keys=[])
+        self.assertFalse(ChatgptTranslate.needs_api_key({'provider': 'ollama'}))
+        self.assertIsNone(translator.api_key)
+        self.assertNotIn('Authorization', translator.get_headers())
+        self.assertEqual('http://localhost:11434/v1/chat/completions',
+                         translator.endpoint)
+
+    def test_azure_names_the_deployment_in_the_url(self):
+        translator = self.engine(
+            provider='azure',
+            endpoint='https://r.openai.azure.com/openai/deployments/d/'
+                     'chat/completions?api-version=2024-10-21')
+        headers = translator.get_headers()
+        self.assertEqual('k', headers['api-key'])
+        self.assertNotIn('Authorization', headers)
+        self.assertNotIn('model', json.loads(translator.get_body('x')))
+        self.assertNotIn(
+            'model', json.loads(translator.get_body_for_structured('x')))
+        # Nothing to list: the listing is skipped, not requested.
+        with patch(module_name + '.openai.request') as mock_request:
+            self.assertEqual([], translator.get_models())
+            mock_request.assert_not_called()
+
+    def test_key_hint_follows_the_preset(self):
+        self.assertEqual('gsk_...', ChatgptTranslate.key_hint(
+            {'provider': 'groq'}))
+        self.assertEqual(
+            ChatgptTranslate.api_key_hint,
+            ChatgptTranslate.key_hint({'provider': 'mistral'}))
+
+    def test_openrouter_carries_no_presets(self):
+        OpenRouterTranslate.set_config({
+            'api_keys': ['k'], 'provider': 'azure',
+            # Left behind by an older configuration: not a setting any
+            # more, so not read.
+            'endpoint': 'https://elsewhere.example/v1/chat/completions'})
+        translator = OpenRouterTranslate()
+        self.assertIsNone(OpenRouterTranslate.preset_for())
+        self.assertEqual(
+            'https://openrouter.ai/api/v1/chat/completions',
+            translator.endpoint)
+        self.assertTrue(OpenRouterTranslate.needs_api_key())
+        self.assertEqual(
+            'Bearer k', translator.get_headers()['Authorization'])
+
+
+class TestOpenRouterRelax(unittest.TestCase):
+    def test_relaxing_drops_require_parameters_once(self):
+        OpenRouterTranslate.set_config({'api_keys': ['k']})
+        translator = OpenRouterTranslate()
+        translator.set_source_lang('English')
+        translator.set_target_lang('Italian')
+        self.assertTrue(translator.relax_parameters())
+        self.assertFalse(translator.relax_parameters())
+        body = json.loads(translator.get_body('x'))
+        self.assertNotIn('require_parameters', body.get('provider', {}))
+
+
+class TestModelEndpoint(unittest.TestCase):
+    """The listing URL keeps the path prefix of the chat endpoint."""
+
+    def _endpoint(self, chat):
+        ChatgptTranslate.set_config({'api_keys': ['a'], 'endpoint': chat})
+        return ChatgptTranslate().get_model_endpoint()
+
+    def test_openai(self):
+        self.assertEqual(
+            'https://api.openai.com/v1/models',
+            self._endpoint('https://api.openai.com/v1/chat/completions'))
+
+    def test_gateway_with_a_path_prefix(self):
+        self.assertEqual(
+            'https://api.groq.com/openai/v1/models',
+            self._endpoint('https://api.groq.com/openai/v1/chat/completions'))
+        self.assertEqual(
+            'http://box/ollama/v1/models',
+            self._endpoint('http://box/ollama/v1/chat/completions/'))
+
+    def test_endpoint_without_the_standard_suffix(self):
+        self.assertEqual(
+            'https://example.org/v1/models',
+            self._endpoint('https://example.org/custom'))
+
+
+class TestOpenRouterHeaders(unittest.TestCase):
+    def test_non_latin1_characters_are_replaced(self):
+        OpenRouterTranslate.set_config({
+            'api_keys': ['a'], 'app_title': '翻訳 Novel',
+            'extra_headers': '{"X-Note": "caf\u00e9 \u65e5"}'})
+        headers = OpenRouterTranslate().get_headers()
+        for value in headers.values():
+            value.encode('latin-1')  # must not raise
+        self.assertEqual('?? Novel', headers['X-Title'])
+        self.assertEqual('caf\u00e9 ?', headers['X-Note'])
+
+
+class TestKeyErrorMatching(unittest.TestCase):
+    @patch(module_name + '.base.request')
+    def test_a_traceback_line_number_is_not_an_auth_error(
+            self, mock_request):
+        # '401' used to be looked for in the traceback as well, where a
+        # "line 401" of any frame passed for an authentication failure.
+        ChatgptTranslate.set_config({'api_keys': ['a', 'b']})
+        translator = ChatgptTranslate()
+        translator.stream = False
+        translator.set_source_lang('English')
+        translator.set_target_lang('Italian')
+        mock_request.side_effect = Exception('connection reset')
+        with patch(module_name + '.base.traceback_error',
+                   return_value='File "x.py", line 401, in translate'):
+            with self.assertRaises(Exception):
+                translator.translate('x')
+        # One request, no key swapped: the spare key is still there.
+        self.assertEqual(1, mock_request.call_count)
+        self.assertEqual(['b'], translator.api_keys)

@@ -12,7 +12,7 @@ from ...lib.utils import (
     request, keepalive_socket, _KeepAliveSocket, original_socket)
 
 
-module_name = 'calibre_plugins.ebook_translator_novel.lib.utils'
+module_name = 'calibre_plugins.novel_translator.lib.utils'
 
 
 class TestUtils(unittest.TestCase):

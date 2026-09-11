@@ -18,6 +18,7 @@ from calibre.utils.logging import Log  # type: ignore
 
 from ..vendor import socks
 from ..vendor.cssselect import GenericTranslator, SelectorError
+from .exception import HTTPRequestError
 
 
 ns = {'x': 'http://www.w3.org/1999/xhtml'}
@@ -289,7 +290,17 @@ def request(
             return response
         return response.read().decode('utf-8').strip()
     except HTTPError as e:
-        raise Exception(traceback_error() + '\n\n' + e.read().decode('utf-8'))
+        try:
+            body = e.read().decode('utf-8', 'replace')
+        except Exception:
+            body = ''
+        retry_after = None
+        try:
+            retry_after = float(e.hdrs.get('Retry-After'))
+        except (AttributeError, TypeError, ValueError):
+            pass
+        raise HTTPRequestError(
+            getattr(e, 'code', 0), getattr(e, 'msg', ''), body, retry_after)
 
 
 @contextmanager

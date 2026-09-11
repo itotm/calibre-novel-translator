@@ -5,7 +5,7 @@ from http.client import IncompleteRead
 
 from mechanize._response import response_seek_wrapper as Response
 
-from .. import EbookTranslator
+from .. import NovelTranslatorPlugin
 from ..lib.utils import request
 
 from .genai import GenAI
@@ -43,10 +43,20 @@ class ClaudeTranslate(GenAI):
 
     samplings = ['temperature', 'top_p']
     sampling = 'temperature'
-    temperature = 1.0
+    # Low on purpose: translation wants fidelity, not variety.
+    temperature = 0.2
     top_p = 1.0
     top_k = 1
     stream = True
+
+    # The longest reply a request may carry. The Messages API insists
+    # on the figure and stops the reply dead at it, so a value below
+    # what a chunk needs comes back as a translation cut off half-way
+    # -- which is what a hardcoded 4096 did to every chunk Novel Mode
+    # sent. 0 sizes it for the model (see ``reply_limit``); the novel
+    # pipeline reads that figure to size its chunks, and lowers it for
+    # the summary and glossary calls.
+    max_tokens = 0
 
     # event types for streaming are listed here:
     # https://docs.anthropic.com/en/api/messages-streaming
@@ -83,6 +93,40 @@ class ClaudeTranslate(GenAI):
         self.top_k = self.config.get('top_k', self.top_k)
         self.stream = self.config.get('stream', self.stream)
         self.model = self.config.get('model', self.model)
+        try:
+            self.max_tokens = int(
+                self.config.get('max_tokens', self.max_tokens) or 0)
+        except (TypeError, ValueError):
+            self.max_tokens = 0
+
+    @staticmethod
+    def default_reply_limit(model):
+        """The most a model can be asked to write, as Anthropic documents
+        it: 8192 tokens for the Claude 3 generation, 64k for Claude 3.7,
+        32k for everything since. Asking for more is a 400 error, so the
+        figures err on the low side where a model is not recognised."""
+        model = (model or '').lower()
+        if model.startswith('claude-3-7'):
+            return 64000
+        if model.startswith('claude-3'):
+            return 8192
+        return 32000
+
+    def reply_limit(self):
+        return self.max_tokens or self.default_reply_limit(self.model)
+
+    @property
+    def model_max_output_tokens(self):
+        """What the novel pipeline sizes its chunks against. Anthropic's
+        model listing carries no limits, so the figure is the one the
+        request itself will state."""
+        return self.reply_limit()
+
+    @model_max_output_tokens.setter
+    def model_max_output_tokens(self, value):
+        # Assigned by nobody today; kept so the attribute stays writable
+        # like it is on every other GenAI engine.
+        self.max_tokens = int(value or 0)
 
     def _get_prompt(self):
         prompt = self.prompt.replace('<tlang>', self.target_lang)
@@ -95,15 +139,13 @@ class ClaudeTranslate(GenAI):
         if prompt_extension is not None:
             prompt += ' ' + prompt_extension
 
-        # Recommend setting temperature to 0.5 for retaining the placeholder.
-        if self.merge_enabled:
-            prompt += (' Ensure that placeholders matching the pattern '
-                       '{{id_\\d+}} in the content are retained.')
         return prompt
 
     def get_models(self):
         model_endpoint = urljoin(self.endpoint, 'models')
-        response = request(model_endpoint, headers=self.get_headers())
+        response = request(
+            model_endpoint, headers=self.get_headers(),
+            proxy_uri=self.proxy_uri)
         return [i['id'] for i in json.loads(response)['data']]
 
     def get_headers(self):
@@ -111,7 +153,7 @@ class ClaudeTranslate(GenAI):
             'Content-Type': 'application/json',
             'anthropic-version': self.api_version,
             'x-api-key': self.api_key,
-            'User-Agent': 'Ebook-Translator/%s' % EbookTranslator.__version__,
+            'User-Agent': 'Novel-Translator/%s' % NovelTranslatorPlugin.__version__,
         }
 
         # NOTE: Claude 3.7 Sonnet can produce substantially longer responses
@@ -148,7 +190,7 @@ class ClaudeTranslate(GenAI):
     def get_body(self, text):
         body = {
             'stream': self.stream,
-            'max_tokens': 4096,
+            'max_tokens': self.reply_limit(),
             'model': self.model,
             'top_k': self.top_k,
             'system': self.get_system_prompt(),
@@ -185,19 +227,36 @@ class ClaudeTranslate(GenAI):
         return ''.join(texts)
 
     def _parse_stream(self, data: Response) -> Generator:
+        """Yield the text of a server-sent event stream.
+
+        Same two rules as the ChatGPT engine: an exhausted body ends the
+        stream instead of being read forever (``readline`` hands back
+        ``b''`` from then on, and a provider that closes without
+        ``message_stop`` used to leave this loop spinning), and the
+        payload is sliced after the ``data:`` prefix rather than split
+        on ``'data: '``, which can occur inside the payload too.
+        """
         while True:
             try:
-                line = data.readline().decode('utf-8').strip()
+                raw = data.readline()
             except IncompleteRead:
-                continue
+                # The body ended before its declared length: whatever
+                # was yielded so far is all there is.
+                break
             except Exception as e:
                 raise Exception(
                     _('Can not parse returned response. Raw data: {}')
                     .format(str(e)))
+            if not raw:
+                break  # End of the stream.
+            line = raw.decode('utf-8').strip()
 
             if line.startswith('data:'):
-                chunk: dict = json.loads(line.split('data: ')[1])
-                event_type: str = chunk['type']
+                try:
+                    chunk: dict = json.loads(line[len('data:'):].strip())
+                except json.JSONDecodeError:
+                    continue
+                event_type: str = chunk.get('type', '')
 
                 if event_type not in self.valid_event_types:
                     raise Exception(
@@ -219,13 +278,3 @@ class ClaudeTranslate(GenAI):
                     raise Exception(
                         _('Error received: {}')
                         .format(chunk['error']['message']))
-
-
-class ClaudeBatchTranslate:
-    """TODO: use the message batches api (currently only the streaming api can
-    be used). The message batches api allows sending any number of batches of
-    up to 100,000 messages per batch. Batches are processed asynchronously with
-    results returned as soon as the batch is complete and cost 50% less than
-    standard API calls (more info here:
-    https://docs.anthropic.com/en/docs/build-with-claude/message-batches)
-    """

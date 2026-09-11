@@ -1,21 +1,10 @@
 from .base import Base
-from .google import (
-    GoogleFreeTranslateNew, GoogleFreeTranslateHtml, GoogleFreeTranslate,
-    GoogleBasicTranslate, GoogleBasicTranslateADC, GoogleAdvancedTranslate,
-    GeminiTranslate)
+from .openrouter import OpenRouterTranslate
 from .openai import ChatgptTranslate
 from .anthropic import ClaudeTranslate
-from .deepl import DeeplTranslate, DeeplProTranslate, DeeplFreeTranslate
-from .youdao import YoudaoTranslate
-from .baidu import BaiduTranslate
-from .microsoft import MicrosoftEdgeTranslate, AzureChatgptTranslate
-from .deepseek import DeepseekTranslate
-from .openrouter import OpenRouterTranslate
+from .gemini import GeminiTranslate
 
+# In the order the setting dialog lists them. OpenRouter first: it is
+# the default, and the one the plugin is built around.
 builtin_engines: tuple[type[Base], ...] = (
-    GoogleFreeTranslateNew, GoogleFreeTranslateHtml, GoogleFreeTranslate,
-    GoogleBasicTranslate, GoogleBasicTranslateADC, GoogleAdvancedTranslate,
-    ChatgptTranslate, AzureChatgptTranslate, GeminiTranslate, ClaudeTranslate,
-    DeepseekTranslate, OpenRouterTranslate, DeeplTranslate,
-    DeeplProTranslate, DeeplFreeTranslate,
-    MicrosoftEdgeTranslate, YoudaoTranslate, BaiduTranslate)
+    OpenRouterTranslate, ChatgptTranslate, ClaudeTranslate, GeminiTranslate)

@@ -12,7 +12,7 @@ assignees: ''
 * Operating System: **Windows/macOS/Linux distro**
 * Calibre Version: **x.x.x**
 * Plugin Version: **x.x.x**
-* Plugin Installation: **From Calibre/Rolling Release**
+* Engine and model: **OpenRouter / ...**
 
 **Describe the bug**
 A clear and concise description of what the bug is.

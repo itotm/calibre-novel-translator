@@ -17,7 +17,7 @@ def get_test_suite(filenames=[]):
         for path in Path('tests').rglob(pattern):
             module_name = '.'.join(path.with_suffix('').parts)
             test_module = import_module(
-                f'calibre_plugins.ebook_translator_novel.{module_name}')
+                f'calibre_plugins.novel_translator.{module_name}')
             suite.addTests(
                 unittest.defaultTestLoader.loadTestsFromModule(test_module))
     return suite
@@ -27,7 +27,7 @@ if __name__ == '__main__':
     filenames, methods = [], []
     for arg in sys.argv[1:]:
         if Path(arg).suffix == '.py':
-            filenames.append(arg)
+            filenames.append(Path(arg).name)
         else:
             methods.append(arg)
     patterns = [f'*{m}' for m in methods] if len(methods) > 0 else None

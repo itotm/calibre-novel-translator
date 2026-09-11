@@ -1,943 +1,1899 @@
-# SOME DESCRIPTIVE TITLE.
-# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
-# This file is distributed under the same license as the Ebook Translator Calibre Plugin package.
-# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+# ja translation of Novel Translator.
+# This file is distributed under the same license as the plugin.
 #
-#, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: Ebook Translator Calibre Plugin\n"
-"Report-Msgid-Bugs-To: bookfere@gmail.com\n"
-"POT-Creation-Date: 2025-08-22 02:34+0800\n"
+"Project-Id-Version: Novel Translator\n"
+"Report-Msgid-Bugs-To: https://github.com/itotm/calibre-plugin-ebook-translator/issues\n"
+"POT-Creation-Date: 2026-09-11 13:34+0000\n"
 "PO-Revision-Date: 2025-07-29 15:30+0900\n"
-"Last-Translator: Gemini (AI)\n"
-"Language-Team: Japanese\n"
 "Language: ja\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
-"X-Generator: Poedit 3.4.4\n"
 
-msgid "Ebook Translator"
-msgstr "電子書籍翻訳"
+#: __init__.py:29
+msgid "Novel Translator"
+msgstr ""
 
+#: __init__.py:36
 msgid ""
-"A Calibre plugin to translate ebook into a specified language (optionally "
-"keeping the original content)."
-msgstr ""
-"電子書籍を指定した言語に翻訳するCalibreプラグインです（オプションで原文の保持"
-"も可能）。"
-
-msgid "Extracting ebook content..."
-msgstr "電子書籍のコンテンツを抽出中..."
-
-msgid "Failed to extract ebook content"
-msgstr "電子書籍のコンテンツの抽出に失敗しました"
-
-msgid "Filtering ebook content..."
-msgstr "電子書籍のコンテンツをフィルタリング中..."
-
-msgid "Preparing user interface..."
-msgstr "ユーザーインターフェースを準備中..."
-
-msgid "&Start"
-msgstr "開始(&S)"
-
-msgid "Input Format"
-msgstr "入力形式"
-
-msgid "Output Format"
-msgstr "出力形式"
-
-msgid "Source Language"
-msgstr "翻訳元の言語"
-
-msgid "Target Language"
-msgstr "翻訳先の言語"
-
-msgid "Encoding"
-msgstr "エンコーディング"
-
-msgid "Target Directionality"
-msgstr "翻訳先の書字方向"
-
-msgid "Auto"
-msgstr "自動"
-
-msgid "Left to Right"
-msgstr "左から右へ"
-
-msgid "Right to Left"
-msgstr "右から左へ"
-
-msgid "Failed to translate {} paragraph(s), Would you like to retry?"
-msgstr "{}個の段落の翻訳に失敗しました。再試行しますか？"
-
-msgid "Translation completed."
-msgstr "翻訳が完了しました。"
-
-msgid "There is no content that needs to be translated."
-msgstr "翻訳が必要なコンテンツはありません。"
-
-msgid "Loading ebook data, please wait..."
-msgstr "電子書籍データを読み込み中です。しばらくお待ちください..."
-
-msgid "Review"
-msgstr "レビュー"
-
-msgid "Log"
-msgstr "ログ"
-
-msgid "Errors"
-msgstr "エラー"
-
-msgid "All"
-msgstr "すべて"
-
-msgid "Non-aligned"
-msgstr "不一致"
-
-msgid "Translated"
-msgstr "翻訳済み"
-
-msgid "Untranslated"
-msgstr "未翻訳"
-
-msgid "Original Text"
-msgstr "原文"
-
-msgid "Original Code"
-msgstr "原文のコード"
-
-msgid "Translation Text"
-msgstr "訳文"
-
-msgid "keyword for filtering"
-msgstr "フィルタリング用のキーワード"
-
-msgid "Reset"
-msgstr "リセット"
-
-msgid "Total items: {}"
-msgstr "合計項目数: {}"
-
-msgid "Character count: {}"
-msgstr "文字数: {}"
-
-msgid "Non-aligned items: {}"
-msgstr "不一致の項目: {}"
-
-msgid "Delete"
-msgstr "削除"
-
-msgid "Batch Translation"
-msgstr "一括翻訳"
-
-msgid "Beta"
-msgstr "ベータ版"
-
-msgid "Translate All"
-msgstr "すべて翻訳"
-
-msgid "Translate Selected"
-msgstr "選択項目を翻訳"
-
-msgid "Stop"
-msgstr "停止"
-
-msgid "Are you sure you want to stop the translation progress?"
-msgstr "翻訳プロセスを停止してもよろしいですか？"
-
-msgid "Stopping..."
-msgstr "停止中..."
-
-msgid "Cache Status"
-msgstr "キャッシュの状態"
-
-msgid "Disabled"
-msgstr "無効"
-
-msgid "Enabled"
-msgstr "有効"
-
-msgid "Translation Engine"
-msgstr "翻訳エンジン"
-
-msgid "Custom Ebook Title"
-msgstr "カスタム電子書籍タイトル"
-
-msgid "By default, title metadata will be translated."
-msgstr "デフォルトでは、タイトルのメタデータが翻訳されます。"
-
-msgid "Output Ebook"
-msgstr "電子書籍を出力"
-
-msgid "Output"
-msgstr "出力"
-
-msgid "The ebook has not been translated yet."
-msgstr "この電子書籍はまだ翻訳されていません。"
-
-msgid ""
-"The number of lines in some translation units differs between the original "
-"text and the translated text. Are you sure you want to output without "
-"checking alignment?"
-msgstr ""
-"一部の翻訳単位で、原文と訳文の行数が異なります。一致を確認せずに出力してもよ"
-"ろしいですか？"
-
-msgid "No translation yet"
-msgstr "まだ翻訳がありません"
-
-msgid "&Save"
-msgstr "保存(&S)"
-
-msgid "Word Wrap"
+"Translate a novel with a language model, chapter by chapter, keeping a running summary and a glossary of names so the whole book reads consistently. OpenRouter, OpenAI-compatible providers, Claude and Gemini."
 msgstr ""
 
-msgid "Your changes have been saved."
-msgstr "変更は保存されました。"
-
-msgid "Translation log"
-msgstr "翻訳ログ"
-
-msgid "Error log"
-msgstr "エラーログ"
-
-msgid "Are you sure you want to translate all {:n} paragraphs?"
-msgstr "{:n}個の段落すべてを翻訳してもよろしいですか？"
-
-msgid "Are you sure you want to cancel the preparation progress?"
-msgstr "準備プロセスをキャンセルしてもよろしいですか？"
-
-msgid "Are you sure you want to cancel the translation progress?"
-msgstr "翻訳プロセスをキャンセルしてもよろしいですか？"
-
+#: cache.py:210
 msgid "Title"
 msgstr "タイトル"
 
-msgid "Default"
-msgstr "デフォルト"
-
-msgid "Translate"
-msgstr "翻訳"
-
-msgid "Unknown"
-msgstr "不明"
-
-msgid "The specified path does not exist."
-msgstr "指定されたパスが存在しません。"
-
-msgid "Choose a path to store cache files."
-msgstr "キャッシュファイルを保存するパスを選択してください。"
-
-msgid "Move"
-msgstr "移動"
-
-msgid "Reveal"
-msgstr "表示"
-
-msgid "Cache Path"
-msgstr "キャッシュパス"
-
-msgid "Clear All"
-msgstr "すべてクリア"
-
-msgid ""
-"All cache(s) will be moved to the default path. Are you sure to proceed?"
-msgstr ""
-"すべてのキャッシュがデフォルトパスに移動されます。続行してもよろしいですか？"
-
-msgid "All cache(s) will be moved to the new path. Are you sure to proceed?"
-msgstr ""
-"すべてのキャッシュが新しいパスに移動されます。続行してもよろしいですか？"
-
-msgid "Please choose an empty folder."
-msgstr "空のフォルダを選択してください。"
-
-msgid "Are you sure you want to clear all caches?"
-msgstr "すべてのキャッシュをクリアしてもよろしいですか？"
-
-msgid "No cache exists."
-msgstr "キャッシュは存在しません。"
-
-msgid "Total: {}"
-msgstr "合計: {}"
-
-msgid "Are you sure you want to delete the selected cache(s)?"
-msgstr "選択したキャッシュを削除してもよろしいですか？"
-
+#: cache.py:210 novel.py:682 setting.py:118
 msgid "Engine"
 msgstr "エンジン"
 
+#: cache.py:210
 msgid "Language"
 msgstr "言語"
 
-msgid "Merge Length"
-msgstr "統合する長さ"
-
-msgid "Filename"
-msgstr "ファイル名"
-
-msgid "Last Modification Time"
-msgstr "最終更新日時"
-
+#: cache.py:211
 msgid "Size (MB)"
 msgstr "サイズ (MB)"
 
-msgid "processing..."
-msgstr "処理中..."
+#: cache.py:211
+msgid "Last Modification Time"
+msgstr "最終更新日時"
 
-msgid "checking..."
-msgstr "確認中..."
+#: cache.py:211
+msgid "Filename"
+msgstr "ファイル名"
 
-msgid "canceling..."
-msgstr "キャンセル中..."
+#: cache.py:72
+msgid "Choose a path to store cache files."
+msgstr "キャッシュファイルを保存するパスを選択してください。"
 
-msgid "applying..."
-msgstr "適用中..."
+#: cache.py:73
+msgid "Move"
+msgstr "移動"
 
-msgid "ChatGPT Batch Translation"
-msgstr "ChatGPT 一括翻訳"
+#: cache.py:74
+msgid "Reset"
+msgstr "リセット"
 
-msgid "Create a new batch translation"
-msgstr "新しい一括翻訳を作成"
+#: cache.py:75
+msgid "Reveal"
+msgstr "表示"
 
+#: cache.py:90
+msgid "Clear All"
+msgstr "すべてクリア"
+
+#: cache.py:92 cache.py:181
+msgid "Delete"
+msgstr "削除"
+
+#: cache.py:108
 msgid ""
-"All original content must be uploaded to OpenAI for batch translation, and "
-"you will need to wait up to 24 hours to continue the translation process.<a "
-"href=\"https://cookbook.openai.com/examples/batch_processing\">more details</"
-"a>"
-msgstr ""
-"一括翻訳のためには、すべての原文コンテンツをOpenAIにアップロードする必要があ"
-"り、翻訳プロセスを続行するには最大24時間待つ必要があります。<a "
-"href=\"https://cookbook.openai.com/examples/batch_processing\">詳細はこちら"
+"All cache(s) will be moved to the default path. Are you sure to proceed?"
+msgstr "すべてのキャッシュがデフォルトパスに移動されます。続行してもよろしいですか？"
 
-msgid "Refresh"
-msgstr "更新"
+#: cache.py:123
+msgid "All cache(s) will be moved to the new path. Are you sure to proceed?"
+msgstr "すべてのキャッシュが新しいパスに移動されます。続行してもよろしいですか？"
 
-msgid "Cancel Batch Translation"
-msgstr "一括翻訳をキャンセル"
+#: cache.py:142
+msgid "Are you sure you want to clear all caches?"
+msgstr "すべてのキャッシュをクリアしてもよろしいですか？"
 
-msgid "Apply"
-msgstr "適用"
+#: cache.py:188
+msgid "Are you sure you want to delete the selected cache(s)?"
+msgstr "選択したキャッシュを削除してもよろしいですか？"
 
-msgid "Are you sure you want to cancel the batch translation?"
-msgstr "一括翻訳をキャンセルしてもよろしいですか？"
+#: cache.py:77
+msgid "Cache Path"
+msgstr "キャッシュパス"
 
-msgid "Batch translation details"
-msgstr "一括翻訳の詳細"
+#: cache.py:129 setting.py:2276
+msgid "The specified path does not exist."
+msgstr "指定されたパスが存在しません。"
 
-msgid "Status"
-msgstr "ステータス"
+#: cache.py:132
+msgid "Please choose an empty folder."
+msgstr "空のフォルダを選択してください。"
 
-msgid "Detail"
-msgstr "詳細"
+#: cache.py:152
+msgid "No cache exists."
+msgstr "キャッシュは存在しません。"
 
+#: cache.py:157
+msgid "Total: {}"
+msgstr "合計: {}"
+
+#: components/engine.py:52
 msgid "Translating..."
 msgstr "翻訳中..."
 
+#: components/engine.py:87
 msgid "Test Translation Engine"
 msgstr "翻訳エンジンをテスト"
 
+#: components/engine.py:127 ui.py:78
+msgid "Translate"
+msgstr "翻訳"
+
+#: components/engine.py:132
 msgid "Usage: checking..."
 msgstr "使用状況: 確認中..."
 
+#: components/engine.py:143
 msgid "Usage: {}"
 msgstr "使用状況: {}"
 
-msgid "Custom Translation Engine"
-msgstr "カスタム翻訳エンジン"
-
-msgid "Add"
-msgstr "追加"
-
-msgid "Clear"
-msgstr "クリア"
-
-msgid "Restore"
-msgstr "復元"
-
-msgid "Verify"
-msgstr "検証"
-
-msgid "Valid engine data format."
-msgstr "有効なエンジンデータ形式です。"
-
-msgid "The engine name is already in use."
-msgstr "このエンジン名は既に使用されています。"
-
-msgid "The setting has been saved."
-msgstr "設定が保存されました。"
-
+#: components/footer.py:19
 msgid "Feedback"
 msgstr "フィードバック"
 
-msgid "Donate"
-msgstr "寄付"
-
+#: components/format.py:19 setting.py:204
 msgid "Ebook Specific"
 msgstr "電子書籍固有の設定"
 
-msgid "Failed translation"
-msgstr "翻訳失敗"
-
-msgid "Not selected"
-msgstr "未選択"
-
+#: components/lang.py:30 engines/base.py:92 setting.py:2328
 msgid "Auto detect"
 msgstr "自動検出"
 
-msgid "Choose a translation mode for clicking the icon button."
-msgstr "アイコンボタンをクリックした際の翻訳モードを選択してください。"
-
-msgid "Advanced Mode"
-msgstr "詳細モード"
-
-msgid ""
-"This mode provides additional options for the translation process, allowing "
-"for more control and customization."
-msgstr ""
-"このモードでは、翻訳プロセスのための追加オプションが提供され、より詳細な制御"
-"とカスタマイズが可能です。"
-
-msgid "Choose"
-msgstr "選択"
-
-msgid "Batch Mode"
-msgstr "一括モード"
-
-msgid ""
-"This mode allows users to translate multiple ebooks at once, streamlining "
-"the translation process and saving time."
-msgstr ""
-"このモードでは、複数の電子書籍を一度に翻訳でき、翻訳プロセスを効率化し時間を"
-"節約できます。"
-
-msgid "Original"
-msgstr "原文"
-
-msgid ""
-"The number of lines differs between the original text and the translated "
-"text."
-msgstr "原文と訳文でテキストの行数が異なります。"
-
-msgid "Select the whole chapter"
-msgstr "章全体を選択"
-
-msgid "Select similar paragraphs: {}=\"{}\""
-msgstr "類似の段落を選択: {}=\"{}\""
-
-msgid "Retain at least one row."
-msgstr "少なくとも1行は残してください。"
-
+#: engines/anthropic.py:248 engines/base.py:224 engines/gemini.py:175 engines/openai.py:390
 msgid "Can not parse returned response. Raw data: {}"
 msgstr "返却された応答を解析できません。生データ: {}"
 
+#: engines/anthropic.py:263
 msgid "Invalid event type received: {}"
 msgstr "無効なイベントタイプを受信しました: {}"
 
+#: engines/anthropic.py:279
 msgid "Error received: {}"
 msgstr "エラーを受信しました: {}"
 
-msgid "Baidu"
-msgstr "Baidu"
-
+#: engines/base.py:29 setting.py:365
 msgid "API Keys"
 msgstr "APIキー"
 
+#: engines/base.py:111
 msgid "A correct key format \"{}\" is required."
 msgstr "正しいキー形式 \"{}\" が必要です。"
 
-msgid "Engine data must be in valid JSON format."
-msgstr "エンジンデータは有効なJSON形式である必要があります。"
-
-msgid "Invalid engine data."
-msgstr "無効なエンジンデータです。"
-
-msgid "Engine name is required."
-msgstr "エンジン名が必要です。"
-
-msgid "Engine name must be different from builtin engine name."
-msgstr "エンジン名は組み込みのエンジン名と異なる必要があります。"
-
-msgid "Language codes are required."
-msgstr "言語コードが必要です。"
-
-msgid "Source and target must be added in pair."
-msgstr "翻訳元と翻訳先はペアで追加する必要があります。"
-
-msgid "Request information is required."
-msgstr "リクエスト情報が必要です。"
-
-msgid "API URL is required."
-msgstr "APIのURLが必要です。"
-
-msgid "Placeholder <text> is required."
-msgstr ""
-
-msgid "Request headers must be an JSON object."
-msgstr "リクエストヘッダーはJSONオブジェクトである必要があります。"
-
-msgid "A appropriate Content-Type in headers is required."
-msgstr "ヘッダーに適切なContent-Typeが必要です。"
-
-msgid "Expression to parse response is required."
-msgstr "応答を解析するための式が必要です。"
-
-msgid "Response was parsed incorrectly."
-msgstr "応答が正しく解析されませんでした。"
-
-msgid "{} total, {} used, {} left"
-msgstr "合計 {}, 使用済み {}, 残り {}"
-
+#: engines/openai.py:109
 msgid ""
-"This plugin uses Application Default Credentials (ADC) in your local "
-"environment to access your Google Translate service. To set up the ADC, "
-"follow these steps:\n"
-"1. Install the gcloud CLI by checking out its instructions {}.\n"
-"2. Run the command: gcloud auth application-default login.\n"
-"3. Sign in to your Google account and grant needed privileges."
+"Pick the provider and the endpoint, the key hint and a default model follow; any other server that speaks the OpenAI chat API works through \"Custom endpoint\". Ollama and LM Studio run on this machine and take no key."
 msgstr ""
-"このプラグインは、ローカル環境のアプリケーションのデフォルト認証情報（ADC）を"
-"使用してGoogle翻訳サービスにアクセスします。ADCを設定するには、次の手順に従っ"
-"てください:\n"
-"1. {} の指示を確認してgcloud CLIをインストールします。\n"
-"2. コマンドを実行します: gcloud auth application-default login\n"
-"3. Googleアカウントにサインインし、必要な権限を付与します。"
 
-msgid "Cannot run the command \"{}\"."
-msgstr "コマンド \"{}\" を実行できません。"
+#: engines/openai.py:359
+msgid ""
+"Can not parse returned response. Raw data: {}\n"
+"Error: {}"
+msgstr ""
 
-msgid "Cannot find the command \"{}\"."
-msgstr "コマンド \"{}\" が見つかりません。"
-
-msgid "Failed get APP key due to an invalid Token."
-msgstr "無効なトークンのため、APPキーの取得に失敗しました。"
-
-msgid "Failed get APP key due to and invalid Base64 URL."
-msgstr "無効なBase64 URLのため、APPキーの取得に失敗しました。"
-
-msgid "Youdao"
-msgstr "Youdao"
-
-msgid "Start to convert ebook format..."
-msgstr "電子書籍の形式変換を開始します..."
-
-msgid "Outputting ebook file..."
-msgstr "電子書籍ファイルを出力中..."
-
-msgid "Starting to output subtitles file..."
-msgstr "字幕ファイルの出力を開始します..."
-
-msgid "The translation of the subtitles file was completed."
-msgstr "字幕ファイルの翻訳が完了しました。"
-
-msgid "Starting to output PGN file..."
-msgstr "PGNファイルの出力を開始します..."
-
-msgid "The translation of the PGN file was completed."
-msgstr "PGNファイルの翻訳が完了しました。"
-
-msgid "[{} > {}] Translating \"{}\""
-msgstr "[{} > {}] \"{}\"を翻訳中"
-
-msgid "Translation job failed"
-msgstr "翻訳ジョブに失敗しました"
-
-msgid "completed"
-msgstr "完了"
-
-msgid "Ebook Translation Log"
-msgstr "電子書籍翻訳ログ"
-
-msgid "Translation Completed"
-msgstr "翻訳完了"
-
-msgid "The translation of \"{}\" was completed. Do you want to open the book?"
-msgstr "\"{}\" の翻訳が完了しました。本を開きますか？"
-
-msgid "Translation canceled."
-msgstr "翻訳がキャンセルされました。"
-
-msgid "Failed to retrieve data from translate engine API."
-msgstr "翻訳エンジンAPIからのデータ取得に失敗しました。"
-
-msgid "Original: {}"
-msgstr "原文: {}"
-
-msgid "Status: Failed {} times / Sleeping for {} seconds"
-msgstr "ステータス: {} 回失敗 / {} 秒間スリープ中"
-
+#: engines/openai.py:409 engines/openrouter.py:449
 msgid "Error: {}"
 msgstr "エラー: {}"
 
-msgid "Row: {}"
-msgstr "行: {}"
-
-msgid "Translating: {}/{}"
-msgstr "翻訳中: {}/{}"
-
-msgid "Translation: {}"
-msgstr "訳文: {}"
-
-msgid "Translation (Cached): {}"
-msgstr "訳文 (キャッシュ): {}"
-
-msgid "Start to translate ebook content"
-msgstr "電子書籍コンテンツの翻訳を開始"
-
-msgid "Item count: {}"
-msgstr "項目数: {}"
-
-msgid "There is no content need to translate."
-msgstr "翻訳が必要なコンテンツはありません。"
-
-msgid "Translation failed."
-msgstr "翻訳に失敗しました。"
-
-msgid "Time consuming: {} minutes"
-msgstr "所要時間: {} 分"
-
-msgid "General"
-msgstr "全般"
-
-msgid "Content"
-msgstr "コンテンツ"
-
-msgid "Preferred Mode"
-msgstr "優先モード"
-
-msgid "Output Path"
-msgstr "出力パス"
-
-msgid "Library"
-msgstr "ライブラリ"
-
-msgid "Path"
-msgstr "パス"
-
-msgid "Choose a path to store translated book(s)"
-msgstr "翻訳された本を保存するパスを選択してください"
-
-msgid "Preferred Format"
-msgstr "優先フォーマット"
-
-msgid "(Beta)"
-msgstr "(ベータ版)"
-
-msgid "Merge to Translate"
-msgstr "統合して翻訳"
-
-msgid "Enable"
-msgstr "有効化"
-
-msgid "The number of characters to translate at once."
-msgstr "一度に翻訳する文字数。"
-
-msgid "Network Proxy"
+#: engines/openrouter.py:71
+msgid ""
+"Get an API key at <a href=\"https://openrouter.ai/keys\">openrouter.ai/keys</a>. The model list is fetched from OpenRouter and covers every model it proxies; the \"Fine-tuning\" and \"OpenRouter\" sections below control reasoning, provider routing and sampling."
 msgstr ""
 
-msgid "Host"
-msgstr "ホスト"
+#: lib/cache.py:174
+msgid "Unknown"
+msgstr "不明"
 
-msgid "Port"
-msgstr "ポート"
+#: lib/conversion.py:156
+msgid "Start to convert ebook format..."
+msgstr "電子書籍の形式変換を開始します..."
 
-msgid "Test"
-msgstr "テスト"
+#: lib/conversion.py:161
+msgid "Outputting ebook file..."
+msgstr "電子書籍ファイルを出力中..."
 
-msgid "Cache"
-msgstr "キャッシュ"
+#: lib/conversion.py:378
+msgid "completed"
+msgstr "完了"
 
-msgid "Manage"
-msgstr "管理"
+#: lib/conversion.py:389
+msgid "Ebook Translation Log"
+msgstr "電子書籍翻訳ログ"
 
-msgid "Job Log"
-msgstr "ジョブログ"
+#: lib/conversion.py:389
+msgid "Translation Completed"
+msgstr "翻訳完了"
 
-msgid "Show translation"
-msgstr "翻訳を表示"
+#: lib/conversion.py:316
+msgid "Please set a valid output path."
+msgstr ""
 
-msgid "Notification"
-msgstr "通知"
+#: lib/conversion.py:97
+msgid "Building from the cache: reusing {} cached paragraph(s)."
+msgstr ""
 
-msgid "Search Paths"
-msgstr "検索パス"
+#: lib/conversion.py:123
+msgid "{} chapter(s) detected."
+msgstr ""
 
-msgid "The plugin will search for external programs via these paths."
-msgstr "プラグインはこれらのパスを介して外部プログラムを検索します。"
+#: lib/conversion.py:331
+msgid "[{} > {}] Building \"{}\""
+msgstr ""
 
-msgid "Custom"
-msgstr "カスタム"
+#: lib/conversion.py:341
+msgid "Translation job failed"
+msgstr "翻訳ジョブに失敗しました"
 
-msgid "Usage Tip"
-msgstr "使用のヒント"
+#: lib/conversion.py:390
+msgid "The translation of \"{}\" was completed. Do you want to open the book?"
+msgstr "\"{}\" の翻訳が完了しました。本を開きますか？"
 
-msgid "Tip: "
-msgstr "ヒント: "
+#: lib/novel.py:2315
+msgid "the cap in the settings"
+msgstr ""
 
-msgid "API keys will auto-switch if the previous one is unavailable."
-msgstr "以前のAPIキーが利用できない場合、APIキーは自動的に切り替わります。"
+#: lib/novel.py:2700
+msgid "the author brief"
+msgstr ""
 
-msgid "Preferred Language"
-msgstr "優先言語"
+#: lib/novel.py:2314
+msgid "the model's limit"
+msgstr ""
 
-msgid "HTTP Request"
-msgstr "HTTPリクエスト"
+#: lib/novel.py:2791
+msgid "request"
+msgstr ""
 
-msgid "Concurrency limit"
-msgstr "同時実行数制限"
+#: lib/novel.py:3868
+msgid "Novel mode: starting."
+msgstr ""
 
-msgid "Interval (seconds)"
-msgstr "間隔 (秒)"
+#: lib/novel.py:3894 novel.py:250
+msgid "Novel mode: completed."
+msgstr ""
 
-msgid "Attempt times"
-msgstr "試行回数"
+#: lib/novel.py:4029
+msgid "unlimited"
+msgstr ""
 
-msgid "Timeout (seconds)"
-msgstr "タイムアウト (秒)"
+#: lib/novel.py:4032
+msgid "disabled"
+msgstr ""
 
-msgid "Abort Translation"
-msgstr "翻訳を中止"
+#: lib/novel.py:2535
+msgid "Dialogue punctuation: using the rule from the settings."
+msgstr ""
 
-msgid "Max errors"
-msgstr "最大エラー数"
+#: lib/novel.py:2553
+msgid "Dialogue punctuation: the source shows no convention to follow."
+msgstr ""
 
-msgid "The number of consecutive errors to abort translation."
-msgstr "翻訳を中止するまでの連続エラー数。"
+#: lib/novel.py:2605
+msgid ""
+"The author brief is turned off in the settings (Novel Mode, \"How the author writes\")."
+msgstr ""
 
-msgid "Fine-tuning"
-msgstr "ファインチューニング"
+#: lib/novel.py:2616
+msgid "Author brief: skipped, the book carries no author in its metadata."
+msgstr ""
 
-msgid "Prompt"
-msgstr "プロンプト"
+#: lib/novel.py:2618
+msgid ""
+"No brief: the book carries no author in its calibre metadata, so there was nobody to ask about. Set the author in calibre and use \"Reset context\" to ask again."
+msgstr ""
 
-msgid "Endpoint"
-msgstr "エンドポイント"
+#: lib/novel.py:2630
+msgid "the engine cannot search the web"
+msgstr ""
 
-msgid "A model name"
-msgstr "モデル名"
+#: lib/novel.py:2632
+msgid "web search is off in the settings"
+msgstr ""
 
-msgid "Model"
-msgstr "モデル"
+#: lib/novel.py:2662
+msgid ""
+"Author brief: the model has no reliable information about this author and said so; the translation continues without a brief."
+msgstr ""
 
-msgid "Sampling"
-msgstr "サンプリング"
+#: lib/novel.py:2677
+msgid ""
+"Author brief: nothing usable came back, the translation continues without one."
+msgstr ""
 
-msgid "Enable streaming response"
-msgstr "ストリーミング応答を有効にする"
+#: lib/novel.py:3026 lib/novel.py:3411
+msgid "chapter {} chunk {}/{}"
+msgstr ""
 
-msgid "Stream"
-msgstr "ストリーム"
+#: lib/novel.py:3769
+msgid ""
+"The reply carried the glossary but no summary; asking for the summary on its own."
+msgstr ""
 
-msgid "Fetching..."
-msgstr "取得中..."
+#: lib/novel.py:3853
+msgid "Novel mode: no chapters to translate."
+msgstr ""
 
-msgid "You need to provide an API key to proceed."
-msgstr "続行するにはAPIキーを提供する必要があります。"
+#: lib/novel.py:4123
+msgid ""
+"Chapter {}: {} paragraph(s) could not be translated after every retry (positions {})."
+msgstr ""
 
-msgid "Can't fetch model list"
-msgstr "モデルリストを取得できません"
+#: lib/novel.py:4132
+msgid ""
+"Going on with the next chapter, as configured: these paragraphs keep their source text."
+msgstr ""
 
-msgid "Can't fetch model list, please check and try again."
-msgstr "モデルリストを取得できません。確認して再度お試しください。"
+#: lib/novel.py:2012
+msgid "disabled by user setting"
+msgstr ""
 
-msgid "The model depends on your Azure project."
-msgstr "モデルはご自身のAzureプロジェクトに依存します。"
+#: lib/novel.py:2332
+msgid "Sizing: {} tokens of budget less {} reserved for the running context"
+msgstr ""
 
-msgid "Below original"
-msgstr "原文の下"
+#: lib/novel.py:2339
+msgid "so a chunk carries up to {} source tokens"
+msgstr ""
 
-msgid "Above original"
-msgstr "原文の上"
+#: lib/novel.py:2560
+msgid ""
+"Dialogue punctuation read off the source: {primary}, the choice of {votes} of the {voters} chapter(s) that show one (counts: {counts}; paragraphs opening with a dash: {dash}). Every chapter will be asked to use it."
+msgstr ""
 
-msgid "Right to original"
-msgstr "原文の右"
+#: lib/novel.py:2684
+msgid "Author brief ({} characters):"
+msgstr ""
 
-msgid "Left to original"
-msgstr "原文の左"
+#: lib/novel.py:2801 lib/novel.py:2877 lib/novel.py:3886 lib/novel.py:4065 lib/novel.py:2814 lib/novel.py:2824 novel.py:243
+msgid "Translation canceled."
+msgstr "翻訳がキャンセルされました。"
 
-msgid "With no original"
-msgstr "原文なし"
+#: lib/novel.py:2868
+msgid "Novel mode: giving up after {} attempts. Last error: {}"
+msgstr ""
 
+#: lib/novel.py:3215
+msgid ""
+"The reply numbered its paragraphs from 1 instead of keeping the numbers it was given; matched them by order."
+msgstr ""
+
+#: lib/novel.py:3573
+msgid ""
+"Summary of chapter {} came back {} chars long, well past the {} it was asked for; stored the first {} chars so it does not crowd out the context of the chapters that follow."
+msgstr ""
+
+#: lib/novel.py:3675
+msgid "Glossary extraction: could not parse JSON, skipping."
+msgstr ""
+
+#: lib/novel.py:3782
+msgid ""
+"Chapter {} is not part of the story{}: its summary and glossary are discarded."
+msgstr ""
+
+#: lib/novel.py:3869
+msgid "Total chapters: {}"
+msgstr ""
+
+#: lib/novel.py:3874
+msgid "Resuming from chapter: {}"
+msgstr ""
+
+#: lib/novel.py:3892
+msgid "Novel mode: completed {} chapter(s) in {} minutes."
+msgstr ""
+
+#: lib/novel.py:3900
+msgid "Chapter {}/{}: {}"
+msgstr ""
+
+#: lib/novel.py:3947
+msgid "  Nothing left to translate in this chapter."
+msgstr ""
+
+#: lib/novel.py:4033
+msgid ""
+"Split into {} chunk(s). Caps: {} tokens / {} paragraphs. Overlap: {} paragraphs."
+msgstr ""
+
+#: lib/novel.py:4114
+msgid ""
+"Chapter {}: {} paragraph(s) still missing; sending them again in smaller chunks."
+msgstr ""
+
+#: lib/novel.py:4129
+msgid ""
+"The chapter is left unfinished so that a resume asks for them again; what was translated is in the cache."
+msgstr ""
+
+#: lib/novel.py:4158
+msgid ""
+"Metadata, contents and front matter: {} of {} paragraphs to translate."
+msgstr ""
+
+#: lib/novel.py:4193
+msgid "Novel mode: chapter {}/{} done."
+msgstr ""
+
+#: lib/novel.py:2014
+msgid "engine does not advertise support"
+msgstr ""
+
+#: lib/novel.py:2016
+msgid "unknown"
+msgstr ""
+
+#: lib/novel.py:2294
+msgid ""
+"Chunk budget lowered from {} to {} source tokens: a reply may run to {} tokens ({}), and a translation is about {} times its source with the JSON around it."
+msgstr ""
+
+#: lib/novel.py:2335
+msgid "a reply of at most {} tokens ({}) holds about {} of source"
+msgstr ""
+
+#: lib/novel.py:2342
+msgid "and {} paragraphs"
+msgstr ""
+
+#: lib/novel.py:2396
+msgid ""
+"Reply room: each chunk asks the model for {} times its source plus {} tokens, capped at {} tokens (novel_reply_max_tokens)."
+msgstr ""
+
+#: lib/novel.py:2541
+msgid ""
+"Dialogue punctuation as set in the settings: {}. Every chapter will be asked to use it."
+msgstr ""
+
+#: lib/novel.py:2567
+msgid "none"
+msgstr ""
+
+#: lib/novel.py:2611
+msgid "Author brief: reusing the one on file ({} characters)."
+msgstr ""
+
+#: lib/novel.py:2625
+msgid "Author brief: researching \"{author}\" on the web through {engine}."
+msgstr ""
+
+#: lib/novel.py:2633
+msgid ""
+"Author brief: asking the model what it knows about \"{author}\" ({reason})."
+msgstr ""
+
+#: lib/novel.py:2665
+msgid ""
+"No brief: the model was asked how {author} writes and answered that it has no reliable information about this author and this book, which is the honest answer and better than an invented one. The translation goes on without a brief.\n"
+"\n"
+"To get one, let an engine that can search the web do so (Novel Mode, \"How the author writes\": \"Search the web when the engine can\") or pick a model that knows the author, then use \"Reset context\" so the question is asked again."
+msgstr ""
+
+#: lib/novel.py:2679
+msgid ""
+"No brief: the model answered with too little to be one ({} characters). The translation goes on without a brief; \"Reset context\" asks again."
+msgstr ""
+
+#: lib/novel.py:2803
+msgid "  -> {}: sent {} chars (~{} tokens), waiting for the model..."
+msgstr ""
+
+#: lib/novel.py:3042
+msgid "Alignment retry {}: {} missing markers."
+msgstr ""
+
+#: lib/novel.py:3067
+msgid "Warning: {} paragraph(s) missing after retries: {}"
+msgstr ""
+
+#: lib/novel.py:3223
+msgid ""
+"Incomplete JSON reply ({} chars): recovered {}/{} paragraph(s), missing {}. They are requested again right away, which costs one small extra call. Only if whole chapters keep coming back short is the model hitting its output limit -- lower the paragraphs-per-chunk cap then."
+msgstr ""
+
+#: lib/novel.py:3427
+msgid "Structured retry {}: {} missing entries."
+msgstr ""
+
+#: lib/novel.py:3457
+msgid ""
+"Structured path could not resolve {} paragraph(s); falling back to text markers for those."
+msgstr ""
+
+#: lib/novel.py:3474
+msgid "Warning: {} paragraph(s) missing after all retries: {}"
+msgstr ""
+
+#: lib/novel.py:3531
+msgid "Summary input truncated: {} -> {} chars."
+msgstr ""
+
+#: lib/novel.py:3548
+msgid "summary of chapter {}"
+msgstr ""
+
+#: lib/novel.py:3607
+msgid "glossary of chapter {}"
+msgstr ""
+
+#: lib/novel.py:3686
+msgid ""
+"Glossary: {} of the {} entries returned for chapter {} were already known and were dropped."
+msgstr ""
+
+#: lib/novel.py:3691
+msgid "Glossary: +{} new entries (chapter {})."
+msgstr ""
+
+#: lib/novel.py:3702
+msgid ""
+"Glossary prompt: listing {} of {} known entries (the ones chapter {} mentions)."
+msgstr ""
+
+#: lib/novel.py:3742
+msgid "summary + glossary of chapter {}"
+msgstr ""
+
+#: lib/novel.py:3863
+msgid "Novel mode: nothing to do (progress={}, chapters={})."
+msgstr ""
+
+#: lib/novel.py:3871
+msgid "Model reply limit: {} tokens."
+msgstr ""
+
+#: lib/novel.py:3906
+msgid "  Structure: {} page(s), {} paragraphs, {} chars. page_ids: {}"
+msgstr ""
+
+#: lib/novel.py:3917
+msgid "Chapter {} has no translatable content, skipping."
+msgstr ""
+
+#: lib/novel.py:3977
+msgid ""
+"Chapter {}: {} chars translated, below threshold {}. Skipping summary + glossary extraction."
+msgstr ""
+
+#: lib/novel.py:4046
+msgid "  Chunk {}/{}: {} paragraphs, ~{} tokens (closed by: {})."
+msgstr ""
+
+#: lib/novel.py:4180
+msgid "Summary (chapter {}): {}"
+msgstr ""
+
+#: lib/novel.py:4183
+msgid "Summary (chapter {}): empty response."
+msgstr ""
+
+#: lib/novel.py:2004
+msgid ""
+"Output format: structured JSON (engine={eng}, capability={cap}, setting={s}). Chunks can safely hold more paragraphs than with text markers."
+msgstr ""
+
+#: lib/novel.py:2017
+msgid ""
+"Output format: text markers [N] (engine={eng}, capability={cap}, setting={s}, reason={reason})."
+msgstr ""
+
+#: lib/novel.py:2652
+msgid ""
+"Author brief: the request failed ({}). The translation continues without it."
+msgstr ""
+
+#: lib/novel.py:2655
+msgid ""
+"No brief: the request for it failed ({}). The translation went on without one; \"Reset context\" asks again."
+msgstr ""
+
+#: lib/novel.py:2815
+msgid "  <- {}: {} chars (~{} tokens) in {}s."
+msgstr ""
+
+#: lib/novel.py:2913
+msgid "Reasoning turned off for {} (novel_context_reasoning is off)."
+msgstr ""
+
+#: lib/novel.py:2932
+msgid "Reply for {} capped at {} tokens (novel_context_max_tokens)."
+msgstr ""
+
+#: lib/novel.py:3059
+msgid "{}, alignment retry {}"
+msgstr ""
+
+#: lib/novel.py:3445
+msgid "{}, JSON retry {}"
+msgstr ""
+
+#: lib/novel.py:3550
+msgid "Summary generation failed: {}"
+msgstr ""
+
+#: lib/novel.py:3611
+msgid "Glossary extraction failed: {}"
+msgstr ""
+
+#: lib/novel.py:3659
+msgid ""
+"Glossary extraction: reply not terminated, recovered {} complete entries."
+msgstr ""
+
+#: lib/novel.py:3669
+msgid ""
+"Glossary extraction: JSON not usable, recovered {} entries via fallback parser."
+msgstr ""
+
+#: lib/novel.py:3745
+msgid "Summary + glossary extraction failed: {}"
+msgstr ""
+
+#: lib/novel.py:3942
+msgid ""
+"  {} of {} paragraphs are already translated in the cache; asking the model for the remaining {}."
+msgstr ""
+
+#: lib/novel.py:3982
+msgid ""
+"Chapter {} is the last one: skipping summary + glossary, nothing comes after them."
+msgstr ""
+
+#: lib/novel.py:2859
+msgid "Novel mode request failed after {}s (attempt {}/{}): {}"
+msgstr ""
+
+#: lib/novel.py:2835
+msgid ""
+"{label}: no provider takes every parameter of the request ({error}). Asking again without requiring them."
+msgstr ""
+
+#: lib/novel.py:2850
+msgid "{label}: rate limited ({error}); trying again in {delay}s."
+msgstr ""
+
+#: novel.py:416
+msgid "&Start"
+msgstr "開始(&S)"
+
+#: novel.py:442 setting.py:194
+msgid "Input Format"
+msgstr "入力形式"
+
+#: novel.py:448 setting.py:195
+msgid "Output Format"
+msgstr "出力形式"
+
+#: novel.py:454 setting.py:384
+msgid "Source Language"
+msgstr "翻訳元の言語"
+
+#: novel.py:461 setting.py:385
+msgid "Target Language"
+msgstr "翻訳先の言語"
+
+#: novel.py:610
+msgid "Loading ebook data, please wait..."
+msgstr "電子書籍データを読み込み中です。しばらくお待ちください..."
+
+#: novel.py:694
+msgid "Ready."
+msgstr ""
+
+#: novel.py:703
+msgid "Summaries"
+msgstr ""
+
+#: novel.py:719 novel.py:1113
+msgid "Reset context"
+msgstr ""
+
+#: novel.py:734
+msgid "Glossary"
+msgstr ""
+
+#: novel.py:741
+msgid ""
+"The brief on how this book is written appears here once the translation has started, or a note on why there is none. How it is obtained is set under Novel Mode in the plugin settings (\"How the author writes\")."
+msgstr ""
+
+#: novel.py:746
+msgid "Author"
+msgstr ""
+
+#: novel.py:751
+msgid "Log"
+msgstr "ログ"
+
+#: novel.py:764 novel.py:966
+msgid "Start / Resume"
+msgstr ""
+
+#: novel.py:766
+msgid "Cancel"
+msgstr ""
+
+#: novel.py:769
+msgid "Build translated ebook"
+msgstr ""
+
+#: novel.py:772
+msgid "Close"
+msgstr ""
+
+#: novel.py:1008
+msgid "Cancel requested..."
+msgstr ""
+
+#: novel.py:1114
+msgid ""
+"This will discard all summaries, the glossary and the author brief, and reset chapter progress to 0. The already-translated paragraphs will remain in cache. Continue?"
+msgstr ""
+
+#: novel.py:114
+msgid "Extracting ebook content..."
+msgstr "電子書籍のコンテンツを抽出中..."
+
+#: novel.py:153
+msgid "Building chapters..."
+msgstr ""
+
+#: novel.py:191
+msgid "Loading data from cache and preparing user interface..."
+msgstr ""
+
+#: novel.py:347
+msgid ""
+"Chapter metadata was written by an older version: reading the ebook again to rebuild the chapters."
+msgstr ""
+
+#: novel.py:502
+msgid "Please select a GenAI engine before starting novel mode."
+msgstr ""
+
+#: novel.py:637
+msgid "No translatable content detected in this book."
+msgstr ""
+
+#: novel.py:665
+msgid "Chapters"
+msgstr ""
+
+#: novel.py:709
+msgid "Source"
+msgstr ""
+
+#: novel.py:709 setting.py:1893
 msgid "Translation"
 msgstr "翻訳"
 
-msgid "Column Gap"
-msgstr "列の間隔"
+#: novel.py:709
+msgid "Type"
+msgstr ""
 
+#: novel.py:709
+msgid "Notes"
+msgstr ""
+
+#: novel.py:849 novel.py:1059
+msgid "Re-run all"
+msgstr ""
+
+#: novel.py:944
+msgid "Novel mode requires a GenAI engine. Please choose one in Setting."
+msgstr ""
+
+#: novel.py:952
+msgid ""
+"Every chapter is done. Translate the whole book again?\n"
+"\n"
+"The summaries, the glossary and the author brief are kept; every paragraph is sent to the model again."
+msgstr ""
+
+#: novel.py:1078
+msgid "The book is still being prepared. Please wait a moment."
+msgstr ""
+
+#: novel.py:1143
+msgid ""
+"Building translated ebook in background. Watch the jobs panel for progress."
+msgstr ""
+
+#: novel.py:150
+msgid "Failed to load ebook: OEB not available."
+msgstr ""
+
+#: novel.py:650
+msgid "Failed to prepare novel mode: {}"
+msgstr ""
+
+#: novel.py:844
+msgid "{done}/{total} chapters done."
+msgstr ""
+
+#: novel.py:1060
+msgid ""
+"Novel mode: all chapters translated. Click \"Build translated ebook\" to produce the output."
+msgstr ""
+
+#: novel.py:1084
+msgid ""
+"The translation is still running. Stop it and close the window? What is already translated stays in the cache and the next start resumes from there."
+msgstr ""
+
+#: novel.py:1094
+msgid "Stopping..."
+msgstr ""
+
+#: novel.py:430
+msgid ""
+"A language model is required (OpenRouter, an OpenAI-compatible provider, Claude or Gemini). The current engine \"{}\" is not one. Please switch engine in Setting."
+msgstr ""
+
+#: novel.py:684
+msgid "Target"
+msgstr ""
+
+#: novel.py:1148
+msgid "Failed to launch build job: {}"
+msgstr ""
+
+#: novel.py:888
+msgid "Chapter {}"
+msgstr ""
+
+#: setting.py:117
+msgid "General"
+msgstr "全般"
+
+#: setting.py:119
+msgid "Content"
+msgstr "コンテンツ"
+
+#: setting.py:155
+msgid "Output Path"
+msgstr "出力パス"
+
+#: setting.py:157
+msgid "Library"
+msgstr "ライブラリ"
+
+#: setting.py:158
+msgid "Path"
+msgstr "パス"
+
+#: setting.py:163
+msgid "Choose a path to store translated book(s)"
+msgstr "翻訳された本を保存するパスを選択してください"
+
+#: setting.py:166 setting.py:2009 setting.py:2028
+msgid "Choose"
+msgstr "選択"
+
+#: setting.py:190
+msgid "Preferred Format"
+msgstr "優先フォーマット"
+
+#: setting.py:213
+msgid "Network Proxy"
+msgstr ""
+
+#: setting.py:218 setting.py:289 setting.py:317
+msgid "Enable"
+msgstr "有効化"
+
+#: setting.py:243
+msgid "Port"
+msgstr "ポート"
+
+#: setting.py:255 setting.py:344
+msgid "Test"
+msgstr "テスト"
+
+#: setting.py:287 ui.py:80
+msgid "Cache"
+msgstr "キャッシュ"
+
+#: setting.py:290
+msgid "Manage"
+msgstr "管理"
+
+#: setting.py:307
+msgid "Job Log"
+msgstr "ジョブログ"
+
+#: setting.py:308
+msgid "Show translation"
+msgstr "翻訳を表示"
+
+#: setting.py:315
+msgid "Notification"
+msgstr "通知"
+
+#: setting.py:341
+msgid "Translation Engine"
+msgstr "翻訳エンジン"
+
+#: setting.py:355
+msgid "Usage Tip"
+msgstr "使用のヒント"
+
+#: setting.py:380
+msgid "Preferred Language"
+msgstr "優先言語"
+
+#: setting.py:391
+msgid "HTTP Request"
+msgstr "HTTPリクエスト"
+
+#: setting.py:401
+msgid "Interval (seconds)"
+msgstr "間隔 (秒)"
+
+#: setting.py:402
+msgid "Attempt times"
+msgstr "試行回数"
+
+#: setting.py:403
+msgid "Timeout (seconds)"
+msgstr "タイムアウト (秒)"
+
+#: setting.py:407
+msgid "Abort Translation"
+msgstr "翻訳を中止"
+
+#: setting.py:425
+msgid "Fine-tuning"
+msgstr "ファインチューニング"
+
+#: setting.py:430
+msgid "Provider"
+msgstr ""
+
+#: setting.py:432
+msgid ""
+"Which server to talk to. Every one of them speaks the OpenAI chat API; the preset fills in the endpoint, the key hint and a model to start with, and both stay editable below. The API keys, the endpoint and the model are kept per provider, so switching back finds them again."
+msgstr ""
+
+#: setting.py:442
+msgid "Endpoint"
+msgstr "エンドポイント"
+
+#: setting.py:448
+msgid "Refresh"
+msgstr "更新"
+
+#: setting.py:451
+msgid "A model name"
+msgstr "モデル名"
+
+#: setting.py:456
+msgid "Model"
+msgstr "モデル"
+
+#: setting.py:461
+msgid ""
+"What the provider says about the selected model. The reply limit is the one that matters most in Novel Mode: a chunk is answered with a translation about as long as the chunk itself, so it is what a request can be sized against.\n"
+"\n"
+"Shown for engines whose model listing publishes the figures (OpenRouter today), and only after the list has been fetched."
+msgstr ""
+
+#: setting.py:502 setting.py:701
+msgid "Sampling"
+msgstr "サンプリング"
+
+#: setting.py:507
+msgid "Enable streaming response"
+msgstr "ストリーミング応答を有効にする"
+
+#: setting.py:508
+msgid "Stream"
+msgstr "ストリーム"
+
+#: setting.py:510 setting.py:661
+msgid "Reasoning"
+msgstr ""
+
+#: setting.py:515
+msgid ""
+"Chain-of-thought budget, sent as \"reasoning_effort\".\n"
+"\n"
+"- Default: omit the field, which is what plain OpenAI models and older gateways expect.\n"
+"- none: suppress the reasoning tokens some servers emit before every answer (Ollama 0.31+ with Gemma 4 spends thousands of silent tokens that make requests look stalled).\n"
+"- minimal/low/medium/high: spend reasoning tokens on purpose. Models without reasoning support ignore the field."
+msgstr ""
+
+#: setting.py:547
+msgid "OpenRouter"
+msgstr ""
+
+#: setting.py:688
+msgid "Show"
+msgstr ""
+
+#: setting.py:689
+msgid ""
+"Show the sampling and penalty parameters.\n"
+"\n"
+"They are hidden by default: they are specialist knobs, each already at the neutral value that leaves it out of the request, and a book-length translation has no use for them. Hiding them does not change what is sent -- a value set here and then hidden is still part of every request."
+msgstr ""
+
+#: setting.py:697
+msgid "Advanced parameters"
+msgstr ""
+
+#: setting.py:745
+msgid "Limits"
+msgstr ""
+
+#: setting.py:758
+msgid "Provider: only"
+msgstr ""
+
+#: setting.py:766
+msgid "Provider: order"
+msgstr ""
+
+#: setting.py:772
+msgid "Provider: ignore"
+msgstr ""
+
+#: setting.py:778
+msgid "Provider: quantizations"
+msgstr ""
+
+#: setting.py:787
+msgid "Provider: routing"
+msgstr ""
+
+#: setting.py:806
+msgid "Provider: policy"
+msgstr ""
+
+#: setting.py:829
+msgid "Attribution"
+msgstr ""
+
+#: setting.py:840
+msgid "Extra headers"
+msgstr ""
+
+#: setting.py:846
+msgid "Extra body"
+msgstr ""
+
+#: setting.py:880
+msgid "Novel Mode"
+msgstr ""
+
+#: setting.py:887
+msgid "Table of Contents (level 1)"
+msgstr ""
+
+#: setting.py:889
+msgid "Table of Contents (level 2)"
+msgstr ""
+
+#: setting.py:891
+msgid "One XHTML file per chapter"
+msgstr ""
+
+#: setting.py:892
+msgid ""
+"How to detect chapter boundaries.\n"
+"\n"
+"- TOC level 1: use the top-level Table of Contents entries as chapter boundaries. Best for single-book EPUBs.\n"
+"- TOC level 2: use the second-level TOC entries (sub-chapters). Recommended for multi-book anthologies (e.g. a complete series in one EPUB) where level 1 maps each full novel to a single \"chapter\". Level 2 maps individual chapters, giving the LLM the correct chapter title and preventing front-matter pages (Cover, Titlepage) from polluting the first translation chunk.\n"
+"- One XHTML file: each XHTML file in the spine becomes one chapter. Useful when the TOC is missing or unreliable."
+msgstr ""
+
+#: setting.py:905
+msgid "Chapter detection"
+msgstr ""
+
+#: setting.py:911
+msgid ""
+"XHTML pages whose total text content is shorter than this many characters are treated as front/back matter (Cover, Titlepage, decorative pages) and excluded from chapter narrative content. Their paragraphs are still translated by the auxiliary pipeline (metadata/TOC titles).\n"
+"\n"
+"A typical Titlepage in a multi-book anthology contains only the book title as a single heading (~25 chars) -- well below the default of 100. Set to 0 to include all pages."
+msgstr ""
+
+#: setting.py:921
+msgid "Skip front matter under (chars)"
+msgstr ""
+
+#: setting.py:927
+msgid ""
+"Maximum estimated tokens per translation chunk. Together with \"Max paragraphs per chunk\" it forms a dual-cap: the chunk is closed as soon as either limit is reached.\n"
+"\n"
+"The limit that bites is not the context window but how much the model may write in one reply: it has to emit the whole chunk translated, which is as long as the chunk itself or longer. Recent hosted models allow 64k output tokens and up, while smaller and local ones often stop at 8k-16k and would truncate a large chunk mid-chapter."
+msgstr ""
+
+#: setting.py:938
+msgid "Max tokens per chunk"
+msgstr ""
+
+#: setting.py:944
+msgid ""
+"Maximum number of paragraphs per translation chunk. The chunk is closed as soon as either the token budget or this paragraph cap is reached, whichever comes first.\n"
+"\n"
+"On a novel this is the cap that fires first, and it is the one that matters: the token budget above limits what the model has to read, but the translation costs about as much again to write, and a model that reads 200k tokens will only write 8k to 32k of them. Too many paragraphs in one chunk means a reply the model cannot finish, which arrives truncated. It also keeps the LLM from losing track of the [N] alignment markers when paragraphs are short (dialogue, TOC lists).\n"
+"\n"
+"Lower it to 40-80 for a small or local model, which loses markers well before a hosted one does. Set to 0 to disable and use only the token budget."
+msgstr ""
+
+#: setting.py:961
+msgid "Max paragraphs per chunk"
+msgstr ""
+
+#: setting.py:967
+msgid ""
+"Number of already-translated paragraphs from the previous chunk to replay as context for the next chunk. Similar to the sliding-window overlap used in RAG chunking, this preserves dialogue threads, pronoun referents and stylistic continuity across chunk boundaries. The overlap paragraphs are shown to the LLM as already-translated text (do NOT retranslate), so they consume some of the token budget but do not cause double translations.\n"
+"\n"
+"Recommended: 5 for most novels; up to 10 for dense narrative with long scenes. Set to 0 to disable overlap."
+msgstr ""
+
+#: setting.py:979
+msgid "Overlap paragraphs"
+msgstr ""
+
+#: setting.py:982
+msgid "Cap it with the model limit"
+msgstr ""
+
+#: setting.py:983
+msgid ""
+"Never ask for a chunk longer than the model can answer.\n"
+"\n"
+"On by default. The token cap above says how much to send; it says nothing about how much the model is able to write back, and the two are unrelated -- context windows run to hundreds of thousands of tokens while reply limits start at 4096. A chunk that cannot be finished is cut mid-answer and the lost paragraphs are asked for again, so the request is paid twice.\n"
+"\n"
+"The reply room is the lower of the limit the provider reported when the model was picked in the Model row above (known for engines that publish it, OpenRouter today) and \"Reply room per chunk\" below; a chunk carries about a 2.2th of it in source, the rest being what the translation and the JSON around it add. With neither figure, the cap above is used as it stands."
+msgstr ""
+
+#: setting.py:1000
+msgid "Chunk size against the reply limit"
+msgstr ""
+
+#: setting.py:1002
+msgid "Keep"
+msgstr ""
+
+#: setting.py:1003
+msgid ""
+"Keep the paragraphs already translated in the cache instead of sending them to the model again.\n"
+"\n"
+"On by default. Translations are written after every chunk while the chapter counter only moves once a chapter is over, so a run cancelled at chunk 7 of 9 pays for those seven chunks a second time when it resumes. Turn it off to translate every pending chapter from scratch."
+msgstr ""
+
+#: setting.py:1012
+msgid "Paragraphs already translated"
+msgstr ""
+
+#: setting.py:1014
+msgid "Ask the engine to cache it"
+msgstr ""
+
+#: setting.py:1015
+msgid ""
+"Ask the engine to keep the prompt prefix in its cache.\n"
+"\n"
+"On by default. Every chunk of a chapter is sent with the same system prompt -- role, languages, running summary and glossary -- and a prefix the provider already holds is billed at a fraction of the price.\n"
+"\n"
+"Only engines whose API needs an explicit cache breakpoint (Claude) read this. The ones that cache on their own (OpenAI, Gemini, DeepSeek, OpenRouter) do it either way."
+msgstr ""
+
+#: setting.py:1025
+msgid "Prompt prefix"
+msgstr ""
+
+#: setting.py:1028
+msgid "Auto (recommended)"
+msgstr ""
+
+#: setting.py:1029
+msgid "Off (text markers [N])"
+msgstr ""
+
+#: setting.py:1030
+msgid "Force JSON on any engine"
+msgstr ""
+
+#: setting.py:1031
+msgid ""
+"How to format the LLM response for paragraph alignment.\n"
+"\n"
+"- Auto: use native JSON structured output when the engine supports it (OpenAI, Gemini, Ollama via OpenAI-compatible endpoint). Falls back to text markers [N] otherwise. Recommended.\n"
+"- Off: always use text markers [N]. Slightly less reliable above 60-80 paragraphs per chunk on medium models but works everywhere.\n"
+"- Force: always request JSON output, even from engines that do not advertise support. Useful for custom OpenAI-compatible endpoints (Ollama exotics, LM Studio, vLLM) that accept \"response_format\" but are not recognised by the plugin.\n"
+"\n"
+"Structured output removes the marker-dropping limit, but not the model's output limit: however the response is formatted, a chunk is only translatable if the model can write the whole reply. Raise \"Max paragraphs per chunk\" past 100 only if the log shows no truncated responses."
+msgstr ""
+
+#: setting.py:1050
+msgid "Structured output"
+msgstr ""
+
+#: setting.py:1056
+msgid ""
+"How much room the running context (summaries + glossary) may take. It is both the size the context block is trimmed to and the amount held back from the chunk budget.\n"
+"\n"
+"The glossary sent with a chapter now holds only the names that chapter uses, so this no longer has to cover a glossary that grows with the book. Raise it if the log shows the oldest summaries being dropped sooner than you would like."
+msgstr ""
+
+#: setting.py:1066
+msgid "Reserved for context (tokens)"
+msgstr ""
+
+#: setting.py:1072
+msgid ""
+"How long a chapter summary is expected to be. The value is reserved in the chunk budget, and it also bounds what gets stored: a summary longer than twice this size is truncated before being saved.\n"
+"\n"
+"A summary is re-read in the prompt of every chapter that follows, so a model that answers with the whole chapter instead of a few hundred words would otherwise fill the context budget for the rest of the book."
+msgstr ""
+
+#: setting.py:1082
+msgid "Summary target size (tokens)"
+msgstr ""
+
+#: setting.py:1089
+msgid "Glossary max entries"
+msgstr ""
+
+#: setting.py:1092
+msgid "Only what the chapter uses"
+msgstr ""
+
+#: setting.py:1093
+msgid ""
+"Send the model only the glossary entries whose name appears in the chapter being translated, instead of the whole glossary.\n"
+"\n"
+"On by default. A glossary keeps growing while a chapter keeps needing the same handful of names: the entries a chapter never mentions cannot be mistranslated in it, and listing them costs input tokens on every request. In the entity extraction call they cost more than that, since a model handed hundreds of names to skip has been observed copying the whole list back as new entries."
+msgstr ""
+
+#: setting.py:1105
+msgid "Glossary sent to the model"
+msgstr ""
+
+#: setting.py:1110
+msgid ""
+"Never put more than this many glossary entries in a single prompt, keeping the most recently learned ones. Applied after the filter above. Set to 0 for no limit."
+msgstr ""
+
+#: setting.py:1115
+msgid "Glossary entries per prompt"
+msgstr ""
+
+#: setting.py:1121
+msgid ""
+"Hard limit on the length of the summary and glossary replies. Both are short by nature, but nothing in the request says so, and a model that starts repeating itself stops only at its own output limit: one glossary call was measured writing 131072 tokens over eight minutes, re-listing names it had been told to skip.\n"
+"\n"
+"Only engines with a max tokens setting are affected, and a tighter limit you set yourself is left alone. Set to 0 to send no limit at all."
+msgstr ""
+
+#: setting.py:1132
+msgid "Summary/glossary reply cap (tokens)"
+msgstr ""
+
+#: setting.py:1138
+msgid ""
+"How much of the translated chapter the summary and glossary requests read, in characters, counted from the top. The opening of a chapter is where its characters and setting are introduced; sending the whole chapter costs input tokens the answer does not need. 0 sends it whole."
+msgstr ""
+
+#: setting.py:1145
+msgid "Chapter text for the summary (chars)"
+msgstr ""
+
+#: setting.py:1151
+msgid ""
+"The most a translation request may ask the model to write, in tokens, on engines that otherwise leave the figure to the provider (OpenRouter with \"max_tokens\" at 0). Left out, many providers apply 4096 and a chunk comes back cut at a third. Each chunk asks for twice its own size plus room for the JSON, up to this cap and to what the model can write. 0 sends nothing."
+msgstr ""
+
+#: setting.py:1160
+msgid "Reply room per chunk (tokens)"
+msgstr ""
+
+#: setting.py:1166
+msgid ""
+"How long a request refused for the moment (HTTP 429, a provider at capacity) may be waited out, in seconds, before it counts as a failed attempt. The wait follows what the provider asks and grows a little each time. 0 treats a rate limit like any other error."
+msgstr ""
+
+#: setting.py:1173
+msgid "Wait out rate limits for (seconds)"
+msgstr ""
+
+#: setting.py:1177
+msgid "Stop, so a resume asks again"
+msgstr ""
+
+#: setting.py:1178
+msgid "Skip them and go on"
+msgstr ""
+
+#: setting.py:1179
+msgid ""
+"What to do with paragraphs the model never returns, once the retries inside a chunk and one more pass in smaller chunks have all been tried.\n"
+"\n"
+"Stop leaves the chapter unfinished, so its progress is not recorded and a resume asks for exactly those paragraphs again. Skip logs them and goes on to the next chapter: they keep their source text in the output, and nothing comes back for them later."
+msgstr ""
+
+#: setting.py:1189
+msgid "Paragraphs the model never returns"
+msgstr ""
+
+#: setting.py:1195
+msgid ""
+"Chapters shorter than this many translated characters skip the summary and glossary LLM calls. Useful to avoid wasting time on Copyright, Table of Contents, About the Author, etc. Set to 0 to always run summary/glossary."
+msgstr ""
+
+#: setting.py:1201
+msgid "Skip context under (chars)"
+msgstr ""
+
+#: setting.py:1204
+msgid "Allow"
+msgstr ""
+
+#: setting.py:1205
+msgid ""
+"Let the model think before writing the chapter summary and the glossary. Off by default: neither is a reasoning task, and on a measured chapter the glossary call spent three quarters of its billed output deliberating before listing a handful of proper nouns.\n"
+"\n"
+"This only ever turns an engine's reasoning down for those two calls, never on, and never touches the translation itself: the engine keeps whatever the Fine-tuning section says."
+msgstr ""
+
+#: setting.py:1216
+msgid "Reasoning on summary/glossary"
+msgstr ""
+
+#: setting.py:1218
+msgid "One request"
+msgstr ""
+
+#: setting.py:1219
+msgid ""
+"Ask for the chapter summary and the new glossary entries in a single request instead of two.\n"
+"\n"
+"On by default. Both tasks read the chapter that was just translated, so two calls send it twice: measured on a real book the summary call carried 7000 to 8000 tokens of chapter text that the glossary call was about to send again.\n"
+"\n"
+"A summary or glossary prompt of your own turns this off by itself, so that prompt is not silently ignored."
+msgstr ""
+
+#: setting.py:1230
+msgid "Summary and glossary"
+msgstr ""
+
+#: setting.py:1232
+msgid "Story chapters only"
+msgstr ""
+
+#: setting.py:1233
+msgid ""
+"Keep the summary and the glossary only for chapters that belong to the story. The model that summarises a chapter is asked whether the chapter is part of the story at all; a copyright page, a list of the author's other books, a preface, an afterword or a note then gets no summary and no glossary entries.\n"
+"\n"
+"On by default: a summary of the copyright page was carried into every later prompt as if it were plot. Turn it off to keep a summary of everything."
+msgstr ""
+
+#: setting.py:1244
+msgid "Summary and glossary of"
+msgstr ""
+
+#: setting.py:1246
+msgid "Skip"
+msgstr ""
+
+#: setting.py:1247
+msgid ""
+"Do not ask for the summary and glossary of the last chapter. The context of a chapter is built for the chapters that follow it, and after the last one there are none: that call sends a full copy of the chapter for an answer nothing ever reads.\n"
+"\n"
+"Turn it off if you keep the glossary as a document in its own right."
+msgstr ""
+
+#: setting.py:1256
+msgid "Context of the last chapter"
+msgstr ""
+
+#: setting.py:1260
+msgid "Search the web when the engine can"
+msgstr ""
+
+#: setting.py:1261
+msgid "Ask the model only"
+msgstr ""
+
+#: setting.py:1262
+msgid "Do not ask"
+msgstr ""
+
+#: setting.py:1263
+msgid ""
+"Before the first chapter, ask once how this author writes: the register, the texture of the sentences, the use of dialect or period language. The answer is repeated in the prompt of every chapter so the translation keeps the author's manner instead of drifting into neutral prose.\n"
+"\n"
+"It costs one request per book. \"Search the web\" uses the engine's own search where it has one (OpenRouter, Claude, Gemini) and falls back to what the model already knows elsewhere; searching is billed per result by the gateway. An answer that admits it knows nothing about the author is discarded rather than used.\n"
+"\n"
+"The book needs an author in its calibre metadata. The brief is stored with the summaries, so it is paid for once and reused when you resume; \"Reset context\" in the translation window discards it."
+msgstr ""
+
+#: setting.py:1280
+msgid "How the author writes"
+msgstr ""
+
+#: setting.py:1284
+msgid "Follow the source"
+msgstr ""
+
+#: setting.py:1287
+msgid "Leave it to the model"
+msgstr ""
+
+#: setting.py:1288
+msgid ""
+"How direct speech is punctuated. A chapter is translated by several independent requests and none of them can see what the others chose, so a model left to itself opens one chapter with guillemets and the next with quotation marks.\n"
+"\n"
+"\"Follow the source\" reads the marks off the book, chapter by chapter, and goes with what most chapters use -- it costs nothing, the text is already here -- and states the answer in every request. Pick a convention instead when the source is inconsistent or you want the translation to use another one. Fill the field below to prescribe a rule of your own in words."
+msgstr ""
+
+#: setting.py:1302
+msgid "Dialogue punctuation"
+msgstr ""
+
+#: setting.py:1307
+msgid "Empty: read the convention off the source text."
+msgstr ""
+
+#: setting.py:1309
+msgid ""
+"Your own rule for punctuating dialogue, in the language of the prompt, added to every request instead of the one read off the source. For example: Mark direct speech with « guillemets » and a quotation inside it with double quotation marks."
+msgstr ""
+
+#: setting.py:1316
+msgid "Dialogue rule"
+msgstr ""
+
+#: setting.py:1320
+msgid ""
+"System prompt for Novel Mode. It replaces the engine prompt of the Fine-tuning section entirely; leave it empty to use the shipped one, shown greyed out.\n"
+"\n"
+"Write it in plain prose: no placeholder is required. The languages and the running summary and glossary are added on their own when you do not mention them. Should you want to place them yourself, <slang> and <tlang> are the languages and {context} is the summary and glossary block, which is best kept last so the rest of the prompt stays reusable from the provider cache chapter after chapter."
+msgstr ""
+
+#: setting.py:1332
+msgid "Translation prompt"
+msgstr ""
+
+#: setting.py:1868
+msgid "Below original"
+msgstr "原文の下"
+
+#: setting.py:1869
+msgid "Above original"
+msgstr "原文の上"
+
+#: setting.py:1874
+msgid "With no original"
+msgstr "原文なし"
+
+#: setting.py:1886
+msgid "Original"
+msgstr "原文"
+
+#: setting.py:1920
 msgid "Percentage"
 msgstr "パーセンテージ"
 
+#: setting.py:1921
 msgid "Space count"
 msgstr "スペース数"
 
+#: setting.py:1953
 msgid "Translation Position"
 msgstr "翻訳の配置"
 
+#: setting.py:1997
 msgid "Original Text Color"
 msgstr "原文の文字色"
 
-msgid "e.g.,"
-msgstr "例:"
-
+#: setting.py:2016
 msgid "Translation Text Color"
 msgstr "訳文の文字色"
 
-msgid "Translation Glossary"
-msgstr "翻訳グロッサリー"
-
-msgid "Choose a glossary file"
-msgstr "グロッサリーファイルを選択"
-
+#: setting.py:2070
 msgid "Priority Element"
 msgstr "優先要素"
 
-msgid "CSS selectors for priority elements. One rule per line:"
-msgstr "優先要素のCSSセレクタ。1行に1ルール:"
-
-msgid "Stop further extraction once elements match these rules."
-msgstr "要素がこれらのルールに一致したら、それ以上の抽出を停止します。"
-
+#: setting.py:2087
 msgid "Ignore Element"
 msgstr "無視する要素"
 
-msgid "CSS selectors to exclude elements. One rule per line:"
-msgstr "要素を除外するためのCSSセレクタ。1行に1ルール:"
-
-msgid "Do not translate elements that matches these rules."
-msgstr "これらのルールに一致する要素は翻訳しません。"
-
+#: setting.py:2107
 msgid "Ignore Paragraph"
 msgstr "無視する段落"
 
-msgid "Scope"
-msgstr "スコープ"
-
+#: setting.py:2114
 msgid "Text only"
 msgstr "テキストのみ"
 
+#: setting.py:2116
 msgid "HTML element"
 msgstr "HTML要素"
 
-msgid "Mode"
-msgstr "モード"
-
+#: setting.py:2124
 msgid "Normal"
 msgstr "通常"
 
+#: setting.py:2126
 msgid "Normal (case-sensitive)"
 msgstr "通常 (大文字と小文字を区別)"
 
+#: setting.py:2127
 msgid "Regular Expression"
 msgstr "正規表現"
 
-msgid "Do not translate extracted elements that contain these rules."
-msgstr "これらのルールを含む抽出された要素は翻訳しません。"
-
+#: setting.py:2172
 msgid "Exclude paragraph by keyword. One keyword per line:"
 msgstr "キーワードで段落を除外。1行に1キーワード:"
 
+#: setting.py:2173
 msgid "Exclude paragraph by case-sensitive keyword. One keyword per line:"
 msgstr "大文字と小文字を区別するキーワードで段落を除外。1行に1キーワード:"
 
-msgid "Exclude paragraph by regular expression pattern. One pattern per line:"
+#: setting.py:2175
+msgid ""
+"Exclude paragraph by regular expression pattern. One pattern per line:"
 msgstr "正規表現パターンで段落を除外。1行に1パターン:"
 
+#: setting.py:2190
 msgid "Reserve Element"
 msgstr "保持する要素"
 
-msgid "CSS selectors to reserve elements. One rule per line:"
-msgstr "要素を保持するためのCSSセレクタ。1行に1ルール:"
-
-msgid "Keep elements that match these rules for extraction."
-msgstr "抽出のためにこれらのルールに一致する要素を保持します。"
-
+#: setting.py:2207
 msgid "Ebook Metadata"
 msgstr "電子書籍のメタデータ"
 
+#: setting.py:2211
 msgid "Translate all of the metadata information"
 msgstr "すべてのメタデータ情報を翻訳する"
 
+#: setting.py:2213
 msgid "Append target language to title metadata"
 msgstr "タイトルのメタデータに翻訳先の言語を追加する"
 
+#: setting.py:2215
 msgid "Set target language code to language metadata"
 msgstr "言語のメタデータに翻訳先の言語コードを設定する"
 
+#: setting.py:2218
 msgid "Subjects of ebook (one subject per line)"
 msgstr "電子書籍の主題 (1行に1主題)"
 
+#: setting.py:2220
 msgid "Metadata Translation"
 msgstr "メタデータの翻訳"
 
+#: setting.py:2221
 msgid "Language Mark"
 msgstr "言語マーク"
 
+#: setting.py:2222
 msgid "Language Code"
 msgstr "言語コード"
 
+#: setting.py:2223
 msgid "Append Subjects"
 msgstr "主題を追加"
 
+#: setting.py:71
+msgid "&Save"
+msgstr "保存(&S)"
+
+#: setting.py:238
+msgid "Host"
+msgstr "ホスト"
+
+#: setting.py:411
+msgid "Max errors"
+msgstr "最大エラー数"
+
+#: setting.py:414
+msgid "The number of consecutive errors to abort translation."
+msgstr "翻訳を中止するまでの連続エラー数。"
+
+#: setting.py:664
+msgid ""
+"How much thinking the model may do before answering. \"Default\" omits the field and lets the model decide; \"none\", the default here, turns reasoning off with \"reasoning.enabled: false\"; the other levels are sent as \"reasoning.effort\".\n"
+"\n"
+"Reasoning is off because translation is not a reasoning task and the tokens are far from free: over one measured chapter they were a third of everything billed. They also cost time invisibly, since \"exclude\" keeps them out of the stream and nothing reaches the plugin while the model thinks. Raise it if a particular model needs it."
+msgstr ""
+
+#: setting.py:684
+msgid ""
+"Reason internally but leave the chain of thought out of the response. Recommended: the plugin only reads the translated text, so returning it just costs bandwidth."
+msgstr ""
+
+#: setting.py:716
+msgid "Penalties"
+msgstr ""
+
+#: setting.py:761
+msgid ""
+"Comma separated list of provider slugs that may serve the request. Pin it when one provider gives you the quality, price or quantization you want. Leave empty to let OpenRouter choose."
+msgstr ""
+
+#: setting.py:769
+msgid ""
+"Comma separated providers to try in this order before falling back to the rest."
+msgstr ""
+
+#: setting.py:775
+msgid "Comma separated providers that must never serve the request."
+msgstr ""
+
+#: setting.py:781
+msgid ""
+"Comma separated quantization levels to accept (int4, int8, fp8, fp16, bf16, fp32). Useful to avoid heavily quantized endpoints that degrade long-form translation."
+msgstr ""
+
+#: setting.py:788
+msgid "sort by"
+msgstr ""
+
+#: setting.py:791
+msgid ""
+"Pick the endpoint by price, throughput or latency instead of OpenRouter's balanced order. Defaults to price: a book is hundreds of large requests, and the cheapest endpoint serving the model is felt end to end. Pick throughput when the run is too slow: the same model behind the same gateway has been measured at 200 tokens/s on one endpoint and 30 on another."
+msgstr ""
+
+#: setting.py:798
+msgid "data collection"
+msgstr ""
+
+#: setting.py:802
+msgid ""
+"Whether the provider may store your prompts: \"deny\" only routes to providers that do not."
+msgstr ""
+
+#: setting.py:809
+msgid ""
+"Let OpenRouter fall back to another provider when the selected one fails. Turn it off to fail loudly instead of silently changing model quality mid-book."
+msgstr ""
+
+#: setting.py:814
+msgid ""
+"Only route to providers that support every parameter in the request. On by default: a provider free to drop \"response_format\" is a provider that answers with the source text copied next to the translation, and one free to drop \"reasoning\" bills for thinking you asked it not to do.\n"
+"\n"
+"The request now carries only the parameters the chosen model accepts, which is what used to make this setting risky. Turn it off anyway if OpenRouter answers that no provider is available for your model."
+msgstr ""
+
+#: setting.py:826
+msgid "Only route to Zero Data Retention endpoints."
+msgstr ""
+
+#: setting.py:832
+msgid ""
+"Sent as the HTTP-Referer header, used by the OpenRouter rankings. Optional."
+msgstr ""
+
+#: setting.py:836
+msgid ""
+"Sent as the X-Title header, used by the OpenRouter rankings. Optional."
+msgstr ""
+
+#: setting.py:843
+msgid ""
+"A JSON object merged into the request headers, for anything not covered above."
+msgstr ""
+
+#: setting.py:850
+msgid ""
+"A JSON object merged into the request body, applied last so it can override any field computed above. Use it for parameters the plugin does not expose (logit_bias, stop, transforms, plugins, ...)."
+msgstr ""
+
+#: setting.py:1564 setting.py:1569 setting.py:1575 setting.py:1578
+msgid "Custom"
+msgstr "カスタム"
+
+#: setting.py:1603
+msgid "Fetching..."
+msgstr "取得中..."
+
+#: setting.py:1910
+msgid "Column Gap"
+msgstr "列の間隔"
+
+#: setting.py:2079
+msgid "CSS selectors for priority elements. One rule per line:"
+msgstr "優先要素のCSSセレクタ。1行に1ルール:"
+
+#: setting.py:2099
+msgid "CSS selectors to exclude elements. One rule per line:"
+msgstr "要素を除外するためのCSSセレクタ。1行に1ルール:"
+
+#: setting.py:2113
+msgid "Scope"
+msgstr "スコープ"
+
+#: setting.py:2123
+msgid "Mode"
+msgstr "モード"
+
+#: setting.py:2199
+msgid "CSS selectors to reserve elements. One rule per line:"
+msgstr "要素を保持するためのCSSセレクタ。1行に1ルール:"
+
+#: setting.py:2246 setting.py:2288
 msgid "Proxy host or port is incorrect."
 msgstr "プロキシのホストまたはポートが正しくありません。"
 
-msgid "The proxy is available."
-msgstr "プロキシは利用可能です。"
-
+#: setting.py:2250 setting.py:2263
 msgid "The proxy is not available."
 msgstr "プロキシは利用できません。"
 
-msgid "the prompt must include {}."
-msgstr "プロンプトには {} を含める必要があります。"
-
+#: setting.py:2353 setting.py:2360
 msgid "Invalid color value."
 msgstr "無効な色の値です。"
 
-msgid "The specified glossary file does not exist."
-msgstr "指定されたグロッサリーファイルが存在しません。"
+#: setting.py:133
+msgid "The setting has been saved."
+msgstr "設定が保存されました。"
 
+#: setting.py:369 setting.py:2082 setting.py:2102 setting.py:2145 setting.py:2202
+msgid "Tip: "
+msgstr "ヒント: "
+
+#: setting.py:369
+msgid "API keys will auto-switch if the previous one is unavailable."
+msgstr "以前のAPIキーが利用できない場合、APIキーは自動的に切り替わります。"
+
+#: setting.py:514 setting.py:591
+msgid "Default"
+msgstr "デフォルト"
+
+#: setting.py:678
+msgid ""
+"An explicit reasoning budget (\"reasoning.max_tokens\"), used by Anthropic and Qwen models. Above 0 it replaces the effort level; 0 means \"use the effort level\"."
+msgstr ""
+
+#: setting.py:748
+msgid ""
+"Cap the length of the answer. 0 lets the model use its own limit -- keep it at 0 for Novel Mode, where a whole chunk is translated in one answer."
+msgstr ""
+
+#: setting.py:754
+msgid ""
+"Ask for deterministic sampling. 0 disables it. Only some providers honor it."
+msgstr ""
+
+#: setting.py:1533
+msgid "The provider says nothing about this model."
+msgstr ""
+
+#: setting.py:1540
+msgid "not stated"
+msgstr ""
+
+#: setting.py:1617
+msgid "You need to provide an API key to proceed."
+msgstr "続行するにはAPIキーを提供する必要があります。"
+
+#: setting.py:1633
+msgid "Can't fetch model list"
+msgstr "モデルリストを取得できません"
+
+#: setting.py:1633
+msgid "Can't fetch model list, please check and try again."
+msgstr "モデルリストを取得できません。確認して再度お試しください。"
+
+#: setting.py:1871
+msgid "Right to original"
+msgstr "原文の右"
+
+#: setting.py:1871 setting.py:1873
+msgid "Beta"
+msgstr "ベータ版"
+
+#: setting.py:1873
+msgid "Left to original"
+msgstr "原文の左"
+
+#: setting.py:2002 setting.py:2020 setting.py:2074 setting.py:2091 setting.py:2194
+msgid "e.g.,"
+msgstr "例:"
+
+#: setting.py:2249 setting.py:2260
+msgid "The proxy is available."
+msgstr "プロキシは利用可能です。"
+
+#: setting.py:704
+msgid "Keep only the K most likely tokens. 0 disables it."
+msgstr ""
+
+#: setting.py:708
+msgid ""
+"Drop tokens less likely than this fraction of the top token. 0 disables it."
+msgstr ""
+
+#: setting.py:712
+msgid ""
+"Dynamic filtering relative to the top token probability. 0 disables it."
+msgstr ""
+
+#: setting.py:720
+msgid "Penalize tokens by how often they already appeared. 0 disables it."
+msgstr ""
+
+#: setting.py:725
+msgid "Penalize tokens that appeared at all. 0 disables it."
+msgstr ""
+
+#: setting.py:730
+msgid "Scale down tokens already present in the input. 1 disables it."
+msgstr ""
+
+#: setting.py:1542
+msgid ""
+"Context: {context} tokens · longest reply: {output} tokens · JSON schema: {json}"
+msgstr ""
+
+#: setting.py:2083
+msgid "Stop further extraction once elements match these rules."
+msgstr "要素がこれらのルールに一致したら、それ以上の抽出を停止します。"
+
+#: setting.py:2103
+msgid "Do not translate elements that matches these rules."
+msgstr "これらのルールに一致する要素は翻訳しません。"
+
+#: setting.py:2145
+msgid "Do not translate extracted elements that contain these rules."
+msgstr "これらのルールを含む抽出された要素は翻訳しません。"
+
+#: setting.py:2203
+msgid "Keep elements that match these rules for extraction."
+msgstr "抽出のためにこれらのルールに一致する要素を保持します。"
+
+#: setting.py:1546
+msgid "yes"
+msgstr ""
+
+#: setting.py:1547
+msgid "no"
+msgstr ""
+
+#: setting.py:2370 setting.py:2397 setting.py:2411
 msgid "{} is not a valid CSS selector."
 msgstr "{} は有効なCSSセレクタではありません。"
 
+#: setting.py:2384
 msgid "{} is not a valid regular expression."
 msgstr "{} は有効な正規表現ではありません。"
 
+#: ui.py:52
 msgid "Translate Book"
 msgstr "本を翻訳"
 
+#: ui.py:52
 msgid "Translate Ebook Content"
 msgstr "電子書籍のコンテンツを翻訳"
 
+#: ui.py:82 ui.py:134
 msgid "Setting"
 msgstr "設定"
 
+#: ui.py:83 ui.py:162
 msgid "About"
 msgstr "概要"
 
+#: ui.py:111
 msgid "Please choose a book."
 msgstr "本を選択してください。"
 
-msgid "Please choose at least one book."
-msgstr "少なくとも1冊の本を選択してください。"
+#: ui.py:114
+msgid "One book at a time: please select a single book."
+msgstr ""
 
+#: ui.py:124
 msgid "Cannot change setting while book(s) are under translation."
 msgstr "本の翻訳中は設定を変更できません。"
 
+#: ui.py:141
 msgid "Cannot manage cache while book(s) are under translation."
 msgstr "本の翻訳中はキャッシュを管理できません。"
 
+#: ui.py:151
 msgid "Cache Manager"
 msgstr "キャッシュマネージャー"
-
-msgid "Choose Translation Mode"
-msgstr "翻訳モードを選択"
-
-#~ msgid "HTTP Proxy"
-#~ msgstr "HTTPプロキシ"
-
-#~ msgid "Placeholder is required."
-#~ msgstr "プレースホルダー が必要です。"
