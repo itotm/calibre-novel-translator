@@ -9,7 +9,7 @@ from ...lib.novel import (
     DEFAULT_NOVEL_TRANSLATION_PROMPT, DEFAULT_NOVEL_GLOSSARY_PROMPT,
     DEFAULT_NOVEL_CONTEXT_PROMPT, _extract_json_string,
     tag_paragraphs, parse_tagged_response, _extract_json_object,
-    _extract_entities_fallback,
+    _extract_entities_fallback, suspicious_translations, _ranges,
     novel_cache_id, _href_to_page_id,
     detect_dialogue_style, detect_book_dialogue_style,
     dialogue_convention_style, dialogue_instruction, collapse_blank_lines,
@@ -3338,3 +3338,287 @@ class TestCollapseBlankLines(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Verification of the translations a reply brings back
+# ---------------------------------------------------------------------------
+
+
+class TestSuspiciousTranslations(unittest.TestCase):
+    """The checks that tell a translation filed under the wrong number."""
+
+    NARRATIVE = (
+        'Claudia lay on her bed and stared up at the ceiling. From the '
+        'cookshop below came the smell of boiled cabbage and the noise '
+        'of the drinkers.')
+    NARRATIVE_IT = (
+        'Claudia giaceva sul letto e fissava il soffitto. Dalla cucina '
+        'sottostante salivano l\u2019odore di cavolo bollito e il '
+        'chiasso dei bevitori.')
+
+    def test_a_sound_reply_raises_no_flag(self):
+        sources = {
+            1: '\u2018Leave the rest to the Gods.\u2019',
+            2: self.NARRATIVE,
+            3: 'Horace, Odes, I.9',
+            4: 'The drunk swayed. Claudia could see he wasn\u2019t acting.',
+        }
+        translations = {
+            1: '\u00abLascia il resto agli Dei.\u00bb',
+            2: self.NARRATIVE_IT,
+            3: 'Orazio, Odi, I.9',
+            4: 'L\u2019ubriaco barcoll\u00f2. Claudia cap\u00ec che non '
+               'stava fingendo.',
+        }
+        self.assertEqual({}, suspicious_translations(sources, translations))
+
+    def test_an_ellipsis_in_brackets_is_a_hard_sign(self):
+        for ellipsis in ('[\u2026]', '[...]', '(\u2026)', '[. . .]'):
+            flagged = suspicious_translations(
+                {1: self.NARRATIVE},
+                {1: 'Claudia giaceva sul letto %s bevitori.' % ellipsis})
+            self.assertEqual(('abbreviated', True), flagged.get(1), ellipsis)
+
+    def test_an_ellipsis_the_source_has_is_kept(self):
+        flagged = suspicious_translations(
+            {1: 'He said [\u2026] and left.'},
+            {1: 'Disse [\u2026] e se ne and\u00f2.'})
+        self.assertEqual({}, flagged)
+
+    def test_placeholders_must_match_the_source(self):
+        sources = {1: '{{id_00000}}Silent they fell.', 2: 'Plain text.'}
+        translations = {1: 'Tacquero.', 2: '{{id_00000}}Testo piano.'}
+        flagged = suspicious_translations(sources, translations)
+        self.assertEqual(('placeholders', True), flagged[1])
+        self.assertEqual(('placeholders', True), flagged[2])
+
+    def test_placeholders_tolerate_single_braces_and_spaces(self):
+        flagged = suspicious_translations(
+            {1: '{{id_00001}} the text {{id_00002}}'},
+            {1: '{ id_00001 } il testo {id_00002}'})
+        self.assertEqual({}, flagged)
+
+    def test_the_same_long_text_under_two_numbers_is_hard(self):
+        sources = {1: self.NARRATIVE, 2: 'The drunk swayed and fell over.'}
+        translations = {1: self.NARRATIVE_IT, 2: self.NARRATIVE_IT}
+        flagged = suspicious_translations(sources, translations)
+        self.assertEqual(('duplicate', True), flagged[1])
+        self.assertEqual(('duplicate', True), flagged[2])
+
+    def test_the_same_short_text_is_a_doubt(self):
+        sources = {1: '\u2018No.\u2019', 2: '\u2018No,\u2019'}
+        translations = {1: '\u00abNo.\u00bb', 2: '\u00abNo.\u00bb'}
+        flagged = suspicious_translations(sources, translations)
+        self.assertEqual(('duplicate', False), flagged[1])
+        self.assertEqual(('duplicate', False), flagged[2])
+
+    def test_identical_sources_may_share_a_translation(self):
+        flagged = suspicious_translations(
+            {1: '\u2018Yes.\u2019', 2: '\u2018Yes.\u2019'},
+            {1: '\u00abS\u00ec.\u00bb', 2: '\u00abS\u00ec.\u00bb'})
+        self.assertEqual({}, flagged)
+
+    def test_a_duplicate_of_an_accepted_translation(self):
+        sources = {1: self.NARRATIVE, 2: 'The drunk swayed and fell over.'}
+        flagged = suspicious_translations(
+            sources, {2: self.NARRATIVE_IT}, accepted={1: self.NARRATIVE_IT})
+        self.assertEqual({2: ('duplicate', True)}, flagged)
+
+    def test_dialogue_on_one_side_only_is_soft(self):
+        flagged = suspicious_translations(
+            {1: '\u2018And what does she want with me?\u2019',
+             2: 'She put a sandalled foot out as if to move away.'},
+            {1: 'Mise un piede calzato di sandalo come per allontanarsi.',
+             2: '\u00abE cosa vuole da me?\u00bb'})
+        self.assertEqual(('dialogue', False), flagged[1])
+        self.assertEqual(('dialogue', False), flagged[2])
+
+    def test_a_dash_opens_dialogue_too(self):
+        flagged = suspicious_translations(
+            {1: '\u2018Go home,\u2019 she murmured.'},
+            {1: '\u2014 Vai a casa, \u2014 mormor\u00f2.'})
+        self.assertEqual({}, flagged)
+
+    def test_length_is_measured_against_the_reply(self):
+        sources = {
+            1: self.NARRATIVE, 2: self.NARRATIVE, 3: self.NARRATIVE,
+            4: self.NARRATIVE + ' ' + self.NARRATIVE}
+        translations = {
+            1: self.NARRATIVE_IT, 2: self.NARRATIVE_IT,
+            3: self.NARRATIVE_IT, 4: 'Nessun segno di luce.'}
+        flagged = suspicious_translations(sources, translations)
+        self.assertEqual({4: ('length', False)}, flagged)
+
+    def test_short_sources_are_not_measured(self):
+        flagged = suspicious_translations(
+            {1: 'Chapter 4'}, {1: 'Capitolo quattro, in cui si torna a Roma'})
+        self.assertEqual({}, flagged)
+
+    def test_a_hard_sign_wins_over_a_soft_one(self):
+        flagged = suspicious_translations(
+            {1: '\u2018A long line of speech that goes on for a while.\u2019'},
+            {1: 'Una lunga battuta [\u2026] per un po\u2019.'})
+        self.assertEqual(('abbreviated', True), flagged[1])
+
+    def test_ranges(self):
+        self.assertEqual('1-3, 7, 9-10', _ranges([9, 1, 2, 3, 7, 10]))
+        self.assertEqual('', _ranges([]))
+
+
+class TestReplyCheck(unittest.TestCase):
+    """How the pipeline acts on what the checks find."""
+
+    NARRATIVE = TestSuspiciousTranslations.NARRATIVE
+    NARRATIVE_IT = TestSuspiciousTranslations.NARRATIVE_IT
+
+    def _make_translator(self, config=None):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        translator = NovelTranslator(
+            StructuredEngine(), [], ctx, cache, config=config or {})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        return translator
+
+    def _paragraphs(self, *texts):
+        return [make_paragraph(i, text) for i, text in enumerate(texts)]
+
+    def test_a_hard_sign_is_dropped_and_logged(self):
+        translator = self._make_translator()
+        paragraphs = self._paragraphs(self.NARRATIVE, self.NARRATIVE)
+        parsed = {1: self.NARRATIVE_IT, 2: 'Claudia [\u2026] bevitori.'}
+        translator._check_reply(paragraphs, parsed, {}, set(), 'chunk')
+        self.assertEqual({1: self.NARRATIVE_IT}, parsed)
+        logged = ' '.join(
+            str(c.args[0]) for c in translator.log.call_args_list)
+        self.assertIn('set aside', logged)
+        self.assertIn('shortened with an ellipsis (2)', logged)
+
+    def test_a_soft_sign_is_kept_the_second_time(self):
+        translator = self._make_translator()
+        paragraphs = self._paragraphs(
+            '\u2018Tis the night.', self.NARRATIVE, self.NARRATIVE)
+        doubted = set()
+        first = {1: 'Era la notte.', 2: self.NARRATIVE_IT,
+                 3: self.NARRATIVE_IT + ' Ancora.'}
+        translator._check_reply(paragraphs, first, {}, doubted, 'chunk')
+        self.assertNotIn(1, first)
+        self.assertEqual({1}, doubted)
+        # Asked for on its own, it comes back the same way: kept.
+        second = {1: 'Era la notte, di nuovo.'}
+        translator._check_reply(paragraphs, second, first, doubted, 'retry')
+        self.assertEqual({1: 'Era la notte, di nuovo.'}, second)
+
+    def test_a_reply_wrong_all_over_gets_no_second_chance(self):
+        translator = self._make_translator()
+        speech = '\u2018A line of speech, long enough to be measured.\u2019'
+        paragraphs = self._paragraphs(speech, speech, speech, speech)
+        doubted = {1, 2, 3, 4}
+        reply = {
+            1: 'Narrazione al posto della battuta numero uno.',
+            2: 'Narrazione al posto della battuta numero due.',
+            3: 'Narrazione al posto della battuta numero tre.',
+            4: '\u00abUna battuta, abbastanza lunga da essere misurata.\u00bb'}
+        translator._check_reply(paragraphs, reply, {}, doubted, 'retry')
+        self.assertEqual([4], sorted(reply))
+
+    def test_the_setting_turns_it_off(self):
+        translator = self._make_translator(
+            {'novel_verify_alignment': False})
+        paragraphs = self._paragraphs(self.NARRATIVE)
+        parsed = {1: 'Claudia [\u2026] bevitori.'}
+        translator._check_reply(paragraphs, parsed, {}, set(), 'chunk')
+        self.assertEqual({1: 'Claudia [\u2026] bevitori.'}, parsed)
+
+    def test_a_partial_reply_numbered_from_one_is_not_guessed(self):
+        # Two of the forty paragraphs asked for, numbered 1 and 2: which
+        # two they are is unknown, so none of them is taken.
+        translator = self._make_translator()
+        response = ('{"paragraphs": ['
+                    '{"n": 1, "translation": "A"},'
+                    '{"n": 2, "translation": "B"}]}')
+        parsed = translator._parse_structured_response(
+            response, list(range(36, 76)))
+        self.assertEqual({}, parsed)
+
+    def test_a_short_reply_is_shown_in_the_log(self):
+        translator = self._make_translator(
+            {'novel_log_reply_excerpt': 20})
+        translator.translator.last_generation_id = 'gen-abc'
+        translator._log_reply_coverage(
+            '{"paragraphs": [{"n": 1, "translation": "Uno"}]}',
+            'chunk', [1, 2, 3], {1: 'Uno'})
+        logged = str(translator.log.call_args[0][0])
+        self.assertIn('covered 1 of 3 paragraphs', logged)
+        self.assertIn('numbers kept: 1', logged)
+        self.assertIn('Generation id: gen-abc.', logged)
+        self.assertIn('It begins: {"paragraphs": [{"n"\u2026', logged)
+
+    def test_a_full_reply_is_not_shown(self):
+        translator = self._make_translator()
+        translator._log_reply_coverage('...', 'chunk', [1], {1: 'Uno'})
+        translator.log.assert_not_called()
+
+    def test_the_provider_and_the_finish_reason_are_logged(self):
+        translator = self._make_translator()
+        translator.translator.last_provider = 'DeepInfra'
+        translator.translator.last_finish_reason = 'length'
+        translator._translate_with_retry('system', 'text', label='chunk')
+        logged = str(translator.log.call_args[0][0])
+        self.assertIn('via DeepInfra', logged)
+        self.assertIn('stopped early: length', logged)
+
+    def test_a_reply_that_simply_finished_adds_nothing(self):
+        translator = self._make_translator()
+        translator.translator.last_finish_reason = 'stop'
+        translator._translate_with_retry('system', 'text', label='chunk')
+        logged = str(translator.log.call_args[0][0])
+        self.assertNotIn('stopped', logged)
+        self.assertNotIn('via', logged)
+
+
+class TestVerificationInThePipeline(unittest.TestCase):
+    """A translation the checks refuse is asked for again like a
+    missing one, and the answer to that takes its place."""
+
+    def test_an_abbreviated_translation_is_asked_for_again(self):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        paragraphs = [
+            make_paragraph(0, 'First paragraph, plain.', page='a'),
+            make_paragraph(1, 'Second paragraph, plain too.', page='a'),
+        ]
+        chapter = Chapter(1, 'C1', ['a'], paragraphs)
+        calls = []
+
+        def side_effect(text, prompt):
+            if not _is_translation_call(prompt):
+                return '{"entities": [], "summary": "S", "narrative": true}'
+            calls.append(text)
+            reply = _echo_markers_as_json(text)
+            if len(calls) == 1:
+                reply = reply.replace(
+                    'Second paragraph, plain too. (IT)',
+                    'Second [\u2026] too. (IT)')
+            return reply
+
+        engine = StructuredEngine(translate_side_effect=side_effect)
+        translator = NovelTranslator(
+            engine, [chapter], ctx, cache,
+            config={'novel_min_chars_for_context': 0})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        translator.run()
+        self.assertEqual(
+            'Second paragraph, plain too. (IT)', paragraphs[1].translation)
+        self.assertEqual('First paragraph, plain. (IT)',
+                         paragraphs[0].translation)
+        # One chunk, then one retry for the paragraph set aside.
+        self.assertEqual(2, len(calls))
+        self.assertIn('"n": 2', calls[1])
+        self.assertNotIn('"n": 1', calls[1])

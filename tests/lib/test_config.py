@@ -57,6 +57,8 @@ class TestFunction(unittest.TestCase):
             'novel_context_reasoning': False,
             'novel_min_chars_for_context': 300,
             'novel_reuse_translated_paragraphs': True,
+            'novel_verify_alignment': True,
+            'novel_log_reply_excerpt': 300,
             'novel_on_missing_paragraphs': 'stop',
             'novel_rate_limit_max_wait': 600,
             'novel_reply_max_tokens': 16384,

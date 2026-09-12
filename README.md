@@ -99,7 +99,7 @@ It writes `../novel-translator_v<version>.zip`, checks that the archive is
 installable and prints the command that installs it:
 
 ```sh
-calibre-customize -a ../novel-translator_v1.0.0.zip
+calibre-customize -a ../novel-translator_v1.0.1.zip
 ```
 
 In the GUI the equivalent is *Preferences → Plugins → Load plugin from

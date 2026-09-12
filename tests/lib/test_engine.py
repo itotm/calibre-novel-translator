@@ -481,6 +481,30 @@ class TestChatgptStreamParsing(unittest.TestCase):
             ''.join(chunks)
         self.assertIn('upstream timed out', str(caught.exception))
 
+    def test_the_finish_reason_and_the_provider_are_recorded(self):
+        chunks = self._stream([
+            b'data: {"id":"gen-1","provider":"DeepInfra","choices":'
+            b'[{"delta":{"content":"ciao"},"finish_reason":null}]}',
+            b'data: {"id":"gen-1","provider":"DeepInfra","choices":'
+            b'[{"delta":{"content":""},"finish_reason":"length"}]}',
+            b'data: [DONE]'])
+        self.assertEqual('ciao', ''.join(chunks))
+        self.assertEqual('length', self.translator.last_finish_reason)
+        self.assertEqual('DeepInfra', self.translator.last_provider)
+        self.assertEqual('gen-1', self.translator.last_generation_id)
+
+    def test_a_new_stream_forgets_the_last_reply(self):
+        self.translator.last_finish_reason = 'length'
+        self.translator.last_provider = 'DeepInfra'
+        self.translator.last_generation_id = 'gen-1'
+        chunks = self._stream([
+            b'data: {"choices":[{"delta":{"content":"ciao"}}]}',
+            b'data: [DONE]'])
+        self.assertEqual('ciao', ''.join(chunks))
+        self.assertIsNone(self.translator.last_finish_reason)
+        self.assertIsNone(self.translator.last_provider)
+        self.assertIsNone(self.translator.last_generation_id)
+
     def test_data_lines_without_a_space_are_read(self):
         chunks = self._stream([
             b'data:{"choices":[{"delta":{"content":"ciao"}}]}',

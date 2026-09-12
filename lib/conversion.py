@@ -201,6 +201,10 @@ def get_novel_config():
             'novel_min_chars_for_context', 300),
         'novel_reuse_translated_paragraphs': config.get(
             'novel_reuse_translated_paragraphs', True),
+        'novel_verify_alignment': config.get(
+            'novel_verify_alignment', True),
+        'novel_log_reply_excerpt': config.get(
+            'novel_log_reply_excerpt', 300),
         'novel_on_missing_paragraphs': config.get(
             'novel_on_missing_paragraphs', 'stop'),
         'novel_rate_limit_max_wait': config.get(

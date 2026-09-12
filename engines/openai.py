@@ -328,15 +328,47 @@ class ChatgptTranslate(GenAI):
             body['response_format'] = {'type': 'json_object'}
         return json.dumps(body)
 
+    #: What the last reply said about itself besides its text, for the
+    #: log of Novel Mode: why the model stopped ("stop" when it had
+    #: finished, "length" when it ran into the output limit, a filter
+    #: name when a filter cut it) and, through a gateway that names it,
+    #: which provider served it. None until a reply says.
+    last_finish_reason = None
+    last_provider = None
+    #: The id the gateway gave the reply, with which its record can be
+    #: looked up afterwards (OpenRouter: GET /api/v1/generation?id=...).
+    last_generation_id = None
+
+    def _note_reply(self, data, choice=None):
+        """Record the finish reason, the provider and the id a reply
+        carries."""
+        if not isinstance(data, dict):
+            return
+        provider = data.get('provider')
+        if provider:
+            self.last_provider = provider
+        generation = data.get('id')
+        if generation:
+            self.last_generation_id = str(generation)
+        if isinstance(choice, dict):
+            reason = choice.get('finish_reason') \
+                or choice.get('native_finish_reason')
+            if reason:
+                self.last_finish_reason = reason
+
     def get_result(self, response):
         if self.stream:
             return self._parse_stream(response)
+        self.last_finish_reason = None
+        self.last_provider = None
+        self.last_generation_id = None
         # Parse JSON response with robust schema handling
         try:
             data = json.loads(response)
             # Handle different response schemas
             if 'choices' in data and len(data['choices']) > 0:
                 choice = data['choices'][0]
+                self._note_reply(data, choice)
                 # Standard chat/completions format
                 if 'message' in choice and 'content' in choice['message']:
                     return choice['message']['content']
@@ -378,6 +410,9 @@ class ChatgptTranslate(GenAI):
             turns a failed request into a silently truncated answer that
             the caller then has to notice on its own.
         """
+        self.last_finish_reason = None
+        self.last_provider = None
+        self.last_generation_id = None
         while True:
             try:
                 raw = response.readline()
@@ -412,6 +447,7 @@ class ChatgptTranslate(GenAI):
                     # Handle different streaming response schemas
                     if 'choices' in data and len(data['choices']) > 0:
                         choice = data['choices'][0]
+                        self._note_reply(data, choice)
                         # Standard streaming format
                         if 'delta' in choice and 'content' in choice['delta']:
                             content = choice['delta']['content']

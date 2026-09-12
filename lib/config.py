@@ -121,6 +121,19 @@ defaults: dict[str, Any] = {
     # translations are stored after every chunk, so a run cancelled at
     # chunk 7 of 9 would otherwise pay for those seven chunks twice.
     'novel_reuse_translated_paragraphs': True,
+    # Check the translations of a reply against their paragraphs before
+    # keeping them -- an ellipsis in place of text, placeholders unlike
+    # the source, the same text under two numbers, dialogue where the
+    # source has none, a length out of proportion -- and ask again for
+    # the ones that fail. The number a model puts on a translation is
+    # the only thing that pairs it with its paragraph, and a model that
+    # skips one paragraph and numbers on from there files everything
+    # after it under the wrong number.
+    'novel_verify_alignment': True,
+    # How many characters of a reply that covered fewer paragraphs than
+    # asked go into the log, so what the model did instead can be seen.
+    # 0 logs the count only.
+    'novel_log_reply_excerpt': 300,
     # What to do with paragraphs the model never returned, after the
     # retries inside a chunk and one more pass in smaller chunks.
     #   'stop'     -> end the run with the chapter unfinished; a resume

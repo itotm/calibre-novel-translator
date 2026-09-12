@@ -1010,11 +1010,15 @@ DEFAULT_NOVEL_FORMAT_RULES = (
     'Translate each numbered paragraph below. Rules:\n'
     '1) Keep the exact marker "[N]" on its own line before each translated '
     'paragraph, in the same order and with the same numbers as the source.\n'
-    '2) Do NOT drop, add, split, merge or renumber paragraphs.\n'
+    '2) Do NOT drop, add, split, merge or renumber paragraphs. The '
+    'number above a translation is the number above its source, whatever '
+    'came before it: never number on from a paragraph you skipped.\n'
     '3) Do NOT translate the markers themselves.\n'
     '4) Preserve verbatim any inline placeholder like {id_XXXXX} '
     '(they represent images, line breaks and similar).\n'
-    '5) Reply with the numbered paragraphs only. No preamble, no '
+    '5) Translate every paragraph in full, however long: never shorten '
+    'one or stand in for part of it with an ellipsis such as "[…]".\n'
+    '6) Reply with the numbered paragraphs only. No preamble, no '
     'explanation, no closing remarks.')
 
 DEFAULT_NOVEL_FORMAT_SOURCE = 'Source paragraphs:\n\n{text}'
@@ -1572,15 +1576,165 @@ def _renumbered(found, expected_indices):
     they are given from 1 regardless. When nothing carries an expected
     number and the reply's numbers are exactly 1..k for the k paragraphs
     asked, the order is the mapping.
+
+    A reply that carries fewer than k is not mapped. Which of the
+    paragraphs asked for those few are is anybody's guess, and a wrong
+    guess files a translation under another paragraph, where nothing
+    shows it is wrong. They are asked for again instead.
     """
     expected = list(expected_indices)
     if not found or not expected or expected[0] == 1:
         return None
     if any(n in expected for n in found):
         return None
-    if not set(found) <= set(range(1, len(expected) + 1)):
+    if set(found) != set(range(1, len(expected) + 1)):
         return None
     return {expected[n - 1]: value for n, value in found.items()}
+
+
+# What a model writes in place of the text it did not care to translate:
+# "[…]", "[...]", "(…)", "[. . .]".
+_ABBREVIATION_RE = re.compile(r'[\[(]\s*(?:…|\.(?:\s*\.){2,})\s*[\])]')
+# The inline placeholders the source carries for images and line breaks
+# (see ``Base.placeholder``), with the spaces and single braces a model
+# may put around them.
+_PLACEHOLDER_RE = re.compile(r'\{\{?\s*id\s*_\s*(\d+)\s*\}\}?')
+_DIALOGUE_OPENERS = frozenset(
+    [opening for opening, _pair, _name in DIALOGUE_MARKS]
+    + ['»', '›', '‚', "'"])
+# Below this many characters of source the length of a translation says
+# nothing: a title, a name, a "Yes." come back any size.
+_RATIO_MIN_CHARS = 40
+# A translation this short is duplicated legitimately -- two "‘No.’"
+# lines in a row -- and its duplicate is a doubt, not a certainty.
+_DUPLICATE_MIN_CHARS = 30
+
+VERIFICATION_REASONS = {
+    'abbreviated': _('shortened with an ellipsis'),
+    'placeholders': _('placeholders unlike the source'),
+    'duplicate': _('same text as another paragraph'),
+    'dialogue': _('opens as dialogue where the source does not, or '
+                  'the reverse'),
+    'length': _('length out of proportion with the source'),
+}
+
+
+def _opens_dialogue(text):
+    """Whether ``text`` starts the way a line of speech does: with an
+    opening quotation mark, or with a dash and then the words."""
+    head = (text or '').lstrip()
+    if not head:
+        return False
+    if head[0] in _DIALOGUE_OPENERS:
+        return True
+    return head[0] in DIALOGUE_DASHES and len(head) > 1 and (
+        head[1].isspace() or head[1].isalpha()
+        or head[1] in _DIALOGUE_OPENERS)
+
+
+def _normalized(text):
+    return ' '.join((text or '').split()).casefold()
+
+
+def suspicious_translations(sources, translations, accepted=None):
+    """Find the translations of a reply that cannot be of the paragraph
+    they are filed under.
+
+    ``sources`` maps every paragraph number of the chunk to its text,
+    ``translations`` the numbers of one reply to what came back for
+    them, and ``accepted`` the translations already taken from earlier
+    replies of the same chunk. Returns ``{number: (reason, hard)}``,
+    ``reason`` being a key of ``VERIFICATION_REASONS``.
+
+    The number is the only thing that pairs a translation with its
+    paragraph, and a model that skips one paragraph and numbers on from
+    there files every translation after it under the wrong number, with
+    nothing in the reply to show for it. A retry that receives fewer
+    paragraphs than it asked for does the same when the model numbers
+    them from 1. Having the model echo the source would show it, at
+    twice the output cost; these checks cost nothing and catch the
+    shapes that kind of slip takes:
+
+      * the translation stands in for part of its text with an ellipsis
+        in brackets (hard);
+      * the inline placeholders of the source are not those of the
+        translation (hard);
+      * two paragraphs with different sources got the same translation
+        (hard when the text is long enough to make a coincidence
+        unlikely, soft otherwise);
+      * one opens as a line of speech and the other does not (soft);
+      * the translation is out of proportion with its source, against
+        the proportion the rest of the reply keeps (soft).
+
+    A hard sign is a wrong translation whatever the paragraph. A soft
+    one is what a shift leaves behind but also what an unusual paragraph
+    can look like, so the caller gives it a second chance.
+    """
+    flagged = {}
+
+    def flag(number, reason, hard):
+        current = flagged.get(number)
+        if current is None or (hard and not current[1]):
+            flagged[number] = (reason, hard)
+
+    by_text = {}
+    for number, text in list((accepted or {}).items()) \
+            + list(translations.items()):
+        by_text.setdefault(_normalized(text), set()).add(number)
+    for number, text in translations.items():
+        source = sources.get(number, '') or ''
+        others = by_text.get(_normalized(text), set()) - {number}
+        if any(_normalized(sources.get(other, '')) != _normalized(source)
+               for other in others):
+            flag(number, 'duplicate',
+                 len(text.strip()) >= _DUPLICATE_MIN_CHARS)
+        if _ABBREVIATION_RE.search(text) \
+                and not _ABBREVIATION_RE.search(source):
+            flag(number, 'abbreviated', True)
+        if sorted(_PLACEHOLDER_RE.findall(text)) \
+                != sorted(_PLACEHOLDER_RE.findall(source)):
+            flag(number, 'placeholders', True)
+        if _opens_dialogue(source) != _opens_dialogue(text):
+            flag(number, 'dialogue', False)
+
+    # Length, against the proportion this reply keeps between source
+    # and translation rather than a figure of our own: it is a property
+    # of the pair of languages, and a chunk of the book measures it.
+    ratios = {}
+    for number, text in translations.items():
+        source = (sources.get(number, '') or '').strip()
+        if len(source) >= _RATIO_MIN_CHARS:
+            ratios[number] = len(text.strip()) / len(source)
+    if ratios:
+        ordered = sorted(ratios.values())
+        if len(ordered) >= 3:
+            reference, spread = ordered[len(ordered) // 2], 2.5
+        else:
+            reference, spread = 1.0, 3.0
+        for number, ratio in ratios.items():
+            if ratio > reference * spread or ratio < reference / spread:
+                flag(number, 'length', False)
+    return flagged
+
+
+def _ranges(numbers):
+    """``[1, 2, 3, 7, 9, 10]`` as ``"1-3, 7, 9-10"``, for the log."""
+    parts = []
+    start = previous = None
+    for number in sorted(numbers):
+        if start is None:
+            start = previous = number
+        elif number == previous + 1:
+            previous = number
+        else:
+            parts.append(
+                str(start) if start == previous else '%d-%d' % (
+                    start, previous))
+            start = previous = number
+    if start is not None:
+        parts.append(
+            str(start) if start == previous else '%d-%d' % (start, previous))
+    return ', '.join(parts)
 
 
 def tag_paragraphs(paragraphs):
@@ -2357,6 +2511,26 @@ class NovelTranslator:
         return bool(self._cfg('novel_reuse_translated_paragraphs', True))
 
     @property
+    def verify_alignment(self):
+        """Whether the translations of a reply are checked against their
+        paragraphs before they are kept (see
+        :func:`suspicious_translations`); the ones that fail are asked
+        for again with the missing ones. On by default: the check costs
+        nothing, and without it a reply whose numbers slipped goes into
+        the book as it is."""
+        return bool(self._cfg('novel_verify_alignment', True))
+
+    @property
+    def log_reply_excerpt(self):
+        """How many characters of a reply that covered fewer paragraphs
+        than asked are put in the log, so that what the model did
+        instead can be seen. 0 logs the count only."""
+        try:
+            return max(0, int(self._cfg('novel_log_reply_excerpt', 300)))
+        except (TypeError, ValueError):
+            return 300
+
+    @property
     def reply_max_tokens(self):
         """The most a translation request may ask the model to write,
         in tokens, when the engine leaves the figure to the provider.
@@ -2813,9 +2987,10 @@ class NovelTranslator:
                     # ``Base.abort``): whatever came back is not a reply.
                     raise TranslationCanceled(_('Translation canceled.'))
                 self.log(_(
-                    '  <- {}: {} chars (~{} tokens) in {}s.').format(
+                    '  <- {}: {} chars (~{} tokens) in {}s{}.').format(
                         label, len(result), self._estimate_tokens(result),
-                        round(time.time() - started, 1)))
+                        round(time.time() - started, 1),
+                        self._reply_notes()))
                 return result
             except TranslationCanceled:
                 raise
@@ -2867,6 +3042,92 @@ class NovelTranslator:
         raise TranslationFailed(
             _('Novel mode: giving up after {} attempts. Last error: {}')
             .format(attempts, describe_error(last_error)))
+
+    def _reply_notes(self):
+        """What the engine learnt about the last reply besides its text:
+        the provider that served it, when a gateway names one, and why
+        the model stopped when it was not because it had finished. A
+        reply cut at the output limit and a model that left early look
+        the same from the outside -- a short answer -- and only this
+        tells them apart."""
+        notes = ''
+        served = getattr(self.translator, 'last_provider', None)
+        if served:
+            notes += _(' via {}').format(served)
+        reason = getattr(self.translator, 'last_finish_reason', None)
+        if reason and str(reason).lower() not in ('stop', 'end_turn'):
+            notes += _(' -- stopped early: {}').format(reason)
+        return notes
+
+    def _log_reply_coverage(self, response, label, expected, parsed):
+        """Say how much of what was asked a reply covered when it did
+        not cover it all, with its first characters: the log otherwise
+        shows a small reply and nothing of what the model wrote
+        instead."""
+        if len(parsed) >= len(expected):
+            return
+        line = _(
+            '{label}: the reply covered {found} of {asked} paragraphs '
+            '(numbers kept: {numbers}).').format(
+                label=label, found=len(parsed), asked=len(expected),
+                numbers=_ranges(parsed) or _('none'))
+        generation = getattr(self.translator, 'last_generation_id', None)
+        if generation:
+            # What to look the reply up by in the gateway's own records.
+            line += ' ' + _('Generation id: {}.').format(generation)
+        excerpt = self.log_reply_excerpt
+        if excerpt and response:
+            head = ' '.join(str(response).split())
+            if len(head) > excerpt:
+                head = head[:excerpt] + '…'
+            line += ' ' + _('It begins: {}').format(head)
+        self.log(line)
+
+    def _check_reply(self, chunk_paragraphs, parsed, accepted, doubted,
+                     label):
+        """Drop from ``parsed`` the translations that cannot be of the
+        paragraph they came back under, so that they are asked for again
+        with the missing ones.
+
+        ``accepted`` holds what earlier replies of the chunk already
+        gave; ``doubted`` the numbers set aside for a soft reason so
+        far. A reply that is wrong in many places is a shifted one, and
+        nothing in it is trusted. A doubt about one paragraph of an
+        otherwise sound reply, asked for on its own and answered the
+        same way, is the paragraph -- an unusual one -- and not the
+        reply, and it is kept the second time.
+        """
+        if not self.verify_alignment or not parsed:
+            return
+        sources = {
+            i: (p.original or '')
+            for i, p in enumerate(chunk_paragraphs, start=1)}
+        flagged = suspicious_translations(sources, parsed, accepted)
+        if not flagged:
+            return
+        systemic = len(parsed) >= 4 and len(flagged) * 3 > len(parsed)
+        rejected = {}
+        for number, (reason, hard) in flagged.items():
+            if not hard and number in doubted and not systemic:
+                continue
+            rejected[number] = reason
+            if not hard:
+                doubted.add(number)
+        for number in rejected:
+            del parsed[number]
+        if not rejected:
+            return
+        by_reason = {}
+        for number, reason in rejected.items():
+            by_reason.setdefault(reason, []).append(number)
+        self.log(_(
+            '{label}: {count} translation(s) set aside, they cannot be of '
+            'their paragraph: {details}. They are asked for again.').format(
+                label=label, count=len(rejected),
+                details='; '.join(
+                    '%s (%s)' % (VERIFICATION_REASONS[reason],
+                                 _ranges(numbers))
+                    for reason, numbers in by_reason.items())), True)
 
     def _wait(self, seconds):
         """Sleep in short steps so a cancel does not wait the whole
@@ -3028,6 +3289,9 @@ class NovelTranslator:
         response = self._translate_with_retry(
             system_prompt, user_text, label=chunk_label)
         parsed = parse_tagged_response(response, indices)
+        self._log_reply_coverage(response, chunk_label, indices, parsed)
+        doubted = set()
+        self._check_reply(chunk_paragraphs, parsed, {}, doubted, chunk_label)
         missing = [i for i in indices if i not in parsed]
 
         # Alignment retries: only ask for the missing paragraphs so the LLM
@@ -3048,17 +3312,23 @@ class NovelTranslator:
             fixup_body = self._fill_placeholders(
                 model_text(
                     'The previous response was incomplete. Translate only '
-                  'the numbered paragraphs below, keeping the exact same '
-                  '[N] markers with the same numbers, in the same order. '
-                  'Reply with the numbered paragraphs only.\n\n'
-                  'Source paragraphs:\n\n{text}'),
+                    'the numbered paragraphs below, every one of them in '
+                    'full, keeping the exact same [N] markers with the '
+                    'same numbers as given here -- whether or not they '
+                    'start at 1 -- and in the same order. Reply with the '
+                    'numbered paragraphs only.\n\n'
+                    'Source paragraphs:\n\n{text}'),
                 extra={'{text}': fixup_tagged})
             user_text = fixup_body
+            retry_label = _('{}, alignment retry {}').format(
+                chunk_label, retry + 1)
             response = self._translate_with_retry(
-                system_prompt, user_text,
-                label=_('{}, alignment retry {}').format(
-                    chunk_label, retry + 1))
+                system_prompt, user_text, label=retry_label)
             fixup_parsed = parse_tagged_response(response, missing)
+            self._log_reply_coverage(
+                response, retry_label, missing, fixup_parsed)
+            self._check_reply(
+                chunk_paragraphs, fixup_parsed, parsed, doubted, retry_label)
             parsed.update(fixup_parsed)
             missing = [i for i in indices if i not in parsed]
 
@@ -3395,9 +3665,13 @@ class NovelTranslator:
             'from the input, and "translation", your translation of that '
             'paragraph\'s "source". Do NOT repeat the "source" text and '
             'do not add any other field: the number is what pairs a '
-            'translation with its paragraph. Preserve any inline '
-            'placeholder like {id_XXXXX}. Do not add, drop, or renumber '
-            'paragraphs. Return ONLY the JSON object, no preamble.')
+            'translation with its paragraph, so the "n" of a translation '
+            'is always the "n" of the entry it translates, never a count '
+            'of your own. Translate every entry in full, however short or '
+            'long: never shorten one or stand in for part of it with an '
+            'ellipsis such as "[…]". Preserve any inline placeholder like '
+            '{id_XXXXX}. Do not add, drop, or renumber paragraphs. Return '
+            'ONLY the JSON object, no preamble.')
 
         # Order matters for the provider's prompt cache: the system
         # prompt is identical for every chunk of a chapter and these
@@ -3414,6 +3688,9 @@ class NovelTranslator:
             system_prompt, user_text,
             schema=self._STRUCTURED_RESPONSE_SCHEMA, label=chunk_label)
         parsed = self._parse_structured_response(response, indices)
+        self._log_reply_coverage(response, chunk_label, indices, parsed)
+        doubted = set()
+        self._check_reply(chunk_paragraphs, parsed, {}, doubted, chunk_label)
         missing = [i for i in indices if i not in parsed]
 
         # Alignment retries (structured): ask only for the missing
@@ -3435,17 +3712,24 @@ class NovelTranslator:
                 model_text(
                     'The previous JSON response was incomplete. Reply '
                     'with a JSON object translating ONLY the paragraphs '
-                    'below. Same shape as before: "paragraphs" array of '
-                    '{"n": int, "translation": string}, with no "source" '
-                    'field and nothing else. Return JSON only.')
+                    'below, every one of them in full. Same shape as '
+                    'before: "paragraphs" array of {"n": int, '
+                    '"translation": string}, with no "source" field and '
+                    'nothing else. Copy each "n" from the input as it is, '
+                    'whether or not the numbers start at 1. Return JSON '
+                    'only.')
                 + '\n\nInput:\n' + fixup_json)
+            retry_label = _('{}, JSON retry {}').format(
+                chunk_label, retry + 1)
             response = self._translate_with_retry_structured(
                 system_prompt, fixup_body,
-                schema=self._STRUCTURED_RESPONSE_SCHEMA,
-                label=_('{}, JSON retry {}').format(
-                    chunk_label, retry + 1))
+                schema=self._STRUCTURED_RESPONSE_SCHEMA, label=retry_label)
             fixup_parsed = self._parse_structured_response(
                 response, fixup_indices)
+            self._log_reply_coverage(
+                response, retry_label, fixup_indices, fixup_parsed)
+            self._check_reply(
+                chunk_paragraphs, fixup_parsed, parsed, doubted, retry_label)
             parsed.update(fixup_parsed)
             missing = [i for i in indices if i not in parsed]
 

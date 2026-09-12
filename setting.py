@@ -1011,6 +1011,41 @@ class TranslationSetting(QDialog):
         novel_layout.addRow(
             _('Paragraphs already translated'), novel_reuse_paragraphs)
 
+        novel_verify = QCheckBox(_('Check them against the source'))
+        novel_verify.setToolTip(_(
+            'Check every translation that comes back against its '
+            'paragraph before keeping it, and ask again for the ones '
+            'that cannot be right.\n\n'
+            'On by default. The number the model puts on a translation '
+            'is the only thing that pairs it with its paragraph, and a '
+            'model that skips one paragraph and numbers on from there '
+            'files everything after it under the wrong number, with '
+            'nothing in the reply to show for it. The checks cost no '
+            'request: an ellipsis in place of text, placeholders unlike '
+            'the source, the same text under two numbers, a line that '
+            'opens as dialogue where the source does not, a length out '
+            'of proportion with the rest of the reply. A paragraph set '
+            'aside for one of the milder signs is kept when it comes '
+            'back the same way a second time: an unusual paragraph '
+            'looks like that too.'))
+        novel_layout.addRow(
+            _('Translations that come back'), novel_verify)
+
+        novel_reply_excerpt = QSpinBox()
+        novel_reply_excerpt.setRange(0, 5000)
+        novel_reply_excerpt.setSingleStep(100)
+        novel_reply_excerpt.setToolTip(_(
+            'How many characters of a reply that covered fewer '
+            'paragraphs than asked go into the log.\n\n'
+            '300 by default. The log otherwise shows how small the '
+            'reply was and nothing of what the model wrote instead, '
+            'which is what tells a refusal from a reply cut short or '
+            'from a model that numbered the paragraphs its own way. '
+            '0 logs the count only.'))
+        novel_layout.addRow(
+            _('Reply excerpt in the log'), novel_reply_excerpt)
+        self.disable_wheel_event(novel_reply_excerpt)
+
         novel_prompt_cache = QCheckBox(_('Ask the engine to cache it'))
         novel_prompt_cache.setToolTip(_(
             'Ask the engine to keep the prompt prefix in its cache.\n\n'
@@ -1358,6 +1393,10 @@ class TranslationSetting(QDialog):
                 'novel_output_aware_chunking', True)))
             novel_reuse_paragraphs.setChecked(bool(self.config.get(
                 'novel_reuse_translated_paragraphs', True)))
+            novel_verify.setChecked(bool(self.config.get(
+                'novel_verify_alignment', True)))
+            novel_reply_excerpt.setValue(int(self.config.get(
+                'novel_log_reply_excerpt', 300) or 0))
             novel_prompt_cache.setChecked(bool(self.config.get(
                 'novel_prompt_cache', True)))
             novel_context_tokens.setValue(int(self.config.get(
@@ -1438,6 +1477,11 @@ class TranslationSetting(QDialog):
         novel_reuse_paragraphs.toggled.connect(
             lambda checked: self.config.update(
                 novel_reuse_translated_paragraphs=bool(checked)))
+        novel_verify.toggled.connect(
+            lambda checked: self.config.update(
+                novel_verify_alignment=bool(checked)))
+        novel_reply_excerpt.valueChanged.connect(
+            _persist_novel('novel_log_reply_excerpt', int))
         novel_prompt_cache.toggled.connect(
             lambda checked: self.config.update(
                 novel_prompt_cache=bool(checked)))
