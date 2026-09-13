@@ -374,11 +374,10 @@ class ConversionWorker:
             metadata.title = ebook_title
             if ebook_metadata_config.get('lang_code'):
                 metadata.language = ebook.lang_code
+            # Only the subjects the user asked for: the book carries no
+            # mention of the plugin that translated it.
             subjects = ebook_metadata_config.get('subjects')
-            metadata.tags += (subjects or []) + [
-                'Translated by %s: %s' % (
-                    NovelTranslatorPlugin.name,
-                    NovelTranslatorPlugin.homepage)]
+            metadata.tags += subjects or []
             set_metadata(file, metadata, ebook.output_format)
 
         if self.config.get('to_library'):

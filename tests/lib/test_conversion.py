@@ -81,10 +81,8 @@ class TestConversionWorker(unittest.TestCase):
         mock_set_metadata.assert_called_once_with(file, metadata, 'epub')
         self.assertEqual('test custom title [German]', metadata.title)
         self.assertEqual('de', metadata.language)
-        self.assertEqual([
-            'test subject 1', 'test subject 2', 'Translated by Novel '
-            'Translator: https://github.com/itotm/'
-            'calibre-plugin-ebook-translator'], metadata.tags)
+        # The subjects the user asked for and nothing about the plugin.
+        self.assertEqual(['test subject 1', 'test subject 2'], metadata.tags)
 
         self.worker.db.create_book_entry.assert_called_once_with(metadata)
         self.worker.api.add_format.assert_called_once_with(
