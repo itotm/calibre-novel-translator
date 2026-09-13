@@ -10,6 +10,8 @@ from ...lib.novel import (
     DEFAULT_NOVEL_CONTEXT_PROMPT, _extract_json_string,
     tag_paragraphs, parse_tagged_response, _extract_json_object,
     _extract_entities_fallback, suspicious_translations, _ranges,
+    realign_shifted, title_matches, probe_engine, PROBE_PARAGRAPHS,
+    INFO_NOVEL_USAGE, INFO_NOVEL_REPORT,
     novel_cache_id, _href_to_page_id,
     detect_dialogue_style, detect_book_dialogue_style,
     dialogue_convention_style, dialogue_instruction, collapse_blank_lines,
@@ -1226,7 +1228,8 @@ class TestNovelTranslator(unittest.TestCase):
             return 'Summary text.'
 
         engine = FakeEngine(translate_side_effect=side_effect)
-        translator = self._make_translator(engine)
+        translator = self._make_translator(
+            engine, {'novel_context_timing': 'after'})
         translator.run()
 
         # The model was asked for the second paragraph only.
@@ -1477,7 +1480,7 @@ class TestNovelTranslator(unittest.TestCase):
         sizing = [line for line in lines if line.startswith('Sizing:')]
         self.assertEqual(1, len(sizing))
         self.assertIn('8192', sizing[0])
-        self.assertIn('75 paragraphs', sizing[0])
+        self.assertIn('50 paragraphs', sizing[0])
 
     def test_a_chunk_asks_for_room_to_reply(self):
         # Sent without max_tokens, a provider applied its own default
@@ -2878,7 +2881,8 @@ class TestCombinedContextCall(unittest.TestCase):
             return 'Not a story chapter.'
         engine = FakeEngine(translate_side_effect=side_effect)
         translator = self._make_translator(
-            engine, {'novel_combined_context_call': False})
+            engine, {'novel_combined_context_call': False,
+                     'novel_context_timing': 'after'})
         translator._translate_chapter(self.chapters[0])
 
         self.assertEqual('', self.ctx.get_summaries()[0]['summary'])
@@ -3566,10 +3570,35 @@ class TestReplyCheck(unittest.TestCase):
         translator = self._make_translator()
         translator.translator.last_provider = 'DeepInfra'
         translator.translator.last_finish_reason = 'length'
+        translator.translator.last_generation_id = 'gen-42'
         translator._translate_with_retry('system', 'text', label='chunk')
         logged = str(translator.log.call_args[0][0])
         self.assertIn('via DeepInfra', logged)
         self.assertIn('stopped early: length', logged)
+        self.assertIn('[gen-42]', logged)
+
+    def test_the_report_is_on_disk_before_the_chapter_is_reported_done(self):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        paragraphs = [make_paragraph(0, 'Alpha 1', page='a')]
+        chapter = Chapter(1, 'Chapter 1', ['a'], paragraphs)
+        engine = FakeEngine(translate_side_effect=lambda text, prompt: (
+            _echo_markers(text) if _is_translation_call(prompt)
+            else '{"narrative": true, "summary": "S", "entities": []}'))
+        translator = NovelTranslator(
+            engine, [chapter], ctx, cache,
+            config={'novel_min_chars_for_context': 0})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        order = []
+        cache.set_info.side_effect = lambda key, value: order.append(key)
+        translator.set_chapter_done(
+            lambda *args: order.append('chapter_done'))
+        translator.run()
+        self.assertLess(
+            order.index(INFO_NOVEL_REPORT), order.index('chapter_done'))
 
     def test_a_reply_that_simply_finished_adds_nothing(self):
         translator = self._make_translator()
@@ -3622,3 +3651,847 @@ class TestVerificationInThePipeline(unittest.TestCase):
         self.assertEqual(2, len(calls))
         self.assertIn('"n": 2', calls[1])
         self.assertNotIn('"n": 1', calls[1])
+
+
+# ---------------------------------------------------------------------------
+# Replies whose numbers slipped, retries in halves, titles, the report,
+# the probe
+# ---------------------------------------------------------------------------
+
+
+NARR = ('The house was quiet. From the street below came the smell of '
+        'bread and the noise of carts; nobody had noticed the lamp.')
+NARR_IT = ('La casa era silenziosa. Dalla strada saliva l\u2019odore del '
+           'pane e il rumore dei carri; nessuno aveva notato la lampada.')
+DLG = '\u2018And what does she want with me, after all this time?\u2019'
+DLG_IT = '\u00abE cosa vuole da me, dopo tutto questo tempo?\u00bb'
+
+
+class TestRealignShifted(unittest.TestCase):
+    """A reply whose numbers slipped is read as it was meant, and only
+    then."""
+
+    def _sources(self):
+        # Narrative and dialogue alternate, so a slip shows.
+        return {i: (DLG if i % 2 == 0 else NARR) for i in range(1, 9)}
+
+    def _translation_of(self, i):
+        return (DLG_IT if i % 2 == 0 else NARR_IT) + ' (%d)' % i
+
+    def test_a_skipped_paragraph_shifts_the_rest_back(self):
+        sources = self._sources()
+        # The model skipped 3 and numbered on: what it calls 3 is 4.
+        reply = {1: self._translation_of(1), 2: self._translation_of(2)}
+        for n in range(3, 8):
+            reply[n] = self._translation_of(n + 1)
+        realigned, moves = realign_shifted(sources, reply)
+        self.assertEqual([(n, n + 1) for n in range(3, 8)], moves)
+        self.assertEqual(
+            {1, 2, 4, 5, 6, 7, 8}, set(realigned))
+        for n in (4, 5, 6, 7, 8):
+            self.assertEqual(self._translation_of(n), realigned[n])
+
+    def test_a_sound_reply_moves_nothing(self):
+        sources = self._sources()
+        reply = {n: self._translation_of(n) for n in sources}
+        realigned, moves = realign_shifted(sources, reply)
+        self.assertEqual([], moves)
+        self.assertEqual(reply, realigned)
+
+    def test_one_odd_paragraph_moves_nothing(self):
+        sources = self._sources()
+        reply = {n: self._translation_of(n) for n in sources}
+        # Paragraph 3 came back as dialogue: wrong, but the rest is fine.
+        reply[3] = DLG_IT
+        realigned, moves = realign_shifted(sources, reply)
+        self.assertEqual([], moves)
+        self.assertNotIn(3, realigned)
+        self.assertEqual(7, len(realigned))
+
+    def test_two_skips_grow_the_offset(self):
+        sources = {i: (DLG if i % 2 == 0 else NARR) for i in range(1, 15)}
+        reply = {1: self._translation_of(1), 2: self._translation_of(2)}
+        # Skipped 3: 3..7 hold 4..8. Then skipped 9: 8..12 hold 10..14.
+        for n in (3, 4, 5, 6, 7):
+            reply[n] = self._translation_of(n + 1)
+        for n in (8, 9, 10, 11, 12):
+            reply[n] = self._translation_of(n + 2)
+        realigned, moves = realign_shifted(sources, reply)
+        self.assertEqual(self._translation_of(14), realigned[14])
+        self.assertEqual(self._translation_of(8), realigned[8])
+        self.assertNotIn(3, realigned)
+        self.assertNotIn(9, realigned)
+        self.assertEqual(10, len(moves))
+
+    def test_a_second_skip_too_close_to_confirm_is_left_out(self):
+        # Three paragraphs between two skips are not enough to confirm
+        # either offset: nothing is moved on a guess.
+        sources = {i: (DLG if i % 2 == 0 else NARR) for i in range(1, 13)}
+        reply = {1: self._translation_of(1), 2: self._translation_of(2)}
+        for n in (3, 4, 5):
+            reply[n] = self._translation_of(n + 1)
+        for n in (6, 7, 8, 9, 10):
+            reply[n] = self._translation_of(n + 2)
+        realigned, moves = realign_shifted(sources, reply)
+        for number, target in moves:
+            self.assertEqual(self._translation_of(target), realigned[target])
+
+    def test_the_pipeline_moves_them_and_asks_for_the_hole(self):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        translator = NovelTranslator(
+            StructuredEngine(), [], ctx, cache, config={})
+        translator.set_logging(Mock())
+        translator.translator.last_provider = 'Shifty'
+        sources = self._sources()
+        paragraphs = [make_paragraph(i, sources[i]) for i in sources]
+        parsed = {1: self._translation_of(1), 2: self._translation_of(2)}
+        for n in range(3, 8):
+            parsed[n] = self._translation_of(n + 1)
+        translator._check_reply(paragraphs, parsed, {}, set(), 'chunk')
+        self.assertEqual({1, 2, 4, 5, 6, 7, 8}, set(parsed))
+        self.assertEqual(5, translator.realigned)
+        self.assertEqual(1, translator.provider_stats['Shifty']['failures'])
+        logged = ' '.join(
+            str(c.args[0]) for c in translator.log.call_args_list)
+        self.assertIn('slipped from paragraph 3', logged)
+
+    def test_it_can_be_turned_off(self):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        translator = NovelTranslator(
+            StructuredEngine(), [], ctx, cache,
+            config={'novel_realign_shifted_replies': False})
+        translator.set_logging(Mock())
+        sources = self._sources()
+        paragraphs = [make_paragraph(i, sources[i]) for i in sources]
+        parsed = {1: self._translation_of(1), 2: self._translation_of(2)}
+        for n in range(3, 8):
+            parsed[n] = self._translation_of(n + 1)
+        translator._check_reply(paragraphs, parsed, {}, set(), 'chunk')
+        self.assertEqual(0, translator.realigned)
+        # The shifted ones are set aside instead, to be asked for again.
+        self.assertEqual({1, 2}, set(parsed))
+
+
+class TestProviderExclusion(unittest.TestCase):
+    def _translator(self, config=None):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        engine = StructuredEngine()
+        engine.last_provider = 'Flaky'
+        engine.excluded = []
+        engine.exclude_provider = lambda name: (
+            engine.excluded.append(name) or True)
+        translator = NovelTranslator(
+            engine, [], ctx, cache, config=config or {})
+        translator.set_logging(Mock())
+        return translator, engine
+
+    def test_excluded_after_the_configured_failures(self):
+        translator, engine = self._translator()
+        translator._note_provider_failure('short')
+        self.assertEqual([], engine.excluded)
+        translator._note_provider_failure('short')
+        self.assertEqual(['Flaky'], engine.excluded)
+        self.assertTrue(translator.provider_stats['Flaky']['excluded'])
+        # Not asked again once excluded.
+        translator._note_provider_failure('short')
+        self.assertEqual(['Flaky'], engine.excluded)
+
+    def test_zero_never_excludes(self):
+        translator, engine = self._translator(
+            {'novel_provider_failures_before_exclusion': 0})
+        for _i in range(5):
+            translator._note_provider_failure('short')
+        self.assertEqual([], engine.excluded)
+        self.assertEqual(5, translator.provider_stats['Flaky']['failures'])
+
+    def test_a_very_short_reply_counts(self):
+        translator, engine = self._translator()
+        translator._log_reply_coverage('...', 'chunk', list(range(1, 11)),
+                                       {1: 'a', 2: 'b'})
+        self.assertEqual(1, translator.provider_stats['Flaky']['failures'])
+
+
+class TestRetryBatches(unittest.TestCase):
+    def _translator(self, config=None):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        translator = NovelTranslator(
+            StructuredEngine(), [], ctx, cache, config=config or {})
+        translator.set_logging(Mock())
+        return translator
+
+    def test_many_are_asked_for_in_halves(self):
+        translator = self._translator()
+        self.assertEqual(
+            [[1, 2, 3, 4, 5], [6, 7, 8, 9]],
+            translator._retry_batches(range(1, 10)))
+
+    def test_a_handful_goes_at_once(self):
+        translator = self._translator()
+        self.assertEqual(
+            [[1, 2, 3, 4]], translator._retry_batches([1, 2, 3, 4]))
+
+    def test_the_setting_turns_it_off(self):
+        translator = self._translator({'novel_retry_split': False})
+        self.assertEqual(
+            [list(range(1, 10))], translator._retry_batches(range(1, 10)))
+
+    def test_a_retry_is_sent_in_two_requests(self):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        paragraphs = [
+            make_paragraph(i, 'Paragraph number %d, plain.' % i, page='a')
+            for i in range(10)]
+        chapter = Chapter(1, 'C1', ['a'], paragraphs)
+        calls = []
+
+        def side_effect(text, prompt):
+            if not _is_translation_call(prompt):
+                return '{"entities": [], "summary": "S", "narrative": true}'
+            calls.append(text)
+            reply = _echo_markers_as_json(text)
+            if len(calls) == 1:
+                # Only the first two paragraphs the first time.
+                obj = json.loads(reply)
+                obj['paragraphs'] = obj['paragraphs'][:2]
+                reply = json.dumps(obj)
+            return reply
+
+        engine = StructuredEngine(translate_side_effect=side_effect)
+        translator = NovelTranslator(
+            engine, [chapter], ctx, cache,
+            config={'novel_min_chars_for_context': 0,
+                    'novel_context_timing': 'after'})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        translator.run()
+        # First call, then the eight missing in two halves.
+        self.assertEqual(3, len(calls))
+        self.assertIn('"n": 3', calls[1])
+        self.assertNotIn('"n": 7', calls[1])
+        self.assertIn('"n": 7', calls[2])
+        for p in paragraphs:
+            self.assertIn('(IT)', p.translation)
+
+
+class TestTitleMatches(unittest.TestCase):
+    def test_whole_words_case_insensitive(self):
+        self.assertTrue(title_matches('Also by Paul Doherty', 'also by'))
+        self.assertTrue(
+            title_matches('COPYRIGHT PAGE', 'copyright, praise for'))
+        self.assertFalse(title_matches('Discontents', 'contents'))
+        self.assertFalse(title_matches('Chapter 1', 'copyright'))
+        self.assertFalse(title_matches('', 'copyright'))
+        self.assertFalse(title_matches('Contents', ''))
+
+
+class TestTitledChapters(unittest.TestCase):
+    """What a title says about a chapter spares a request."""
+
+    def _run(self, title, config=None):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        paragraphs = [
+            make_paragraph(0, 'The Nightingale Gallery', page='a'),
+            make_paragraph(1, 'The House of the Red Slayer', page='a'),
+        ]
+        chapter = Chapter(1, title, ['a'], paragraphs)
+        calls = []
+
+        def side_effect(text, prompt):
+            calls.append(prompt)
+            if _is_translation_call(prompt):
+                return _echo_markers(text)
+            return ('{"narrative": true, "summary": "Summary.", '
+                    '"entities": []}')
+
+        engine = FakeEngine(translate_side_effect=side_effect)
+        base = {'novel_min_chars_for_context': 0,
+                'novel_skip_context_last_chapter': False}
+        base.update(config or {})
+        translator = NovelTranslator(
+            engine, [chapter], ctx, cache, config=base)
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        translator.run()
+        return paragraphs, calls, ctx
+
+    def test_a_list_of_other_books_stays_as_it_is(self):
+        paragraphs, calls, ctx = self._run('Also by Paul Doherty')
+        self.assertEqual('The Nightingale Gallery', paragraphs[0].translation)
+        self.assertEqual([], calls)
+        self.assertEqual(1, ctx.get_progress())
+
+    def test_front_matter_is_translated_without_a_summary(self):
+        paragraphs, calls, ctx = self._run('Praise for Paul Doherty')
+        self.assertIn('(IT)', paragraphs[0].translation)
+        self.assertTrue(all(_is_translation_call(p) for p in calls))
+        self.assertEqual('', ctx.get_summaries()[0]['summary'])
+
+    def test_a_story_chapter_gets_its_summary(self):
+        paragraphs, calls, ctx = self._run('Chapter 1')
+        self.assertTrue(any(not _is_translation_call(p) for p in calls))
+        self.assertEqual('Summary.', ctx.get_summaries()[0]['summary'])
+
+    def test_the_lists_can_be_replaced(self):
+        paragraphs, calls, ctx = self._run(
+            'Praise for Paul Doherty',
+            {'novel_front_matter_titles': 'colophon',
+             'novel_untranslated_titles': 'praise for'})
+        self.assertEqual('The Nightingale Gallery', paragraphs[0].translation)
+
+
+class TestContextBeforeTheChapter(unittest.TestCase):
+    def test_the_glossary_guides_the_chapter_itself(self):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        paragraphs = [
+            make_paragraph(0, 'Alpha walked into the room.', page='a'),
+            make_paragraph(1, 'Alpha sat down.', page='a'),
+        ]
+        chapter = Chapter(1, 'Chapter 1', ['a'], paragraphs)
+        calls = []
+
+        def side_effect(text, prompt):
+            calls.append((prompt, text))
+            if _is_translation_call(prompt):
+                return _echo_markers(text)
+            self.assertNotIn('Translation:', text)
+            self.assertIn('Alpha walked', text)
+            return ('{"narrative": true, "summary": "Alpha arrives.", '
+                    '"entities": [{"source": "Alpha", "translation": '
+                    '"Alfa", "type": "character", "notes": ""}]}')
+
+        engine = FakeEngine(translate_side_effect=side_effect)
+        translator = NovelTranslator(
+            engine, [chapter], ctx, cache,
+            config={'novel_min_chars_for_context': 0,
+                    'novel_skip_context_last_chapter': False})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        translator.run()
+        # The context call came first, and the translation prompt
+        # carried what it learned.
+        self.assertFalse(_is_translation_call(calls[0][0]))
+        self.assertTrue(_is_translation_call(calls[1][0]))
+        self.assertIn('Alfa', calls[1][0])
+        self.assertIn('Alpha arrives.', calls[1][0])
+        self.assertEqual('Alfa', ctx.get_glossary()['Alpha']['translation'])
+        self.assertEqual('Alpha arrives.', ctx.get_summaries()[0]['summary'])
+        self.assertEqual(2, len(calls))
+
+
+class TestUsageReport(unittest.TestCase):
+    def _translator(self, engine=None, stored=None):
+        cache = Mock()
+        cache.get_info.side_effect = lambda key: (
+            stored if key == INFO_NOVEL_USAGE else None)
+        ctx = ContextManager(cache).load()
+        translator = NovelTranslator(
+            engine or StructuredEngine(), [], ctx, cache, config={})
+        translator.set_logging(Mock())
+        return translator, cache
+
+    def test_replies_are_added_up_per_kind(self):
+        translator, cache = self._translator()
+        engine = translator.translator
+        engine.last_usage = {'prompt_tokens': 100, 'completion_tokens': 40,
+                             'cost': 0.001}
+        engine.last_provider = 'DeepInfra'
+        translator._request_kind = 'translation'
+        translator._translate_with_retry('system', 'text', label='chunk')
+        translator._request_kind = 'retry'
+        translator._translate_with_retry('system', 'text', label='retry')
+        self.assertEqual(2, translator.usage['translation']['requests']
+                         + translator.usage['retry']['requests'])
+        self.assertEqual(100, translator.usage['retry']['prompt_tokens'])
+        self.assertAlmostEqual(0.001, translator.usage['retry']['cost'])
+        self.assertEqual(2, translator.provider_stats['DeepInfra']['requests'])
+        logged = str(translator.log.call_args[0][0])
+        self.assertIn('100 in + 40 out tokens', logged)
+        self.assertIn('$0.001', logged)
+
+    def test_tokens_are_estimated_when_not_reported(self):
+        translator, cache = self._translator()
+        translator._request_kind = 'translation'
+        translator._translate_with_retry('system', 'x' * 400, label='chunk')
+        entry = translator.usage['translation']
+        self.assertEqual(1, entry['estimated'])
+        self.assertGreater(entry['prompt_tokens'], 0)
+        self.assertIn('estimated', translator.build_report())
+
+    def test_the_report_names_the_totals_and_the_advice(self):
+        translator, cache = self._translator()
+        translator.usage = {
+            'translation': {'requests': 10, 'prompt_tokens': 1000,
+                            'completion_tokens': 500, 'cost': 0.02,
+                            'estimated': 0},
+            'context': {'requests': 2, 'prompt_tokens': 300,
+                        'completion_tokens': 100, 'cost': 0.005,
+                        'estimated': 0}}
+        translator.provider_stats = {
+            'Flaky': {'requests': 8, 'failures': 3, 'excluded': True},
+            'Solid': {'requests': 4, 'failures': 0, 'excluded': False}}
+        translator.realigned = 7
+        report = translator.build_report()
+        self.assertIn('total', report)
+        self.assertIn('12', report)
+        self.assertIn('1300', report)
+        self.assertIn('$0.025', report)
+        self.assertIn('Flaky: 8 replies, 3 unreliable', report)
+        self.assertIn('excluded from the current run', report)
+        self.assertIn('Flaky gave 3 unreliable replies out of 8', report)
+        self.assertIn('7 translation(s) came back under the wrong number',
+                      report)
+
+    def test_the_totals_survive_a_resume(self):
+        stored = json.dumps({
+            'usage': {'translation': {
+                'requests': 5, 'prompt_tokens': 50, 'completion_tokens': 20,
+                'cost': 0.0, 'estimated': 0}},
+            'providers': {'Old': {'requests': 5, 'failures': 2,
+                                  'excluded': True}},
+            'realigned': 3})
+        translator, cache = self._translator(stored=stored)
+        translator._load_usage()
+        self.assertEqual(5, translator.usage['translation']['requests'])
+        self.assertEqual(3, translator.realigned)
+        # An exclusion lasts one run.
+        self.assertFalse(translator.provider_stats['Old']['excluded'])
+        translator._publish_report()
+        keys = [c.args[0] for c in cache.set_info.call_args_list]
+        self.assertIn(INFO_NOVEL_USAGE, keys)
+        self.assertIn(INFO_NOVEL_REPORT, keys)
+
+    def test_a_run_ends_with_the_report(self):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        paragraphs = [make_paragraph(0, 'Alpha 1', page='a')]
+        chapter = Chapter(1, 'Chapter 1', ['a'], paragraphs)
+        engine = FakeEngine(translate_side_effect=lambda text, prompt: (
+            _echo_markers(text) if _is_translation_call(prompt)
+            else '{"narrative": true, "summary": "S", "entities": []}'))
+        translator = NovelTranslator(
+            engine, [chapter], ctx, cache,
+            config={'novel_min_chars_for_context': 0})
+        reports = []
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        translator.set_report(reports.append)
+        translator.run()
+        self.assertTrue(reports)
+        self.assertIn('Requests and tokens', reports[-1])
+        logged = ' '.join(
+            str(c.args[0]) for c in translator.log.call_args_list)
+        self.assertIn('Requests and tokens', logged)
+
+
+class TestReportTimeAndShare(unittest.TestCase):
+    def _translator(self):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        translator = NovelTranslator(
+            StructuredEngine(), [], ctx, cache, config={})
+        translator.set_logging(Mock())
+        return translator
+
+    def test_request_time_is_added_up_per_kind(self):
+        translator = self._translator()
+        translator._request_kind = 'translation'
+        with patch(module_name + '.time.time', side_effect=[
+                100.0, 107.5, 107.5, 107.5, 107.5, 107.5, 107.5, 107.5]):
+            translator._translate_with_retry('system', 'text', label='c')
+        self.assertAlmostEqual(
+            7.5, translator.usage['translation']['seconds'])
+        self.assertIn('8s', translator.build_report())
+
+    def test_the_share_of_troubled_text_is_measured_on_its_length(self):
+        translator = self._translator()
+        translator.translator.last_provider = 'P'
+        paragraphs = [
+            make_paragraph(0, 'a' * 300), make_paragraph(1, 'b' * 100)]
+        # The long one came back, the short one did not.
+        translator._check_reply(
+            paragraphs, {1: 'x' * 300}, {}, set(), 'chunk', [1, 2])
+        self.assertEqual(400, translator.text_stats['chars'])
+        self.assertEqual(100, translator.text_stats['bad_chars'])
+        self.assertEqual(400, translator.provider_stats['P']['chars'])
+        self.assertEqual(100, translator.provider_stats['P']['bad_chars'])
+        report = translator.build_report()
+        self.assertIn('25% of its text set aside or moved', report)
+        self.assertIn('400 characters, of which 25%', report)
+
+    def test_the_html_report_is_a_table(self):
+        translator = self._translator()
+        translator.usage = {'translation': {
+            'requests': 3, 'prompt_tokens': 12000, 'completion_tokens': 4000,
+            'cost': 0.01, 'estimated': 0, 'seconds': 65}}
+        translator.run_seconds = 3700
+        html = translator.build_report_html()
+        self.assertIn('<table', html)
+        self.assertIn('<td align="right">12,000</td>', html)
+        self.assertIn('1m 05s', html)
+        self.assertIn('1h 01m 40s', html)
+        self.assertIn('<b>total</b>', html)
+
+    def test_durations_and_shares(self):
+        self.assertEqual('12s', NovelTranslator._duration(12.4))
+        self.assertEqual('4m 05s', NovelTranslator._duration(245))
+        self.assertEqual('0%', NovelTranslator._share(0, 0))
+        self.assertEqual('2.5%', NovelTranslator._share(25, 1000))
+        self.assertEqual('40%', NovelTranslator._share(400, 1000))
+
+    def test_the_run_time_is_kept_across_runs(self):
+        stored = json.dumps({'usage': {}, 'providers': {}, 'realigned': 0,
+                             'text': {'chars': 10, 'bad_chars': 0},
+                             'run_seconds': 120.0})
+        cache = Mock()
+        cache.get_info.side_effect = lambda key: (
+            stored if key == INFO_NOVEL_USAGE else None)
+        ctx = ContextManager(cache).load()
+        translator = NovelTranslator(
+            StructuredEngine(), [], ctx, cache, config={})
+        translator.set_logging(Mock())
+        translator._load_usage()
+        self.assertEqual(120.0, translator.run_seconds)
+        self.assertIn('2m 00s', translator.build_report())
+
+
+class TestProbe(unittest.TestCase):
+    def test_a_well_behaved_model_passes(self):
+        def side_effect(text, prompt):
+            return _echo_markers_as_json(text)
+        engine = StructuredEngine(translate_side_effect=side_effect)
+        engine.model = 'fake/model'
+        report, reliable = probe_engine(engine, {}, details=True)
+        self.assertTrue(reliable)
+        self.assertIn('Paragraphs back: %d of %d' % (
+            len(PROBE_PARAGRAPHS), len(PROBE_PARAGRAPHS)), report)
+        self.assertIn('aligned, every check passed', report)
+        self.assertIn('fake/model', report)
+        self.assertIsInstance(probe_engine(engine, {}), str)
+
+    def test_a_model_that_drops_paragraphs_fails(self):
+        def side_effect(text, prompt):
+            obj = json.loads(_echo_markers_as_json(text))
+            obj['paragraphs'] = obj['paragraphs'][:1]
+            return json.dumps(obj)
+        engine = StructuredEngine(translate_side_effect=side_effect)
+        report, reliable = probe_engine(engine, {}, details=True)
+        self.assertFalse(reliable)
+        self.assertIn('NOT reliable', report)
+        self.assertIn('(missing)', report)
+
+    def test_a_failing_engine_is_reported_not_raised(self):
+        engine = StructuredEngine(
+            translate_side_effect=lambda text, prompt: Exception('boom'))
+        report, reliable = probe_engine(engine, {}, details=True)
+        self.assertFalse(reliable)
+        self.assertIn('Failed:', report)
+
+
+class TestProgressByText(unittest.TestCase):
+    def test_the_bar_follows_the_characters(self):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        paragraphs = [
+            make_paragraph(0, 'Short front matter.', page='a'),
+            make_paragraph(1, 'x' * 981, page='b'),
+        ]
+        chapters = [
+            Chapter(1, 'Copyright', ['a'], paragraphs[:1]),
+            Chapter(2, 'Chapter 1', ['b'], paragraphs[1:]),
+        ]
+        engine = FakeEngine(translate_side_effect=lambda text, prompt: (
+            _echo_markers(text) if _is_translation_call(prompt)
+            else '{"narrative": true, "summary": "S", "entities": []}'))
+        translator = NovelTranslator(
+            engine, chapters, ctx, cache,
+            config={'novel_min_chars_for_context': 0})
+        translator.set_logging(Mock())
+        fractions = []
+        translator.set_progress(lambda f, m: fractions.append((f, m)))
+        translator.run()
+        # The copyright page is 19 of 1000 characters: not a third.
+        after_front_matter = [
+            f for f, m in fractions if 'chapter 1/2' in m]
+        self.assertTrue(after_front_matter)
+        self.assertLess(after_front_matter[0], 0.05)
+        self.assertIn('1% of the text', [
+            m for f, m in fractions if 'chapter 1/2' in m][0])
+        self.assertEqual(1.0, fractions[-1][0])
+
+
+class TestSourceContextAndChunksInFlight(unittest.TestCase):
+    def _book(self, n=6):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        paragraphs = [
+            make_paragraph(i, 'Paragraph %d of the chapter.' % i, page='a')
+            for i in range(n)]
+        chapter = Chapter(1, 'Chapter 1', ['a'], paragraphs)
+        return cache, ctx, paragraphs, chapter
+
+    def _engine(self, calls):
+        def side_effect(text, prompt):
+            if not _is_translation_call(prompt):
+                return '{"narrative": true, "summary": "S", "entities": []}'
+            calls.append(text)
+            return _echo_markers_as_json(text)
+        return StructuredEngine(translate_side_effect=side_effect)
+
+    def test_the_source_around_a_chunk_is_shown_not_translated(self):
+        cache, ctx, paragraphs, chapter = self._book()
+        calls = []
+        translator = NovelTranslator(
+            self._engine(calls), [chapter], ctx, cache,
+            config={'novel_min_chars_for_context': 0,
+                    'novel_max_paragraphs_per_chunk': 2,
+                    'novel_chunk_context': 'source',
+                    'novel_source_context_paragraphs': 1})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        translator.run()
+        self.assertEqual(3, len(calls))
+        first, middle, last = calls
+        self.assertNotIn('BEFORE', first)
+        self.assertIn('AFTER', first)
+        self.assertIn('Paragraph 2 of the chapter.', first)
+        self.assertIn('BEFORE', middle)
+        self.assertIn('AFTER', middle)
+        self.assertIn('Paragraph 1 of the chapter.', middle)
+        self.assertIn('Paragraph 4 of the chapter.', middle)
+        self.assertNotIn('AFTER', last)
+        self.assertNotIn('already translated', middle)
+        # Only the chunk's own paragraphs are in the JSON to translate.
+        self.assertNotIn('"source": "Paragraph 1 of the chapter."', middle)
+        for p in paragraphs:
+            self.assertIn('(IT)', p.translation)
+
+    def test_the_translated_overlap_is_the_default(self):
+        cache, ctx, paragraphs, chapter = self._book()
+        calls = []
+        translator = NovelTranslator(
+            self._engine(calls), [chapter], ctx, cache,
+            config={'novel_min_chars_for_context': 0,
+                    'novel_max_paragraphs_per_chunk': 2})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        translator.run()
+        self.assertIn('already translated', calls[1])
+        self.assertNotIn('BEFORE', calls[1])
+
+    def test_chunks_in_flight_translate_the_whole_chapter(self):
+        cache, ctx, paragraphs, chapter = self._book(10)
+        calls = []
+        engine = self._engine(calls)
+        translator = NovelTranslator(
+            engine, [chapter], ctx, cache,
+            config={'novel_min_chars_for_context': 0,
+                    'novel_max_paragraphs_per_chunk': 3,
+                    'novel_parallel_chunks': 4})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        translator.run()
+        self.assertEqual(4, len(calls))
+        for p in paragraphs:
+            self.assertEqual(
+                'Paragraph %d of the chapter. (IT)' % p.id, p.translation)
+        # The translated overlap gave way to the source context.
+        self.assertTrue(all('already translated' not in c for c in calls))
+        self.assertTrue(any('BEFORE' in c for c in calls))
+        logged = ' '.join(
+            str(c.args[0]) for c in translator.log.call_args_list)
+        self.assertIn('Chunks in flight at once: 4', logged)
+        # Every chunk ran on its own engine copy; the root is clean.
+        self.assertEqual([], engine.clones)
+        self.assertEqual(4, translator.usage['translation']['requests'])
+
+    def test_a_failing_chunk_ends_the_chapter(self):
+        cache, ctx, paragraphs, chapter = self._book(6)
+
+        def side_effect(text, prompt):
+            # The second chunk, by the source it carries to translate
+            # (the numbers are chunk-local, 1 and 2 in every chunk).
+            if '"source": "Paragraph 2 of the chapter."' in text:
+                raise TranslationFailed('boom')
+            return _echo_markers_as_json(text)
+        engine = StructuredEngine(translate_side_effect=side_effect)
+        engine.request_attempt = 1
+        engine.abort = Mock()
+        translator = NovelTranslator(
+            engine, [chapter], ctx, cache,
+            config={'novel_min_chars_for_context': 0,
+                    'novel_max_paragraphs_per_chunk': 2,
+                    'novel_parallel_chunks': 3})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        with self.assertRaises(TranslationFailed):
+            translator.run()
+        engine.abort.assert_called()
+
+    def test_an_exclusion_reaches_the_root_engine(self):
+        class ExcludingEngine(StructuredEngine):
+            def __init__(self):
+                super().__init__()
+                self.excluded = []
+
+            def exclude_provider(self, name):
+                self.excluded.append(name)
+                return True
+
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        engine = ExcludingEngine()
+        translator = NovelTranslator(engine, [], ctx, cache, config={})
+        translator.set_logging(Mock())
+        clone = translator._clone()
+        clone.translator.excluded = []
+        clone.translator.last_provider = 'Flaky'
+        clone._note_provider_failure('short')
+        clone._note_provider_failure('short')
+        self.assertEqual(['Flaky'], engine.excluded)
+        self.assertEqual(['Flaky'], clone.translator.excluded)
+        self.assertTrue(translator.provider_stats['Flaky']['excluded'])
+
+
+class TestBalancedChunks(unittest.TestCase):
+    def _paragraphs(self, sizes):
+        return [make_paragraph(i, 'x' * (4 * size))
+                for i, size in enumerate(sizes)]
+
+    def test_chunks_in_flight_are_cut_to_the_same_size(self):
+        # Filled to a cap of 1000 tokens: 1000 + 1000 + 200.
+        budget = TokenBudget(budget=1000, max_paragraphs=0)
+        paragraphs = self._paragraphs([250] * 8 + [100, 100])
+        filled = budget.chunk_with_stats(paragraphs)
+        self.assertEqual([1000, 1000, 200], [t for _c, t, _r in filled])
+        balanced = budget.balance(filled)
+        self.assertEqual(3, len(balanced))
+        self.assertEqual([750, 750, 700], [t for _c, t, _r in balanced])
+        # Nothing lost, nothing reordered.
+        self.assertEqual(
+            [p.id for p in paragraphs],
+            [p.id for c, _t, _r in balanced for p in c])
+
+    def test_the_caps_still_hold(self):
+        budget = TokenBudget(budget=1000, max_paragraphs=3)
+        paragraphs = self._paragraphs([100] * 7)
+        balanced = budget.balance(budget.chunk_with_stats(paragraphs))
+        self.assertTrue(all(
+            len(c) <= 3 and t <= 1000 for c, t, _r in balanced))
+        self.assertEqual(7, sum(len(c) for c, _t, _r in balanced))
+
+    def test_one_chunk_is_left_alone(self):
+        budget = TokenBudget(budget=1000, max_paragraphs=0)
+        filled = budget.chunk_with_stats(self._paragraphs([100, 100]))
+        self.assertEqual(filled, budget.balance(filled))
+
+    def test_only_when_in_flight(self):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        paragraphs = [
+            make_paragraph(i, 'Paragraph %d of the chapter.' % i, page='a')
+            for i in range(10)]
+        chapter = Chapter(1, 'Chapter 1', ['a'], paragraphs)
+        for parallel, expected in ((1, [4, 4, 2]), (3, [4, 3, 3])):
+            calls = []
+
+            def side_effect(text, prompt):
+                if not _is_translation_call(prompt):
+                    return ('{"narrative": true, "summary": "S", '
+                            '"entities": []}')
+                calls.append(text.count('"source":'))
+                return _echo_markers_as_json(text)
+            translator = NovelTranslator(
+                StructuredEngine(translate_side_effect=side_effect),
+                [chapter], ctx, cache,
+                config={'novel_min_chars_for_context': 0,
+                        'novel_max_paragraphs_per_chunk': 4,
+                        'novel_parallel_chunks': parallel})
+            translator.set_logging(Mock())
+            translator.set_progress(Mock())
+            translator.run()
+            self.assertEqual(expected, sorted(calls, reverse=True),
+                             'parallel=%d' % parallel)
+            ctx.reset()
+            for p in paragraphs:
+                p.translation = None
+
+
+class TestAuthorBriefFallback(unittest.TestCase):
+    """A search that leaves the model saying it knows nothing is
+    followed by the question without the search."""
+
+    class Engine(SearchingEngine):
+        def __init__(self, replies):
+            SearchingEngine.__init__(self, None)
+            self.replies = list(replies)
+            self.texts = []
+
+        def translate(self, text):
+            self.bodies.append(self.get_body(text))
+            self.texts.append(text)
+            return self.replies.pop(0)
+
+    def _translator(self, replies):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        engine = self.Engine(replies)
+        translator = NovelTranslator(
+            engine, [], ctx, cache,
+            config={'novel_book_author': 'Paul Doherty',
+                    'novel_book_title': 'Murder Imperial',
+                    'novel_author_style': 'auto'})
+        translator.set_logging(Mock())
+        return translator, engine
+
+    def test_no_information_with_search_is_asked_again_without(self):
+        translator, engine = self._translator(
+            ['NO INFORMATION', BRIEF])
+        self.assertEqual(BRIEF, translator._ensure_author_style())
+        self.assertEqual(['search+plain', 'plain'], engine.bodies)
+        self.assertIn('Search the web', engine.texts[0])
+        self.assertIn('Do not search anything', engine.texts[1])
+        logged = ' '.join(
+            str(c.args[0]) for c in translator.log.call_args_list)
+        self.assertIn('asking again from what it knows', logged)
+
+    def test_no_information_twice_is_the_final_answer(self):
+        translator, engine = self._translator(
+            ['NO INFORMATION', 'NO INFORMATION.'])
+        self.assertEqual('', translator._ensure_author_style())
+        self.assertEqual(2, len(engine.bodies))
+        notes = [c.args[1] for c in translator.cache.set_info.call_args_list
+                 if c.args and c.args[0] == INFO_NOVEL_STYLE_NOTE]
+        self.assertIn('no reliable information', notes[-1])
+
+    def test_a_brief_from_the_search_is_kept(self):
+        translator, engine = self._translator([BRIEF])
+        self.assertEqual(BRIEF, translator._ensure_author_style())
+        self.assertEqual(['search+plain'], engine.bodies)

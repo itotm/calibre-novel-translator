@@ -30,9 +30,12 @@ This module has no direct dependency on Qt so it is fully unit-testable.
 """
 
 import re
+import copy
 import json
 import time
+import threading
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from calibre.utils.localization import _  # type: ignore
 
@@ -549,6 +552,63 @@ class TokenBudget:
             chunks.append((current, current_tokens, self.REASON_END))
         return chunks
 
+    REASON_BALANCED = 'balanced'
+
+    def balance(self, chunks_with_stats, reserved=0):
+        """Redistribute the paragraphs of ``chunks_with_stats`` (as
+        :meth:`chunk_with_stats` returns them) over the same number of
+        chunks so that each carries about the same tokens.
+
+        Filling every chunk to the cap and leaving the remainder to the
+        last one is right when chunks go one after the other: it is the
+        fewest requests. When they are in flight together a chapter
+        takes as long as its longest chunk, and 3637 + 1945 + 674 tokens
+        is a chapter that waits for the first while the third is done
+        in a quarter of the time; 2085 + 2085 + 2086 is one that is
+        done in two thirds of it. The caps still hold, and a chunk is
+        closed at the paragraph that brings its total closest to its
+        share.
+        """
+        if len(chunks_with_stats) < 2:
+            return chunks_with_stats
+        available = max(200, self.budget - int(reserved))
+        paragraphs = [p for chunk, _t, _r in chunks_with_stats for p in chunk]
+        weights = [
+            0 if getattr(p, 'ignored', False)
+            else self.estimate(p.original or '') for p in paragraphs]
+        total = sum(weights)
+        wanted = len(chunks_with_stats)
+        if not total:
+            return chunks_with_stats
+        share = total / float(wanted)
+        chunks = []
+        current, current_tokens, current_translatable = [], 0, 0
+        for p, tokens in zip(paragraphs, weights):
+            if getattr(p, 'ignored', False):
+                current.append(p)
+                continue
+            target = share * (len(chunks) + 1)
+            done = sum(t for _c, t, _r in chunks)
+            over_cap = (
+                current_tokens + tokens > available
+                or (self.max_paragraphs
+                    and current_translatable >= self.max_paragraphs))
+            # Close when adding this paragraph would leave the running
+            # total further from the chunk's share than stopping here,
+            # as long as there are chunks left to fill.
+            past_share = current and len(chunks) < wanted - 1 and abs(
+                done + current_tokens + tokens - target) > abs(
+                    done + current_tokens - target)
+            if current and (over_cap or past_share):
+                chunks.append((current, current_tokens, self.REASON_BALANCED))
+                current, current_tokens, current_translatable = [], 0, 0
+            current.append(p)
+            current_tokens += tokens
+            current_translatable += 1
+        if current:
+            chunks.append((current, current_tokens, self.REASON_END))
+        return chunks
+
 
 # ---------------------------------------------------------------------------
 # Context / summary / glossary manager
@@ -569,6 +629,10 @@ INFO_NOVEL_STYLE_NOTE = 'novel_author_style_note'
 # it again after being closed: what the author brief answered, why a
 # chapter's summary was dropped, where a run stopped.
 INFO_NOVEL_LOG = 'novel_log'
+# What the runs on the book cost so far -- requests, tokens, money, per
+# kind of request and per provider -- and the report drawn from it.
+INFO_NOVEL_USAGE = 'novel_usage'
+INFO_NOVEL_REPORT = 'novel_report'
 
 
 # Words of a glossary key that are worth matching on their own. Four
@@ -699,7 +763,7 @@ class ContextManager:
         raw = self.cache.get_info(INFO_NOVEL_STYLE_NOTE)
         return raw if isinstance(raw, str) else ''
 
-    def glossary_for(self, text=None, limit=0):
+    def glossary_for(self, text=None, limit=0, glossary=None):
         """Return the glossary entries that ``text`` actually mentions.
 
         The glossary grows with every chapter, while a chapter only needs
@@ -726,7 +790,7 @@ class ContextManager:
             ones, since the older an entry is the more chapters the model
             has already seen it in. 0 means no limit.
         """
-        entries = self.glossary
+        entries = self.glossary if glossary is None else glossary
         if text:
             haystack = text.casefold()
             entries = {
@@ -771,7 +835,10 @@ class ContextManager:
             self.progress = int(chapter_index)
         self._persist()
 
-    def _merge_glossary(self, updates):
+    def _merged_glossary(self, updates):
+        """A copy of the glossary with ``updates`` merged in; the stored
+        glossary is left alone."""
+        glossary = {key: dict(value) for key, value in self.glossary.items()}
         for item in updates:
             if not isinstance(item, dict):
                 continue
@@ -779,13 +846,17 @@ class ContextManager:
             translation = (item.get('translation') or '').strip()
             if not source or not translation:
                 continue
-            entry = self.glossary.get(source, {})
+            entry = glossary.get(source, {})
             entry['translation'] = translation
             if item.get('type'):
                 entry['type'] = str(item['type']).strip()
             if item.get('notes'):
                 entry['notes'] = str(item['notes']).strip()
-            self.glossary[source] = entry
+            glossary[source] = entry
+        return glossary
+
+    def _merge_glossary(self, updates):
+        self.glossary = self._merged_glossary(updates)
         # Enforce cap (FIFO on insertion order preserved by dict).
         if self.glossary_max_entries and \
                 len(self.glossary) > self.glossary_max_entries:
@@ -852,7 +923,7 @@ class ContextManager:
         return '\n'.join(lines)
 
     def context_text(self, budget_tokens=4000, ratio=4.0,
-                     relevant_to=None, glossary_limit=0):
+                     relevant_to=None, glossary_limit=0, pending=None):
         """Return a formatted string containing the recent summaries and the
         glossary, truncated to fit ``budget_tokens`` (approximate).
 
@@ -865,13 +936,25 @@ class ContextManager:
             enough to fill the budget would otherwise lose exactly the
             names it learned most recently.
         :glossary_limit: hard cap on the number of glossary entries.
+        :pending: ``(summary_entry, glossary_updates)`` of the chapter
+            being translated, worked out from its source before its
+            translation started: shown with the rest but not stored
+            until the chapter is done.
         """
         max_chars = max(200, int(budget_tokens * ratio))
 
-        summaries = self.summaries
+        summaries = list(self.summaries)
+        glossary = None
+        if pending:
+            entry, updates = pending
+            if entry and (entry.get('summary') or '').strip():
+                summaries.append(entry)
+            if updates:
+                glossary = self._merged_glossary(updates)
 
         glossary_text = self._format_glossary(
-            self.glossary_for(relevant_to, limit=glossary_limit))
+            self.glossary_for(
+                relevant_to, limit=glossary_limit, glossary=glossary))
         summaries_text = self._format_summaries(summaries)
 
         combined = (
@@ -1109,6 +1192,51 @@ DEFAULT_NOVEL_CONTEXT_PROMPT = (
     'Translation:\n{translated_text}')
 
 
+# The same report, asked before the chapter is translated and from its
+# source alone (``novel_context_timing`` = 'before'). Half the tokens of
+# the report above, which sends the chapter twice, and the glossary it
+# yields is already in the prompt when the chapter's own chunks are
+# translated: a name is rendered the same way in chunk 1 and chunk 3.
+DEFAULT_NOVEL_CONTEXT_SOURCE_PROMPT = (
+    'You are about to translate a chapter of a novel into <tlang>. '
+    'Before it is translated, report on it with a single JSON object '
+    'holding a summary and the named entities it introduces, with the '
+    'rendering each of them is to have in <tlang>.\n\n'
+    'Reply with ONLY that JSON object. No preamble, no explanation, no '
+    'markdown fences. Follow this exact schema:\n\n'
+    '{"narrative": true, "summary": "...", "entities": [\n'
+    '  {"source": "Aslan", "translation": "Aslan", "type": "character", '
+    '"notes": "the lion"},\n'
+    '  {"source": "Narnia", "translation": "Narnia", "type": "place", '
+    '"notes": ""}\n'
+    ']}\n\n'
+    '"narrative" is true when the chapter is part of the story itself '
+    'and false for anything around it: a copyright page, a list of '
+    'other books, a dedication, a table of contents, a preface, an '
+    'afterword, notes, a biography of the author. When it is false, '
+    'make "summary" one sentence saying what the chapter is and '
+    '"entities" an empty list.\n\n'
+    '"summary" is 150 to 350 words in <tlang>. Focus on plot events, '
+    'character introductions and developments, key locations, and '
+    'anything that will help translate this chapter and the following '
+    'ones consistently (relationships between characters, unresolved '
+    'threads). No preamble, no metacommentary.\n\n'
+    '"entities" lists only the NEW characters, places, unique objects '
+    'and organizations, each with the rendering to use for it in '
+    '<tlang>: keep a proper name in its original form unless <tlang> '
+    'has a long-established equivalent, and render descriptive names, '
+    'titles, and the names of objects and institutions the way a '
+    'published translation would. The most important first and at most '
+    'forty of them. Never list the same name twice, and never list a '
+    'name that is already known. Use an empty list when there are '
+    'none.\n\n'
+    'Write "narrative" and "summary" before "entities": a reply cut '
+    'short must still carry the summary.\n\n'
+    'Chapter {chapter_num}: "{chapter_title}"\n\n'
+    'Already known (skip these): {existing_keys}\n\n'
+    'Source:\n{source_text}')
+
+
 # Asked once per book, before the first chapter, when
 # ``novel_author_style`` allows it. The answer is a translator's brief on
 # how the book is written; it is stored with the summaries and the
@@ -1129,10 +1257,13 @@ NO_AUTHOR_INFORMATION = 'NO INFORMATION'
 # search on or pick another model, rather than get a brief made up.
 AUTHOR_STYLE_SOURCES = {
     'search': (
-        'Search the web and rely on what is actually documented about '
-        'this author and this book: criticism, reviews, translators\' '
-        'notes, encyclopaedia entries, publisher copy. Prefer sources '
-        'that discuss the prose itself rather than the plot.'),
+        'Search the web and rely first on what is actually documented '
+        'about this author and this book: criticism, reviews, '
+        'translators\' notes, encyclopaedia entries, publisher copy. '
+        'Prefer sources that discuss the prose itself rather than the '
+        'plot. Where the sources found say nothing about the prose, rely '
+        'on what you know of how this author writes from what you have '
+        'read; the sources come first where the two disagree.'),
     'model': (
         'Rely on what you know about this author and this book: the '
         'criticism, reviews, translators\' notes and encyclopaedia '
@@ -1619,6 +1750,36 @@ VERIFICATION_REASONS = {
 }
 
 
+# Titles of the pages around the story, as a table of contents usually
+# names them. A chapter whose title carries one of them is translated
+# but not summarised, and its names do not go into the glossary: there
+# is no story in it to keep track of, and the call that says so costs
+# as much as a real summary.
+FRONT_MATTER_TITLES = (
+    'copyright, also by, other books by, by the same author, books by, '
+    'praise for, about the author, dedication, acknowledgements, '
+    'acknowledgments, contents, title page, half title, colophon')
+# Titles of the pages that stay in the language they are written in: a
+# list of the author's other books is a list of titles the reader will
+# look for as they were published.
+UNTRANSLATED_TITLES = 'also by, other books by, by the same author, books by'
+
+
+def title_matches(title, patterns):
+    """Whether ``title`` carries one of the comma-separated ``patterns``
+    as whole words, case-insensitively: "Also by Paul Doherty" matches
+    "also by", "Discontents" does not match "contents"."""
+    haystack = ' '.join((title or '').split()).casefold()
+    if not haystack:
+        return False
+    for pattern in str(patterns or '').split(','):
+        pattern = ' '.join(pattern.split()).casefold()
+        if pattern and re.search(
+                r'(?<!\w)%s(?!\w)' % re.escape(pattern), haystack):
+            return True
+    return False
+
+
 def _opens_dialogue(text):
     """Whether ``text`` starts the way a line of speech does: with an
     opening quotation mark, or with a dash and then the words."""
@@ -1634,6 +1795,98 @@ def _opens_dialogue(text):
 
 def _normalized(text):
     return ' '.join((text or '').split()).casefold()
+
+
+def _length_reference(sources, translations):
+    """The proportion between translation and source this reply keeps,
+    measured on its long paragraphs: the median of their ratios, or 1.0
+    with a wider tolerance when there are too few to measure. It is a
+    property of the pair of languages, and a chunk of the book is the
+    right place to read it."""
+    ratios = []
+    for number, text in translations.items():
+        source = (sources.get(number, '') or '').strip()
+        if len(source) >= _RATIO_MIN_CHARS:
+            ratios.append(len(text.strip()) / len(source))
+    if len(ratios) >= 3:
+        return sorted(ratios)[len(ratios) // 2], 2.5
+    return 1.0, 3.0
+
+
+def _paragraph_flags(source, text, reference=1.0, spread=3.0):
+    """The signs, on one paragraph, that ``text`` is not its translation:
+    ``[(reason, hard), ...]``, empty when nothing is wrong. The reply-wide
+    signs -- the same text under two numbers -- are not here."""
+    flags = []
+    if _ABBREVIATION_RE.search(text) and not _ABBREVIATION_RE.search(source):
+        flags.append(('abbreviated', True))
+    if sorted(_PLACEHOLDER_RE.findall(text)) \
+            != sorted(_PLACEHOLDER_RE.findall(source)):
+        flags.append(('placeholders', True))
+    if _opens_dialogue(source) != _opens_dialogue(text):
+        flags.append(('dialogue', False))
+    stripped = source.strip()
+    if len(stripped) >= _RATIO_MIN_CHARS:
+        ratio = len(text.strip()) / len(stripped)
+        if ratio > reference * spread or ratio < reference / spread:
+            flags.append(('length', False))
+    return flags
+
+
+def realign_shifted(sources, translations, max_shift=3, confirm=3):
+    """Read a reply whose numbers slipped.
+
+    A model that skips a paragraph and numbers on from there labels every
+    later translation one short: the text under 25 is the translation of
+    26, and so on until the next skip. Returns ``(realigned, moves)``:
+    the translations under the numbers of the paragraphs they actually
+    translate, and one ``(from, to)`` pair for each that moved. What
+    fits no paragraph at any offset is left out, to be asked for again.
+
+    The reading is deliberately hard to trigger. A translation is moved
+    only when it fails the checks where it stands, passes them ``d``
+    places further on, the next ``confirm`` translations pass them at
+    the same offset too, and at least one of those also fails where it
+    stands: one odd paragraph does not move anything, a run of them
+    that all make sense one place further on does. The offset only ever
+    grows, because a skip is what a model does; a paragraph translated
+    twice is not.
+    """
+    numbers = sorted(translations)
+    reference, spread = _length_reference(sources, translations)
+
+    def fits(number, text):
+        source = sources.get(number)
+        return source is not None and not _paragraph_flags(
+            source, text, reference, spread)
+
+    realigned = {}
+    moves = []
+    offset = 0
+    i = 0
+    while i < len(numbers):
+        number = numbers[i]
+        text = translations[number]
+        if fits(number + offset, text):
+            realigned[number + offset] = text
+            if offset:
+                moves.append((number, number + offset))
+            i += 1
+            continue
+        window = numbers[i:i + confirm + 1]
+        shifted = None
+        if len(window) >= 2:
+            for delta in range(offset + 1, offset + max_shift + 1):
+                if all(fits(m + delta, translations[m]) for m in window) \
+                        and any(not fits(m + offset, translations[m])
+                                for m in window[1:]):
+                    shifted = delta
+                    break
+        if shifted is None:
+            i += 1
+            continue
+        offset = shifted
+    return realigned, moves
 
 
 def suspicious_translations(sources, translations, accepted=None):
@@ -1681,6 +1934,9 @@ def suspicious_translations(sources, translations, accepted=None):
     for number, text in list((accepted or {}).items()) \
             + list(translations.items()):
         by_text.setdefault(_normalized(text), set()).add(number)
+    # Length is judged against the proportion this reply keeps between
+    # source and translation rather than a figure of our own.
+    reference, spread = _length_reference(sources, translations)
     for number, text in translations.items():
         source = sources.get(number, '') or ''
         others = by_text.get(_normalized(text), set()) - {number}
@@ -1688,33 +1944,21 @@ def suspicious_translations(sources, translations, accepted=None):
                for other in others):
             flag(number, 'duplicate',
                  len(text.strip()) >= _DUPLICATE_MIN_CHARS)
-        if _ABBREVIATION_RE.search(text) \
-                and not _ABBREVIATION_RE.search(source):
-            flag(number, 'abbreviated', True)
-        if sorted(_PLACEHOLDER_RE.findall(text)) \
-                != sorted(_PLACEHOLDER_RE.findall(source)):
-            flag(number, 'placeholders', True)
-        if _opens_dialogue(source) != _opens_dialogue(text):
-            flag(number, 'dialogue', False)
-
-    # Length, against the proportion this reply keeps between source
-    # and translation rather than a figure of our own: it is a property
-    # of the pair of languages, and a chunk of the book measures it.
-    ratios = {}
-    for number, text in translations.items():
-        source = (sources.get(number, '') or '').strip()
-        if len(source) >= _RATIO_MIN_CHARS:
-            ratios[number] = len(text.strip()) / len(source)
-    if ratios:
-        ordered = sorted(ratios.values())
-        if len(ordered) >= 3:
-            reference, spread = ordered[len(ordered) // 2], 2.5
-        else:
-            reference, spread = 1.0, 3.0
-        for number, ratio in ratios.items():
-            if ratio > reference * spread or ratio < reference / spread:
-                flag(number, 'length', False)
+        for reason, hard in _paragraph_flags(source, text, reference, spread):
+            flag(number, reason, hard)
     return flagged
+
+
+def _money(value):
+    """A cost in dollars for the log: whole cents and below, without
+    the noise of floating point."""
+    try:
+        value = float(value or 0.0)
+    except (TypeError, ValueError):
+        return '0'
+    text = '%.6f' % value
+    text = text.rstrip('0').rstrip('.')
+    return text or '0'
 
 
 def _ranges(numbers):
@@ -2029,8 +2273,37 @@ class NovelTranslator:
         # Whether the chapter being worked on belongs to the story, as
         # the model reported when asked for its summary.
         self._chapter_is_narrative = True
+        # What the request being sent is for -- 'translation', 'retry',
+        # 'context', 'author' -- so the totals can tell them apart.
+        self._request_kind = 'other'
+        # Requests, tokens and cost per kind of request; replies per
+        # provider and how many of them were unreliable; how many
+        # translations were moved back under their paragraph. Loaded
+        # from the cache when the run starts, so they cover the book
+        # and not the run, and written back after every chapter.
+        self.usage = {}
+        self.provider_stats = {}
+        self.realigned = 0
+        # Source characters sent for translation and, of those, the
+        # ones whose translation had to be set aside, moved or asked
+        # for again: the share of the text that gave trouble.
+        self.text_stats = {'chars': 0, 'bad_chars': 0}
+        # Wall-clock seconds of the runs on this book, this one included.
+        self.run_seconds = 0.0
+        self.report = dummy         # (html: str)
+        # When the chunks of a chapter are in flight at once, each runs
+        # on a shallow copy of this object with its own engine (see
+        # :meth:`_clone`); the copies share the totals above through
+        # ``_root`` and take this lock to change them.
+        self._root = self
+        self._lock = threading.RLock()
 
     # -- setters (mirroring lib.translation.Translation) -------------------
+
+    def set_report(self, cb):
+        """Called with the report text whenever it is rewritten: after
+        every chapter and at the end of the run."""
+        self.report = cb or dummy
 
     def set_progress(self, cb):
         self.progress = cb or dummy
@@ -2072,7 +2345,7 @@ class NovelTranslator:
 
         Set to 0 to disable the cap and use only the token budget.
         """
-        return int(self._cfg('novel_max_paragraphs_per_chunk', 75))
+        return int(self._cfg('novel_max_paragraphs_per_chunk', 50))
 
     @property
     def overlap_paragraphs(self):
@@ -2271,6 +2544,7 @@ class NovelTranslator:
     summary_prompt = DEFAULT_NOVEL_SUMMARY_PROMPT
     glossary_prompt = DEFAULT_NOVEL_GLOSSARY_PROMPT
     context_prompt = DEFAULT_NOVEL_CONTEXT_PROMPT
+    context_source_prompt = DEFAULT_NOVEL_CONTEXT_SOURCE_PROMPT
     author_style_prompt = DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT
 
     @property
@@ -2529,6 +2803,102 @@ class NovelTranslator:
             return max(0, int(self._cfg('novel_log_reply_excerpt', 300)))
         except (TypeError, ValueError):
             return 300
+
+    @property
+    def retry_split(self):
+        """Whether a retry asks for the missing paragraphs in two halves
+        rather than all at once. A model that could not manage a chunk
+        seldom manages the same paragraphs again at the same size; what
+        it missed was asked for again three times at that size before
+        the chapter-level pass in smaller chunks."""
+        return bool(self._cfg('novel_retry_split', True))
+
+    @property
+    def provider_failures_before_exclusion(self):
+        """How many unreliable replies -- shifted numbers, a reply
+        covering less than half of what was asked -- a provider may
+        give before the engine is told not to route to it for the rest
+        of the run. 0 never excludes anyone. Only engines that route
+        between providers (OpenRouter) act on it."""
+        try:
+            return max(0, int(self._cfg(
+                'novel_provider_failures_before_exclusion', 2)))
+        except (TypeError, ValueError):
+            return 2
+
+    @property
+    def realign_shifted_replies(self):
+        """Whether a reply whose numbers slipped is read as it was meant
+        (see :func:`realign_shifted`) instead of asked for again."""
+        return bool(self._cfg('novel_realign_shifted_replies', True))
+
+    @property
+    def front_matter_titles(self):
+        """Comma-separated words a chapter title carries when the
+        chapter is not part of the story (see ``FRONT_MATTER_TITLES``):
+        it is translated, but no summary or glossary is asked for it."""
+        value = self._cfg('novel_front_matter_titles', None)
+        return FRONT_MATTER_TITLES if value is None else str(value)
+
+    @property
+    def untranslated_titles(self):
+        """Comma-separated words a chapter title carries when the
+        chapter stays in its original language (see
+        ``UNTRANSLATED_TITLES``)."""
+        value = self._cfg('novel_untranslated_titles', None)
+        return UNTRANSLATED_TITLES if value is None else str(value)
+
+    @property
+    def context_timing(self):
+        """'before': the summary and the glossary of a chapter are asked
+        from its source before it is translated, at half the tokens,
+        and the glossary guides every chunk of the chapter itself.
+        'after': from source and translation together once the chapter
+        is done, as before."""
+        value = str(self._cfg('novel_context_timing', 'before') or 'before')
+        return 'after' if value == 'after' else 'before'
+
+    @property
+    def parallel_chunks(self):
+        """How many chunks of one chapter may be in flight at once. 1,
+        the default, is the sequential pipeline. More than 1 sends the
+        chunks of a chapter together, each on its own copy of the engine,
+        and the context around a chunk is then the source text (see
+        :attr:`chunk_context`), because the translated overlap needs the
+        previous chunk to be done. Chapters stay sequential whatever the
+        value: each depends on the summary of the one before."""
+        try:
+            return max(1, min(16, int(self._cfg('novel_parallel_chunks', 1))))
+        except (TypeError, ValueError):
+            return 1
+
+    @property
+    def balanced_chunks(self):
+        """Whether chunks in flight together are cut to about the same
+        size (see :meth:`TokenBudget.balance`): a chapter then takes as
+        long as its longest chunk, and the longest one is as short as
+        it can be."""
+        return bool(self._cfg('novel_balanced_chunks', True))
+
+    @property
+    def chunk_context(self):
+        """What a chunk is shown of its surroundings: 'translated', the
+        last paragraphs of the previous chunk as the model rendered them
+        (the overlap; sequential only), or 'source', the source text of
+        the paragraphs before and after it, which needs nothing to have
+        been translated yet and shows what comes next as well."""
+        value = str(self._cfg('novel_chunk_context', 'translated')
+                    or 'translated')
+        return 'source' if value == 'source' else 'translated'
+
+    @property
+    def source_context_paragraphs(self):
+        """How many source paragraphs before and after a chunk are shown
+        as context when :attr:`chunk_context` is 'source'."""
+        try:
+            return max(0, int(self._cfg('novel_source_context_paragraphs', 5)))
+        except (TypeError, ValueError):
+            return 5
 
     @property
     def reply_max_tokens(self):
@@ -2816,10 +3186,32 @@ class NovelTranslator:
             required=('{sources}', '{author}', '{title}'))
         system_prompt = self._fill_placeholders(model_text(
             'You research how books are written and answer in plain '
-            'prose, using only what the sources actually say.'))
+            'prose, saying only what you can support.'))
         try:
             response = self._author_style_call(
                 system_prompt, user_prompt, search)
+            brief = collapse_blank_lines(response)
+            if search and self._is_no_information(brief):
+                # The pages a search brings back are about the plot far
+                # more often than about the prose, and a model told to
+                # rely on them says it knows nothing when they do not;
+                # asked without them it will often say what it knows.
+                # The setting is "search when the engine can, fall back
+                # to the model", and this is the fallback.
+                self.log(_(
+                    'Author brief: with the web results in front of it '
+                    'the model said it has no reliable information; '
+                    'asking again from what it knows on its own.'))
+                user_prompt = self._compose_prompt(
+                    self.author_style_prompt,
+                    {'{sources}': (None, model_text(
+                        AUTHOR_STYLE_SOURCES['model'])),
+                     '{author}': (model_text('Author:'), author),
+                     '{title}': (model_text('Book:'), self.book_title)},
+                    required=('{sources}', '{author}', '{title}'))
+                response = self._author_style_call(
+                    system_prompt, user_prompt, False)
+                brief = collapse_blank_lines(response)
         except TranslationCanceled:
             raise
         except Exception as e:
@@ -2830,9 +3222,7 @@ class NovelTranslator:
                 'No brief: the request for it failed ({}). The translation '
                 'went on without one; "Reset context" asks again.')
                 .format(describe_error(e)))
-        brief = collapse_blank_lines(response)
-        condensed = re.sub(r'[^A-Z ]', '', brief.upper()).strip()
-        if condensed.startswith(NO_AUTHOR_INFORMATION):
+        if self._is_no_information(brief):
             self.log(_('Author brief: the model has no reliable information '
                        'about this author and said so; the translation '
                        'continues without a brief.'))
@@ -2859,6 +3249,13 @@ class NovelTranslator:
         self.log(brief)
         return self._author_style
 
+    @staticmethod
+    def _is_no_information(brief):
+        """Whether a reply is the model declining, however it dressed
+        the words up."""
+        condensed = re.sub(r'[^A-Z ]', '', (brief or '').upper()).strip()
+        return condensed.startswith(NO_AUTHOR_INFORMATION)
+
     def _no_author_style(self, note):
         """Go on without a brief, leaving ``note`` for the window."""
         self._author_style = ''
@@ -2872,6 +3269,7 @@ class NovelTranslator:
         The search body is swapped in through :meth:`_body_builder`.
         """
         label = _('the author brief')
+        self._request_kind = 'author'
         if not search:
             return self._translate_context_call(
                 system_prompt, user_prompt, label)
@@ -2986,6 +3384,7 @@ class NovelTranslator:
                     # The request was cut short from outside (see
                     # ``Base.abort``): whatever came back is not a reply.
                     raise TranslationCanceled(_('Translation canceled.'))
+                self._account(user_text, result, time.time() - started)
                 self.log(_(
                     '  <- {}: {} chars (~{} tokens) in {}s{}.').format(
                         label, len(result), self._estimate_tokens(result),
@@ -3043,21 +3442,436 @@ class NovelTranslator:
             _('Novel mode: giving up after {} attempts. Last error: {}')
             .format(attempts, describe_error(last_error)))
 
+    def _reply_fact(self, name, kind=str):
+        """What the engine recorded about its last reply under ``name``
+        (``last_provider``, ``last_usage``, ...), or None when it
+        recorded nothing of that ``kind``: engines that do not report
+        have no such attribute, and nothing else passes for one."""
+        value = getattr(self.translator, name, None)
+        return value if isinstance(value, kind) and value else None
+
     def _reply_notes(self):
         """What the engine learnt about the last reply besides its text:
-        the provider that served it, when a gateway names one, and why
-        the model stopped when it was not because it had finished. A
-        reply cut at the output limit and a model that left early look
-        the same from the outside -- a short answer -- and only this
-        tells them apart."""
+        the provider that served it, when a gateway names one, what it
+        cost when the provider says, and why the model stopped when it
+        was not because it had finished. A reply cut at the output limit
+        and a model that left early look the same from the outside -- a
+        short answer -- and only this tells them apart."""
         notes = ''
-        served = getattr(self.translator, 'last_provider', None)
+        served = self._reply_fact('last_provider')
         if served:
             notes += _(' via {}').format(served)
-        reason = getattr(self.translator, 'last_finish_reason', None)
-        if reason and str(reason).lower() not in ('stop', 'end_turn'):
+        usage = self._reply_fact('last_usage', dict) or {}
+        if usage.get('prompt_tokens') is not None:
+            notes += _(', {} in + {} out tokens').format(
+                usage.get('prompt_tokens'), usage.get('completion_tokens'))
+            if usage.get('cost') is not None:
+                notes += ', $%s' % _money(usage.get('cost'))
+        reason = self._reply_fact('last_finish_reason')
+        if reason and reason.lower() not in ('stop', 'end_turn'):
             notes += _(' -- stopped early: {}').format(reason)
+        generation = self._reply_fact('last_generation_id')
+        if generation:
+            # What the gateway's own records list the reply under.
+            notes += ' [%s]' % generation
         return notes
+
+    # -- what the book costs ---------------------------------------------
+
+    USAGE_KINDS = ('translation', 'retry', 'context', 'author', 'other')
+
+    def _account(self, sent, received, seconds=0.0):
+        """Add the reply just received to the running totals, under the
+        kind of request it answered and the provider that served it,
+        with the time it took. Tokens the provider does not report are
+        estimated and counted as such."""
+        kind = self._request_kind if self._request_kind in self.USAGE_KINDS \
+            else 'other'
+        with self._lock:
+            self._account_locked(kind, sent, received, seconds)
+
+    def _account_locked(self, kind, sent, received, seconds):
+        entry = self.usage.setdefault(kind, {
+            'requests': 0, 'prompt_tokens': 0, 'completion_tokens': 0,
+            'cost': 0.0, 'estimated': 0, 'seconds': 0.0})
+        entry['seconds'] = entry.get('seconds', 0.0) + float(seconds or 0.0)
+        usage = self._reply_fact('last_usage', dict) or {}
+        try:
+            prompt = int(usage.get('prompt_tokens'))
+            completion = int(usage.get('completion_tokens') or 0)
+        except (TypeError, ValueError):
+            prompt = self._estimate_tokens(sent)
+            completion = self._estimate_tokens(received)
+            entry['estimated'] += 1
+        entry['requests'] += 1
+        entry['prompt_tokens'] += prompt
+        entry['completion_tokens'] += completion
+        try:
+            entry['cost'] += float(usage.get('cost') or 0.0)
+        except (TypeError, ValueError):
+            pass
+        provider = self._reply_fact('last_provider')
+        if provider:
+            self._provider(provider)['requests'] += 1
+
+    def _provider(self, name):
+        stats = self.provider_stats.setdefault(
+            name or _('(provider not named)'),
+            {'requests': 0, 'failures': 0, 'excluded': False})
+        stats.setdefault('chars', 0)
+        stats.setdefault('bad_chars', 0)
+        return stats
+
+    def _audit_reply(self, sources, expected, parsed, moved):
+        """Add a reply to the share of the text that gave trouble: the
+        source characters asked for, and among them the ones whose
+        translation is missing, was set aside, or had to be moved."""
+        if not expected:
+            return
+        asked = sum(len(sources.get(n, '') or '') for n in expected)
+        bad = sum(
+            len(sources.get(n, '') or '') for n in expected
+            if n not in parsed or n in moved)
+        with self._lock:
+            self.text_stats['chars'] = \
+                self.text_stats.get('chars', 0) + asked
+            self.text_stats['bad_chars'] = \
+                self.text_stats.get('bad_chars', 0) + bad
+            provider = self._reply_fact('last_provider')
+            if provider:
+                stats = self._provider(provider)
+                stats['chars'] += asked
+                stats['bad_chars'] += bad
+
+    def _note_provider_failure(self, what):
+        """One more unreliable reply from the provider that served the
+        last one. Past the configured number, an engine that routes
+        between providers is told to leave it out for the rest of the
+        run."""
+        provider = self._reply_fact('last_provider') or ''
+        with self._lock:
+            stats = self._provider(provider)
+            stats['failures'] += 1
+            threshold = self.provider_failures_before_exclusion
+            if not provider or not threshold or stats['excluded'] \
+                    or stats['failures'] < threshold:
+                return
+            # Every engine in play: this one, the root one the next
+            # chunks are cloned from, and the copies in flight.
+            engines = []
+            for engine in [self.translator, self._root.translator] + list(
+                    getattr(self._root.translator, 'clones', None) or []):
+                if not any(engine is known for known in engines):
+                    engines.append(engine)
+            excluded = False
+            for engine in engines:
+                exclude = getattr(engine, 'exclude_provider', None)
+                if not callable(exclude):
+                    continue
+                try:
+                    excluded = bool(exclude(provider)) or excluded
+                except Exception as e:
+                    self.log(_('Could not exclude {}: {}').format(
+                        provider, describe_error(e)), True)
+                    return
+        if excluded:
+            stats['excluded'] = True
+            self.log(_(
+                '{provider} gave {count} unreliable replies (the last: '
+                '{what}): excluded for the rest of this run '
+                '(novel_provider_failures_before_exclusion).').format(
+                    provider=provider, count=stats['failures'],
+                    what=what), True)
+
+    def _load_usage(self):
+        """The totals of the earlier runs on this book, if any."""
+        try:
+            stored = json.loads(self.cache.get_info(INFO_NOVEL_USAGE) or '')
+        except (TypeError, ValueError):
+            stored = None
+        if not isinstance(stored, dict):
+            return
+        usage = stored.get('usage')
+        if isinstance(usage, dict):
+            self.usage = {
+                kind: dict(entry) for kind, entry in usage.items()
+                if isinstance(entry, dict)}
+        providers = stored.get('providers')
+        if isinstance(providers, dict):
+            self.provider_stats = {
+                name: dict(entry) for name, entry in providers.items()
+                if isinstance(entry, dict)}
+            # An exclusion lasts one run: the next one starts afresh.
+            for entry in self.provider_stats.values():
+                entry['excluded'] = False
+        try:
+            self.realigned = int(stored.get('realigned') or 0)
+        except (TypeError, ValueError):
+            self.realigned = 0
+        text = stored.get('text')
+        if isinstance(text, dict):
+            self.text_stats = {
+                'chars': int(text.get('chars') or 0),
+                'bad_chars': int(text.get('bad_chars') or 0)}
+        try:
+            self.run_seconds = float(stored.get('run_seconds') or 0.0)
+        except (TypeError, ValueError):
+            self.run_seconds = 0.0
+
+    def _publish_report(self):
+        """Write the totals and the report to the cache, and hand the
+        report to whoever asked for it."""
+        try:
+            self.cache.set_info(INFO_NOVEL_USAGE, json.dumps({
+                'usage': self.usage, 'providers': self.provider_stats,
+                'realigned': self.realigned, 'text': self.text_stats,
+                'run_seconds': self.run_seconds + self._run_elapsed()}))
+            html = self.build_report_html()
+            self.cache.set_info(INFO_NOVEL_REPORT, html)
+        except Exception as e:
+            self.log(_('Could not save the report: {}').format(
+                describe_error(e)), True)
+            return
+        self.report(html)
+
+    def _run_elapsed(self):
+        """Seconds since this run started, 0 before it did."""
+        started = getattr(self, '_run_started', None)
+        return time.time() - started if started else 0.0
+
+    # Below this share of the text a provider's trouble is noted, not
+    # advised against: one bad reply in a long book happens to anyone.
+    ADVICE_BAD_SHARE = 0.05
+
+    @staticmethod
+    def _share(part, whole):
+        """``part`` over ``whole`` as a percentage string, "0%" when
+        there is nothing to measure."""
+        if not whole:
+            return '0%'
+        value = 100.0 * part / whole
+        return ('%.1f%%' if value < 10 else '%.0f%%') % value
+
+    @staticmethod
+    def _duration(seconds):
+        """Seconds as "1h 02m 03s", "4m 05s" or "12s"."""
+        seconds = int(round(seconds or 0))
+        hours, rest = divmod(seconds, 3600)
+        minutes, secs = divmod(rest, 60)
+        if hours:
+            return '%dh %02dm %02ds' % (hours, minutes, secs)
+        if minutes:
+            return '%dm %02ds' % (minutes, secs)
+        return '%ds' % secs
+
+    def report_data(self):
+        """What the report is drawn from: the rows of the usage table
+        with their total, the providers and the advice, as plain values.
+        The text and the HTML renderings both read this."""
+        kinds = {
+            'translation': _('translation'),
+            'retry': _('retries'),
+            'context': _('summaries and glossary'),
+            'author': _('author brief'),
+            'other': _('other'),
+        }
+        rows = []
+        total = {'requests': 0, 'prompt_tokens': 0, 'completion_tokens': 0,
+                 'cost': 0.0, 'estimated': 0, 'seconds': 0.0}
+        for kind in self.USAGE_KINDS:
+            entry = self.usage.get(kind)
+            if not entry or not entry.get('requests'):
+                continue
+            rows.append((kinds[kind], entry))
+            for key in total:
+                total[key] += entry.get(key, 0) or 0
+        chars = self.text_stats.get('chars', 0)
+        providers = []
+        advice = []
+        for name, stats in sorted(
+                self.provider_stats.items(),
+                key=lambda item: -item[1].get('requests', 0)):
+            failures = stats.get('failures', 0)
+            requests = max(1, stats.get('requests', 0))
+            bad = stats.get('bad_chars', 0)
+            own = stats.get('chars', 0)
+            providers.append({
+                'name': name,
+                'requests': stats.get('requests', 0),
+                'failures': failures,
+                'share': self._share(bad, own),
+                'excluded': bool(stats.get('excluded')),
+            })
+            if failures and (
+                    failures >= 3
+                    or (own and bad >= own * self.ADVICE_BAD_SHARE)):
+                advice.append(_(
+                    '{name} gave {failures} unreliable replies out of '
+                    '{requests} with this model, and {share} of the text '
+                    'it was sent had to be set aside, moved or asked for '
+                    'again. Exclude it in the engine settings '
+                    '(OpenRouter: provider ignore) or pick another '
+                    'model.').format(
+                        name=name, failures=failures, requests=requests,
+                        share=self._share(bad, own)))
+        if self.realigned:
+            advice.append(_(
+                '{count} translation(s) came back under the wrong number '
+                'and were moved back under their paragraph. The model '
+                'loses count at this chunk size: a lower "paragraphs per '
+                'chunk" would help, and the log says which provider '
+                'served those replies.').format(count=self.realigned))
+        return {
+            'rows': rows,
+            'total': total,
+            'run_seconds': self.run_seconds + self._run_elapsed(),
+            'chars': chars,
+            'bad_chars': self.text_stats.get('bad_chars', 0),
+            'providers': providers,
+            'advice': advice,
+        }
+
+    def build_report(self):
+        """The report on the book so far as plain text, for the log:
+        what the requests cost and took, per kind and in total; how much
+        of the text gave trouble; how each provider behaved; what to do
+        about it."""
+        data = self.report_data()
+        lines = [_('Requests and tokens, this book, every run so far')]
+        rows = data['rows']
+        if not rows:
+            lines.append('  ' + _('(no request yet)'))
+        else:
+            named = rows + [(_('total'), data['total'])]
+            width = max(len(name) for name, _entry in named)
+            lines.append('  %-*s %10s %12s %12s %11s %10s' % (
+                width, '', _('requests'), _('tokens in'), _('tokens out'),
+                _('cost'), _('time')))
+            for name, entry in named:
+                lines.append('  %-*s %10d %12d %12d %11s %10s' % (
+                    width, name, entry['requests'], entry['prompt_tokens'],
+                    entry['completion_tokens'],
+                    '$' + _money(entry['cost']) if entry['cost'] else '-',
+                    self._duration(entry.get('seconds', 0))))
+            if data['total']['estimated']:
+                lines.append('  ' + _(
+                    'Tokens of {} request(s) are estimated: the provider '
+                    'did not report them.').format(
+                        data['total']['estimated']))
+        lines.append('  ' + _('Total time of the runs: {}').format(
+            self._duration(data['run_seconds'])))
+        lines.append('  ' + _(
+            'Text sent for translation: {chars} characters, of which '
+            '{share} had to be set aside, moved or asked for '
+            'again.').format(
+                chars=data['chars'],
+                share=self._share(data['bad_chars'], data['chars'])))
+        lines.append('')
+        lines.append(_('Providers'))
+        if not data['providers']:
+            lines.append('  ' + _('(none named by the engine)'))
+        for provider in data['providers']:
+            line = _(
+                '{name}: {requests} replies, {failures} unreliable, '
+                '{share} of its text set aside or moved').format(**provider)
+            if provider['excluded']:
+                line += ' ' + _('(excluded from the current run)')
+            lines.append('  ' + line)
+        lines.append('')
+        lines.append(_('Advice'))
+        if data['advice']:
+            lines.extend('  - ' + line for line in data['advice'])
+        else:
+            lines.append('  ' + _('Nothing to report: every provider '
+                                  'answered reliably so far.'))
+        return '\n'.join(lines)
+
+    def build_report_html(self):
+        """The same report as :meth:`build_report`, as HTML for the
+        Report tab: a real table with the numbers right-aligned, which
+        a proportional font cannot be trusted to line up."""
+        from html import escape
+        data = self.report_data()
+        out = ['<h3>%s</h3>' % escape(
+            _('Requests and tokens, this book, every run so far'))]
+        rows = data['rows']
+        if not rows:
+            out.append('<p>%s</p>' % escape(_('(no request yet)')))
+        else:
+            out.append(
+                '<table cellpadding="4" cellspacing="0" border="0">'
+                '<tr><th align="left"></th>'
+                + ''.join(
+                    '<th align="right">%s</th>' % escape(title)
+                    for title in (
+                        _('requests'), _('tokens in'), _('tokens out'),
+                        _('cost'), _('time')))
+                + '</tr>')
+            named = rows + [(_('total'), data['total'])]
+            for i, (name, entry) in enumerate(named):
+                bold = i == len(named) - 1
+                cells = [
+                    str(entry['requests']),
+                    '{:,}'.format(entry['prompt_tokens']),
+                    '{:,}'.format(entry['completion_tokens']),
+                    '$' + _money(entry['cost']) if entry['cost'] else '-',
+                    self._duration(entry.get('seconds', 0))]
+                out.append(
+                    '<tr><td align="left">%s</td>' % (
+                        '<b>%s</b>' % escape(name) if bold
+                        else escape(name))
+                    + ''.join(
+                        '<td align="right">%s</td>' % (
+                            '<b>%s</b>' % escape(cell) if bold
+                            else escape(cell))
+                        for cell in cells)
+                    + '</tr>')
+            out.append('</table>')
+            if data['total']['estimated']:
+                out.append('<p>%s</p>' % escape(_(
+                    'Tokens of {} request(s) are estimated: the provider '
+                    'did not report them.').format(
+                        data['total']['estimated'])))
+        out.append('<p>%s<br>%s</p>' % (
+            escape(_('Total time of the runs: {}').format(
+                self._duration(data['run_seconds']))),
+            escape(_(
+                'Text sent for translation: {chars} characters, of which '
+                '{share} had to be set aside, moved or asked for '
+                'again.').format(
+                    chars='{:,}'.format(data['chars']),
+                    share=self._share(data['bad_chars'], data['chars'])))))
+        out.append('<h3>%s</h3>' % escape(_('Providers')))
+        if not data['providers']:
+            out.append('<p>%s</p>' % escape(_('(none named by the engine)')))
+        else:
+            out.append(
+                '<table cellpadding="4" cellspacing="0" border="0">'
+                '<tr><th align="left">%s</th><th align="right">%s</th>'
+                '<th align="right">%s</th><th align="right">%s</th>'
+                '<th align="left"></th></tr>' % tuple(
+                    escape(title) for title in (
+                        _('provider'), _('replies'), _('unreliable'),
+                        _('text set aside or moved'))))
+            for provider in data['providers']:
+                out.append(
+                    '<tr><td align="left">%s</td><td align="right">%d</td>'
+                    '<td align="right">%d</td><td align="right">%s</td>'
+                    '<td align="left">%s</td></tr>' % (
+                        escape(provider['name']), provider['requests'],
+                        provider['failures'], escape(provider['share']),
+                        escape(_('excluded from the current run'))
+                        if provider['excluded'] else ''))
+            out.append('</table>')
+        out.append('<h3>%s</h3>' % escape(_('Advice')))
+        if data['advice']:
+            out.append('<ul>%s</ul>' % ''.join(
+                '<li>%s</li>' % escape(line) for line in data['advice']))
+        else:
+            out.append('<p>%s</p>' % escape(_(
+                'Nothing to report: every provider answered reliably so '
+                'far.')))
+        return '\n'.join(out)
 
     def _log_reply_coverage(self, response, label, expected, parsed):
         """Say how much of what was asked a reply covered when it did
@@ -3066,12 +3880,16 @@ class NovelTranslator:
         instead."""
         if len(parsed) >= len(expected):
             return
+        if len(expected) >= 4 and len(parsed) * 2 < len(expected):
+            self._note_provider_failure(_(
+                'a reply covering {} of {} paragraphs').format(
+                    len(parsed), len(expected)))
         line = _(
             '{label}: the reply covered {found} of {asked} paragraphs '
             '(numbers kept: {numbers}).').format(
                 label=label, found=len(parsed), asked=len(expected),
                 numbers=_ranges(parsed) or _('none'))
-        generation = getattr(self.translator, 'last_generation_id', None)
+        generation = self._reply_fact('last_generation_id')
         if generation:
             # What to look the reply up by in the gateway's own records.
             line += ' ' + _('Generation id: {}.').format(generation)
@@ -3084,10 +3902,22 @@ class NovelTranslator:
         self.log(line)
 
     def _check_reply(self, chunk_paragraphs, parsed, accepted, doubted,
-                     label):
+                     label, expected=None):
+        """Screen a reply (see :meth:`_screen_reply`) and add it to the
+        share of the text that gave trouble, ``expected`` being the
+        numbers the request asked for."""
+        sources = {
+            i: (p.original or '')
+            for i, p in enumerate(chunk_paragraphs, start=1)}
+        moved = self._screen_reply(sources, parsed, accepted, doubted, label)
+        if expected is not None:
+            self._audit_reply(sources, expected, parsed, moved)
+
+    def _screen_reply(self, sources, parsed, accepted, doubted, label):
         """Drop from ``parsed`` the translations that cannot be of the
         paragraph they came back under, so that they are asked for again
-        with the missing ones.
+        with the missing ones. Returns the numbers that received a
+        translation moved from another number.
 
         ``accepted`` holds what earlier replies of the chunk already
         gave; ``doubted`` the numbers set aside for a soft reason so
@@ -3097,15 +3927,40 @@ class NovelTranslator:
         same way, is the paragraph -- an unusual one -- and not the
         reply, and it is kept the second time.
         """
+        moved = set()
         if not self.verify_alignment or not parsed:
-            return
-        sources = {
-            i: (p.original or '')
-            for i, p in enumerate(chunk_paragraphs, start=1)}
+            return moved
         flagged = suspicious_translations(sources, parsed, accepted)
         if not flagged:
-            return
+            return moved
+        if self.realign_shifted_replies and len(parsed) >= 4:
+            realigned, moves = realign_shifted(sources, parsed)
+            if moves:
+                moved = {to for _number, to in moves}
+                first = min(number for number, _to in moves)
+                furthest = max(to - number for number, to in moves)
+                left_out = len(parsed) - len(realigned)
+                self.log(_(
+                    '{label}: the reply numbers slipped from paragraph '
+                    '{first} on; {count} translation(s) moved back under '
+                    'their paragraph, by up to {furthest} place(s), and '
+                    '{left} left out. The model or the provider is not '
+                    'reliable at this size.').format(
+                        label=label, first=first, count=len(moves),
+                        furthest=furthest, left=left_out), True)
+                with self._lock:
+                    self._root.realigned += len(moves)
+                self._note_provider_failure(_('slipped numbers'))
+                parsed.clear()
+                parsed.update(realigned)
+                flagged = suspicious_translations(sources, parsed, accepted)
+                if not flagged:
+                    return moved
         systemic = len(parsed) >= 4 and len(flagged) * 3 > len(parsed)
+        if systemic:
+            self._note_provider_failure(_(
+                'a reply wrong in {} of {} paragraphs').format(
+                    len(flagged), len(parsed)))
         rejected = {}
         for number, (reason, hard) in flagged.items():
             if not hard and number in doubted and not systemic:
@@ -3116,7 +3971,7 @@ class NovelTranslator:
         for number in rejected:
             del parsed[number]
         if not rejected:
-            return
+            return moved
         by_reason = {}
         for number, reason in rejected.items():
             by_reason.setdefault(reason, []).append(number)
@@ -3128,6 +3983,7 @@ class NovelTranslator:
                     '%s (%s)' % (VERIFICATION_REASONS[reason],
                                  _ranges(numbers))
                     for reason, numbers in by_reason.items())), True)
+        return moved
 
     def _wait(self, seconds):
         """Sleep in short steps so a cancel does not wait the whole
@@ -3193,6 +4049,8 @@ class NovelTranslator:
                 self.log(_(
                     'Reply for {} capped at {} tokens '
                     '(novel_context_max_tokens).').format(label, wanted))
+        if self._request_kind not in ('author',):
+            self._request_kind = 'context'
         try:
             if schema is not None and self._structured_active():
                 return self._translate_with_retry_structured(
@@ -3208,7 +4066,7 @@ class NovelTranslator:
 
     def _translate_chunk(self, chunk_paragraphs, context_text,
                          chapter_num, chapter_title, chunk_num, total_chunks,
-                         overlap_translations=None):
+                         overlap_translations=None, source_context=None):
         """Dispatcher: choose between structured (JSON) and text-marker
         translation paths depending on engine capability and user config.
 
@@ -3226,15 +4084,58 @@ class NovelTranslator:
                 return self._translate_chunk_structured(
                     chunk_paragraphs, context_text,
                     chapter_num, chapter_title, chunk_num, total_chunks,
-                    overlap_translations=overlap_translations)
+                    overlap_translations=overlap_translations,
+                    source_context=source_context)
             return self._translate_chunk_markers(
                 chunk_paragraphs, context_text,
                 chapter_num, chapter_title, chunk_num, total_chunks,
-                overlap_translations=overlap_translations)
+                overlap_translations=overlap_translations,
+                source_context=source_context)
+
+    def _context_block(self, overlap_translations, source_context):
+        """The text around a chunk, for reading only: the source of the
+        paragraphs before it, the translation of the previous chunk's
+        last paragraphs when there is one, and the source of the
+        paragraphs after it. Empty when there is none of that."""
+        before, after = source_context or ([], [])
+        parts = []
+        joined = '\n\n'.join(t.strip() for t in before if t and t.strip())
+        if joined:
+            parts.append(
+                '\n\n'
+                + model_text(
+                    '--- The paragraphs BEFORE the ones to translate, in '
+                    'the source language (context only: do NOT translate '
+                    'them, do NOT number them) ---')
+                + '\n' + joined + '\n'
+                + model_text('--- End of context ---'))
+        joined = '\n\n'.join(
+            t.strip() for t in (overlap_translations or []) if t and t.strip())
+        if joined:
+            parts.append(
+                '\n\n'
+                + model_text(
+                    '--- Context from previous paragraphs '
+                    '(already translated -- do NOT modify or '
+                    'retranslate this section) ---')
+                + '\n' + joined + '\n'
+                + model_text('--- End of context ---'))
+        joined = '\n\n'.join(t.strip() for t in after if t and t.strip())
+        if joined:
+            parts.append(
+                '\n\n'
+                + model_text(
+                    '--- The paragraphs AFTER the ones to translate, in '
+                    'the source language (context only: do NOT translate '
+                    'them, do NOT number them) ---')
+                + '\n' + joined + '\n'
+                + model_text('--- End of context ---'))
+        return ''.join(parts)
 
     def _translate_chunk_markers(self, chunk_paragraphs, context_text,
                                  chapter_num, chapter_title, chunk_num,
-                                 total_chunks, overlap_translations=None):
+                                 total_chunks, overlap_translations=None,
+                                 source_context=None):
         """Translate one chunk of paragraphs, returning a dict
         ``{paragraph_index: translation}`` covering all non-ignored
         paragraphs. If the LLM misses some indices, up to 2 alignment
@@ -3264,19 +4165,8 @@ class NovelTranslator:
             n=chapter_num, title=chapter_title,
             c=chunk_num, t=total_chunks)
 
-        overlap_block = ''
-        if overlap_translations:
-            joined = '\n\n'.join(
-                t.strip() for t in overlap_translations if t and t.strip())
-            if joined:
-                overlap_block = (
-                    '\n\n'
-                    + model_text(
-                        '--- Context from previous paragraphs '
-                        '(already translated -- do NOT modify or '
-                        'retranslate this section) ---')
-                    + '\n' + joined + '\n'
-                    + model_text('--- End of context ---'))
+        overlap_block = self._context_block(
+            overlap_translations, source_context)
 
         user_text = '%s\n\n%s%s\n\n%s' % (
             self._fill_placeholders(DEFAULT_NOVEL_FORMAT_RULES),
@@ -3286,12 +4176,14 @@ class NovelTranslator:
 
         chunk_label = _('chapter {} chunk {}/{}').format(
             chapter_num, chunk_num, total_chunks)
+        self._request_kind = 'translation'
         response = self._translate_with_retry(
             system_prompt, user_text, label=chunk_label)
         parsed = parse_tagged_response(response, indices)
         self._log_reply_coverage(response, chunk_label, indices, parsed)
         doubted = set()
-        self._check_reply(chunk_paragraphs, parsed, {}, doubted, chunk_label)
+        self._check_reply(
+            chunk_paragraphs, parsed, {}, doubted, chunk_label, indices)
         missing = [i for i in indices if i not in parsed]
 
         # Alignment retries: only ask for the missing paragraphs so the LLM
@@ -3302,34 +4194,37 @@ class NovelTranslator:
         for retry in range(2):
             if not missing:
                 break
+            batches = self._retry_batches(missing)
             self.log(
-                _('Alignment retry {}: {} missing markers.').format(
-                    retry + 1, len(missing)))
-            fixup_paras = [chunk_paragraphs[i - 1] for i in missing]
-            # Re-tag using the original indices so downstream logic stays
-            # consistent.
-            fixup_tagged = self._retag(fixup_paras, missing)
-            fixup_body = self._fill_placeholders(
-                model_text(
-                    'The previous response was incomplete. Translate only '
-                    'the numbered paragraphs below, every one of them in '
-                    'full, keeping the exact same [N] markers with the '
-                    'same numbers as given here -- whether or not they '
-                    'start at 1 -- and in the same order. Reply with the '
-                    'numbered paragraphs only.\n\n'
-                    'Source paragraphs:\n\n{text}'),
-                extra={'{text}': fixup_tagged})
-            user_text = fixup_body
-            retry_label = _('{}, alignment retry {}').format(
-                chunk_label, retry + 1)
-            response = self._translate_with_retry(
-                system_prompt, user_text, label=retry_label)
-            fixup_parsed = parse_tagged_response(response, missing)
-            self._log_reply_coverage(
-                response, retry_label, missing, fixup_parsed)
-            self._check_reply(
-                chunk_paragraphs, fixup_parsed, parsed, doubted, retry_label)
-            parsed.update(fixup_parsed)
+                _('Alignment retry {}: {} missing markers{}.').format(
+                    retry + 1, len(missing), self._batches_note(batches)))
+            self._request_kind = 'retry'
+            for batch in batches:
+                fixup_paras = [chunk_paragraphs[i - 1] for i in batch]
+                # Re-tag using the original indices so downstream logic
+                # stays consistent.
+                fixup_tagged = self._retag(fixup_paras, batch)
+                fixup_body = self._fill_placeholders(
+                    model_text(
+                        'The previous response was incomplete. Translate '
+                        'only the numbered paragraphs below, every one of '
+                        'them in full, keeping the exact same [N] markers '
+                        'with the same numbers as given here -- whether '
+                        'or not they start at 1 -- and in the same order. '
+                        'Reply with the numbered paragraphs only.\n\n'
+                        'Source paragraphs:\n\n{text}'),
+                    extra={'{text}': fixup_tagged})
+                retry_label = _('{}, alignment retry {}').format(
+                    chunk_label, retry + 1)
+                response = self._translate_with_retry(
+                    system_prompt, fixup_body, label=retry_label)
+                fixup_parsed = parse_tagged_response(response, batch)
+                self._log_reply_coverage(
+                    response, retry_label, batch, fixup_parsed)
+                self._check_reply(
+                    chunk_paragraphs, fixup_parsed, parsed, doubted,
+                    retry_label, batch)
+                parsed.update(fixup_parsed)
             missing = [i for i in indices if i not in parsed]
 
         if missing:
@@ -3337,6 +4232,22 @@ class NovelTranslator:
                 _('Warning: {} paragraph(s) missing after retries: {}').format(
                     len(missing), missing), True)
         return parsed
+
+    def _retry_batches(self, missing):
+        """How a retry asks for ``missing``: all at once, or in two
+        halves when there are more than a handful and the setting says
+        so (see :attr:`retry_split`)."""
+        missing = list(missing)
+        if not self.retry_split or len(missing) <= 4:
+            return [missing]
+        half = (len(missing) + 1) // 2
+        return [missing[:half], missing[half:]]
+
+    @staticmethod
+    def _batches_note(batches):
+        if len(batches) <= 1:
+            return ''
+        return _(', asked for in {} requests').format(len(batches))
 
     def _retag(self, paragraphs, indices):
         """Like ``tag_paragraphs`` but forces the marker numbers to be
@@ -3612,7 +4523,8 @@ class NovelTranslator:
 
     def _translate_chunk_structured(self, chunk_paragraphs, context_text,
                                     chapter_num, chapter_title, chunk_num,
-                                    total_chunks, overlap_translations=None):
+                                    total_chunks, overlap_translations=None,
+                                    source_context=None):
         """Translate one chunk via the engine's native JSON output.
 
         Contract identical to :meth:`_translate_chunk_markers` -- returns
@@ -3638,19 +4550,8 @@ class NovelTranslator:
             n=chapter_num, title=chapter_title,
             c=chunk_num, t=total_chunks)
 
-        overlap_block = ''
-        if overlap_translations:
-            joined = '\n\n'.join(
-                t.strip() for t in overlap_translations if t and t.strip())
-            if joined:
-                overlap_block = (
-                    '\n\n'
-                    + model_text(
-                        '--- Context from previous paragraphs '
-                        '(already translated -- do NOT modify or '
-                        'retranslate this section) ---')
-                    + '\n' + joined + '\n'
-                    + model_text('--- End of context ---'))
+        overlap_block = self._context_block(
+            overlap_translations, source_context)
 
         payload = self._build_structured_payload(chunk_paragraphs, indices)
         payload_json = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -3684,13 +4585,15 @@ class NovelTranslator:
 
         chunk_label = _('chapter {} chunk {}/{}').format(
             chapter_num, chunk_num, total_chunks)
+        self._request_kind = 'translation'
         response = self._translate_with_retry_structured(
             system_prompt, user_text,
             schema=self._STRUCTURED_RESPONSE_SCHEMA, label=chunk_label)
         parsed = self._parse_structured_response(response, indices)
         self._log_reply_coverage(response, chunk_label, indices, parsed)
         doubted = set()
-        self._check_reply(chunk_paragraphs, parsed, {}, doubted, chunk_label)
+        self._check_reply(
+            chunk_paragraphs, parsed, {}, doubted, chunk_label, indices)
         missing = [i for i in indices if i not in parsed]
 
         # Alignment retries (structured): ask only for the missing
@@ -3700,37 +4603,41 @@ class NovelTranslator:
         for retry in range(2):
             if not missing:
                 break
+            batches = self._retry_batches(missing)
             self.log(
-                _('Structured retry {}: {} missing entries.').format(
-                    retry + 1, len(missing)))
-            fixup_indices = list(missing)
-            fixup_payload = self._build_structured_payload(
-                chunk_paragraphs, fixup_indices)
-            fixup_json = json.dumps(
-                fixup_payload, ensure_ascii=False, indent=2)
-            fixup_body = (
-                model_text(
-                    'The previous JSON response was incomplete. Reply '
-                    'with a JSON object translating ONLY the paragraphs '
-                    'below, every one of them in full. Same shape as '
-                    'before: "paragraphs" array of {"n": int, '
-                    '"translation": string}, with no "source" field and '
-                    'nothing else. Copy each "n" from the input as it is, '
-                    'whether or not the numbers start at 1. Return JSON '
-                    'only.')
-                + '\n\nInput:\n' + fixup_json)
-            retry_label = _('{}, JSON retry {}').format(
-                chunk_label, retry + 1)
-            response = self._translate_with_retry_structured(
-                system_prompt, fixup_body,
-                schema=self._STRUCTURED_RESPONSE_SCHEMA, label=retry_label)
-            fixup_parsed = self._parse_structured_response(
-                response, fixup_indices)
-            self._log_reply_coverage(
-                response, retry_label, fixup_indices, fixup_parsed)
-            self._check_reply(
-                chunk_paragraphs, fixup_parsed, parsed, doubted, retry_label)
-            parsed.update(fixup_parsed)
+                _('Structured retry {}: {} missing entries{}.').format(
+                    retry + 1, len(missing), self._batches_note(batches)))
+            self._request_kind = 'retry'
+            for fixup_indices in batches:
+                fixup_payload = self._build_structured_payload(
+                    chunk_paragraphs, fixup_indices)
+                fixup_json = json.dumps(
+                    fixup_payload, ensure_ascii=False, indent=2)
+                fixup_body = (
+                    model_text(
+                        'The previous JSON response was incomplete. Reply '
+                        'with a JSON object translating ONLY the '
+                        'paragraphs below, every one of them in full. Same '
+                        'shape as before: "paragraphs" array of {"n": int, '
+                        '"translation": string}, with no "source" field '
+                        'and nothing else. Copy each "n" from the input as '
+                        'it is, whether or not the numbers start at 1. '
+                        'Return JSON only.')
+                    + '\n\nInput:\n' + fixup_json)
+                retry_label = _('{}, JSON retry {}').format(
+                    chunk_label, retry + 1)
+                response = self._translate_with_retry_structured(
+                    system_prompt, fixup_body,
+                    schema=self._STRUCTURED_RESPONSE_SCHEMA,
+                    label=retry_label)
+                fixup_parsed = self._parse_structured_response(
+                    response, fixup_indices)
+                self._log_reply_coverage(
+                    response, retry_label, fixup_indices, fixup_parsed)
+                self._check_reply(
+                    chunk_paragraphs, fixup_parsed, parsed, doubted,
+                    retry_label, fixup_indices)
+                parsed.update(fixup_parsed)
             missing = [i for i in indices if i not in parsed]
 
         if missing:
@@ -3746,7 +4653,8 @@ class NovelTranslator:
             fallback_result = self._translate_chunk_markers(
                 fallback_paras, context_text,
                 chapter_num, chapter_title, chunk_num, total_chunks,
-                overlap_translations=overlap_translations)
+                overlap_translations=overlap_translations,
+                source_context=source_context)
             # Map back to the original chunk-local indices.
             for local_i, i in enumerate(missing, start=1):
                 if local_i in fallback_result:
@@ -3995,35 +4903,60 @@ class NovelTranslator:
 
         Returns ``(summary, new_entities)``, the same pair the two
         separate calls produce. See :attr:`combined_context_call`.
+
+        With ``translated_text`` None the chapter has not been translated
+        yet: the report is asked from the source alone, and the glossary
+        it yields says how the names are to be rendered (see
+        :attr:`context_timing`).
         """
-        if not translated_text.strip():
+        from_source = translated_text is None
+        if not from_source and not translated_text.strip():
             return '', []
         max_chars = self._summary_input_budget_chars()
         src_clipped = self._head(source_text, max_chars)
-        tgt_clipped = self._head(translated_text, max_chars)
-        known, existing_keys = self._glossary_prompt_keys(
-            chapter, '%s\n%s' % (src_clipped, tgt_clipped))
         system_prompt = self._fill_placeholders(model_text(
             'You are a helpful assistant. Answer with strict JSON '
             'only.'))
-        user_prompt = self._compose_prompt(
-            self.context_prompt,
-            {
-                '{chapter_num}': (None, str(chapter.index)),
-                '{chapter_title}': (None, chapter.title or ''),
-                '{existing_keys}': (
-                    model_text('Already known (skip these):'),
-                    existing_keys),
-                '{source_text}': (model_text('Source:'), src_clipped),
-                '{translated_text}': (
-                    model_text('Translation:'), tgt_clipped),
-            },
-            required=(
-                '{existing_keys}', '{source_text}', '{translated_text}'))
+        if from_source:
+            known, existing_keys = self._glossary_prompt_keys(
+                chapter, src_clipped)
+            user_prompt = self._compose_prompt(
+                self.context_source_prompt,
+                {
+                    '{chapter_num}': (None, str(chapter.index)),
+                    '{chapter_title}': (None, chapter.title or ''),
+                    '{existing_keys}': (
+                        model_text('Already known (skip these):'),
+                        existing_keys),
+                    '{source_text}': (model_text('Source:'), src_clipped),
+                },
+                required=('{existing_keys}', '{source_text}'))
+            label = _('summary + glossary of chapter {}, from the '
+                      'source').format(chapter.index)
+        else:
+            tgt_clipped = self._head(translated_text, max_chars)
+            known, existing_keys = self._glossary_prompt_keys(
+                chapter, '%s\n%s' % (src_clipped, tgt_clipped))
+            user_prompt = self._compose_prompt(
+                self.context_prompt,
+                {
+                    '{chapter_num}': (None, str(chapter.index)),
+                    '{chapter_title}': (None, chapter.title or ''),
+                    '{existing_keys}': (
+                        model_text('Already known (skip these):'),
+                        existing_keys),
+                    '{source_text}': (model_text('Source:'), src_clipped),
+                    '{translated_text}': (
+                        model_text('Translation:'), tgt_clipped),
+                },
+                required=(
+                    '{existing_keys}', '{source_text}',
+                    '{translated_text}'))
+            label = _('summary + glossary of chapter {}').format(
+                chapter.index)
         try:
             response = self._translate_context_call(
-                system_prompt, user_prompt,
-                _('summary + glossary of chapter {}').format(chapter.index),
+                system_prompt, user_prompt, label,
                 schema=self._CONTEXT_RESPONSE_SCHEMA)
         except TranslationFailed as e:
             self.log(_(
@@ -4053,7 +4986,8 @@ class NovelTranslator:
             self.log(_(
                 'The reply carried the glossary but no summary; asking '
                 'for the summary on its own.'))
-            summary = self._generate_summary(chapter, translated_text)
+            summary = self._generate_summary(
+                chapter, source_text if from_source else translated_text)
         return self._clip_summary(summary, chapter), entities
 
     def _discard_context(self, chapter, summary):
@@ -4137,8 +5071,13 @@ class NovelTranslator:
             self.log(_('Novel mode: no chapters to translate.'))
             return 0
 
+        self._load_usage()
+        self._run_started = time.time()
         self._translate_auxiliary()
         if self.total_chapters == 0:
+            self.run_seconds += self._run_elapsed()
+            self._run_started = None
+            self._publish_report()
             return 0
 
         start = self.ctx.get_progress()
@@ -4165,16 +5104,25 @@ class NovelTranslator:
         self.log(sep('┈'))
 
         start_ts = time.time()
-        for chapter in self.chapters[start:]:
-            if self.cancel_request():
-                raise TranslationCanceled(_('Translation canceled.'))
-            self._translate_chapter(chapter)
-            self.completed_chapters += 1
+        try:
+            for chapter in self.chapters[start:]:
+                if self.cancel_request():
+                    raise TranslationCanceled(_('Translation canceled.'))
+                self._translate_chapter(chapter)
+                self.completed_chapters += 1
+        finally:
+            # Whatever ended the run, what it cost, how long it took and
+            # how the providers behaved is worth keeping.
+            self.run_seconds += self._run_elapsed()
+            self._run_started = None
+            self._publish_report()
 
         elapsed = round((time.time() - start_ts) / 60, 2)
         self.log(sep())
         self.log(_('Novel mode: completed {} chapter(s) in {} minutes.')
                  .format(self.completed_chapters, elapsed))
+        for line in self.build_report().split('\n'):
+            self.log(line)
         self.progress(1.0, _('Novel mode: completed.'))
         return self.completed_chapters
 
@@ -4204,6 +5152,15 @@ class NovelTranslator:
             self.chapter_done(chapter, '', [])
             self._report_progress()
             return
+        if title_matches(chapter.title, self.untranslated_titles):
+            self._keep_original(chapter, translatable)
+            return
+        front_matter = title_matches(chapter.title, self.front_matter_titles)
+        if front_matter:
+            self.log(_(
+                'Chapter {} is front matter by its title: translated, but '
+                'no summary or glossary is asked for it '
+                '(novel_front_matter_titles).').format(chapter.index))
 
         # Resume inside the chapter. Translations are stored after every
         # chunk but the progress counter only moves once the chapter is
@@ -4237,6 +5194,34 @@ class NovelTranslator:
             relevant_to=source_text if self.glossary_relevant_only else None,
             glossary_limit=self.glossary_prompt_max_entries)
 
+        summary = ''
+        glossary_delta = []
+        context_done = front_matter
+        # Summary + glossary from the source, before the chapter is
+        # translated: half the tokens of asking afterwards with the
+        # translation alongside, and the names the chapter introduces
+        # are rendered the same way in every chunk of it.
+        if not context_done and pending and self.context_timing == 'before' \
+                and self._context_wanted(chapter, source_text):
+            self._chapter_is_narrative = True
+            summary, glossary_delta = self._generate_context(
+                chapter, source_text, None)
+            context_done = True
+            if self._chapter_is_narrative:
+                self._log_summary(chapter, summary)
+                if summary or glossary_delta:
+                    context_text = self.ctx.context_text(
+                        budget_tokens=self.context_tokens,
+                        relevant_to=(
+                            source_text if self.glossary_relevant_only
+                            else None),
+                        glossary_limit=self.glossary_prompt_max_entries,
+                        pending=(
+                            {'chapter': chapter.index,
+                             'title': chapter.title or '',
+                             'summary': summary},
+                            glossary_delta))
+
         reserved = (self.context_tokens + self.summary_tokens
                     + self.overlap_paragraphs * 80)
         missing = self._translate_pending(
@@ -4245,45 +5230,72 @@ class NovelTranslator:
         self._settle_missing(chapter, missing, context_text, position,
                              translations, reserved)
 
-        # Summary + glossary.
+        # Summary + glossary from the translation, once it is there.
         translated_text = self._build_translated_chapter_text(
             chapter.paragraphs, translations)
+        if not context_done \
+                and self._context_wanted(chapter, translated_text):
+            if self.combined_context_call:
+                self._chapter_is_narrative = True
+                summary, glossary_delta = self._generate_context(
+                    chapter, source_text, translated_text)
+                if self._chapter_is_narrative:
+                    self._log_summary(chapter, summary)
+            else:
+                self._chapter_is_narrative = True
+                summary = self._generate_summary(chapter, translated_text)
+                if self._chapter_is_narrative:
+                    self._log_summary(chapter, summary)
+                    glossary_delta = self._extract_glossary_updates(
+                        chapter, source_text, translated_text)
 
-        # Skip context extraction on trivially short chapters
-        # (Copyright, TOC, About the Author, ...). They are still
-        # translated normally at the paragraph level; only the two
-        # extra LLM calls (summary + glossary) are avoided.
-        translated_len = len(translated_text.strip())
-        summary = ''
-        glossary_delta = []
+        # Persist context (marks chapter as done, bumps progress). The
+        # report is written before the window hears that the chapter is
+        # done, because that is when it reads the report back.
+        self.ctx.append_chapter(
+            chapter.index, chapter.title, summary, glossary_delta)
+        self._publish_report()
+        self.chapter_done(chapter, summary, glossary_delta)
+        self._report_progress()
+
+    def _context_wanted(self, chapter, text):
+        """Whether a summary and a glossary are asked for ``chapter``,
+        judged on ``text`` -- its source or its translation, whichever
+        the timing gives. Trivially short chapters (a copyright page, a
+        dedication) are translated but not summarised, and neither is
+        the last chapter when the setting says so: nothing comes after
+        it."""
+        length = len((text or '').strip())
         threshold = self.min_chars_for_context
-        if translated_len < threshold:
+        if length < threshold:
             self.log(_(
-                'Chapter {}: {} chars translated, below threshold {}. '
-                'Skipping summary + glossary extraction.').format(
-                    chapter.index, translated_len, threshold))
-        elif self._is_last_chapter(chapter) and self.skip_context_last_chapter:
+                'Chapter {}: {} chars, below threshold {}. Skipping '
+                'summary + glossary extraction.').format(
+                    chapter.index, length, threshold))
+            return False
+        if self._is_last_chapter(chapter) and self.skip_context_last_chapter:
             self.log(_(
                 'Chapter {} is the last one: skipping summary + glossary, '
                 'nothing comes after them.').format(chapter.index))
-        elif self.combined_context_call:
-            self._chapter_is_narrative = True
-            summary, glossary_delta = self._generate_context(
-                chapter, source_text, translated_text)
-            if self._chapter_is_narrative:
-                self._log_summary(chapter, summary)
-        else:
-            self._chapter_is_narrative = True
-            summary = self._generate_summary(chapter, translated_text)
-            if self._chapter_is_narrative:
-                self._log_summary(chapter, summary)
-                glossary_delta = self._extract_glossary_updates(
-                    chapter, source_text, translated_text)
+            return False
+        return True
 
-        # Persist context (marks chapter as done, bumps progress).
-        self.ctx.append_chapter(
-            chapter.index, chapter.title, summary, glossary_delta)
-        self.chapter_done(chapter, summary, glossary_delta)
+    def _keep_original(self, chapter, translatable):
+        """Store the source of every paragraph as its translation: the
+        chapter stays in the language it is written in (see
+        :attr:`untranslated_titles`)."""
+        self.log(_(
+            'Chapter {} ("{}") stays in the original language '
+            '(novel_untranslated_titles).').format(
+                chapter.index, chapter.title))
+        translations = {
+            i: (p.original or '')
+            for i, p in enumerate(chapter.paragraphs, start=1)
+            if not p.ignored}
+        self._store_chapter(chapter, translations)
+        self.ctx.append_chapter(chapter.index, chapter.title, '', [])
+        self._publish_report()
+        self.chapter_done(chapter, '', [])
         self._report_progress()
 
     def _translate_pending(self, chapter, pending, context_text, position,
@@ -4307,6 +5319,9 @@ class NovelTranslator:
         budget = TokenBudget(
             budget=chunk_tokens, max_paragraphs=max_paragraphs)
         chunks_with_stats = budget.chunk_with_stats(pending)
+        if chapter.index and self.parallel_chunks > 1 \
+                and self.balanced_chunks and len(chunks_with_stats) > 1:
+            chunks_with_stats = budget.balance(chunks_with_stats)
         chunks = [c for c, _tok, _reason in chunks_with_stats]
         total_chunks = len(chunks)
         cap_paragraphs_display = (
@@ -4332,8 +5347,34 @@ class NovelTranslator:
                 '(closed by: {}).').format(
                     i, total_chunks, visible, tok_est, reason))
 
-        # Translate each chunk. A chunk-local index is mapped back to the
-        # position of that paragraph inside the chapter through ``position``
+        # What a chunk is shown of its surroundings. The translated
+        # overlap needs the previous chunk to be done, so chunks in
+        # flight together read the source text around them instead.
+        mode = self.chunk_context
+        workers = min(self.parallel_chunks, total_chunks) \
+            if chapter.index else 1
+        if workers > 1 and mode != 'source':
+            mode = 'source'
+            self.log(_(
+                'Chunks in flight at once: the context around each chunk '
+                'is the source text, the translated overlap needs the '
+                'previous chunk to be done (novel_chunk_context).'))
+        if workers > 1:
+            self.log(_('Chunks in flight at once: {}.').format(workers))
+
+        def source_context(chunk):
+            if mode != 'source':
+                return None
+            return self._source_context(chapter, chunk, position)
+
+        if workers > 1:
+            self._translate_chunks_in_flight(
+                chapter, chunks, context_text, position, translations,
+                workers, source_context)
+            return [p for p in pending if position[p.id] not in translations]
+
+        # Sequential. A chunk-local index is mapped back to the position
+        # of that paragraph inside the chapter through ``position``
         # (keyed by the cache row id), so a chunk list that covers only
         # part of the chapter -- which is what resuming produces -- still
         # lands in the right place.
@@ -4352,26 +5393,12 @@ class NovelTranslator:
             chunk_result = self._translate_chunk(
                 chunk, context_text, chapter.index, chapter.title,
                 c_idx, total_chunks,
-                overlap_translations=overlap_translations or None)
-
-            # Track the translations produced by THIS chunk so we can
-            # build the overlap for the NEXT one. We record them in the
-            # order the LLM saw them (chunk-local order), not in chapter
-            # order, so that a "recent context" window is preserved.
-            new_translations_in_chunk = []
-            written = set()
-            for local_i, p in enumerate(chunk, start=1):
-                if p.ignored:
-                    continue
-                translation = chunk_result.get(local_i)
-                if translation is not None:
-                    chapter_position = position[p.id]
-                    translations[chapter_position] = translation
-                    written.add(chapter_position)
-                    new_translations_in_chunk.append(translation)
-            # Persist translations as they arrive -- only the ones this
-            # chunk produced, in a single transaction.
-            self._store_chapter(chapter, translations, positions=written)
+                overlap_translations=(
+                    overlap_translations or None
+                    if mode == 'translated' else None),
+                source_context=source_context(chunk))
+            new_translations_in_chunk = self._store_chunk(
+                chapter, chunk, chunk_result, position, translations)
 
             # Prepare overlap for the next chunk (last N translated
             # paragraphs of THIS chunk). If this chunk produced fewer
@@ -4384,6 +5411,121 @@ class NovelTranslator:
                 overlap_translations = []
 
         return [p for p in pending if position[p.id] not in translations]
+
+    def _store_chunk(self, chapter, chunk, chunk_result, position,
+                     translations):
+        """Put what a chunk brought back into ``translations`` and the
+        cache, move the progress bar, and return the translations in
+        the order the model saw them (for the overlap of the next
+        chunk). Always on the thread that owns the cache."""
+        new_translations_in_chunk = []
+        written = set()
+        for local_i, p in enumerate(chunk, start=1):
+            if p.ignored:
+                continue
+            translation = chunk_result.get(local_i)
+            if translation is not None:
+                chapter_position = position[p.id]
+                translations[chapter_position] = translation
+                written.add(chapter_position)
+                new_translations_in_chunk.append(translation)
+        # Persist translations as they arrive -- only the ones this
+        # chunk produced, in a single transaction.
+        self._store_chapter(chapter, translations, positions=written)
+        if chapter.index:
+            self._report_progress(current_chars=sum(
+                len(p.original or '') for p in chapter.paragraphs
+                if not p.ignored and position[p.id] in translations))
+        return new_translations_in_chunk
+
+    def _source_context(self, chapter, chunk, position):
+        """The source of the paragraphs before and after ``chunk`` in
+        the chapter, up to :attr:`source_context_paragraphs` each way,
+        as ``(before, after)`` lists of text; None when there is
+        nothing to show."""
+        count = self.source_context_paragraphs
+        if not count:
+            return None
+        visible = [p for p in chunk if not getattr(p, 'ignored', False)]
+        if not visible:
+            return None
+        first = position[visible[0].id]
+        last = position[visible[-1].id]
+        before = [
+            (p.original or '').strip() for p in chapter.paragraphs
+            if not p.ignored and position[p.id] < first][-count:]
+        after = [
+            (p.original or '').strip() for p in chapter.paragraphs
+            if not p.ignored and position[p.id] > last][:count]
+        if not before and not after:
+            return None
+        return before, after
+
+    def _clone(self):
+        """A copy of this translator for one chunk in flight: its own
+        engine, because an engine swaps its prompt, its body builder
+        and its reply facts per request and cannot serve two at once;
+        the totals, the lock and the callbacks shared with the root.
+        The engine copy is registered with the root engine so that a
+        cancel (``Base.abort``) reaches the request it is reading."""
+        clone = copy.copy(self)
+        engine = copy.copy(self.translator)
+        try:
+            engine.inflight = None
+        except Exception:
+            pass
+        clone.translator = engine
+        clone._root = self._root
+        clone._request_kind = 'translation'
+        root_engine = self._root.translator
+        clones = getattr(root_engine, 'clones', None)
+        if clones is None:
+            try:
+                root_engine.clones = clones = []
+            except Exception:
+                clones = None
+        if clones is not None:
+            clones.append(engine)
+        return clone
+
+    def _translate_chunks_in_flight(self, chapter, chunks, context_text,
+                                    position, translations, workers,
+                                    source_context):
+        """Send the chunks of a chapter with up to ``workers`` requests
+        at once, each on a clone (see :meth:`_clone`), and store what
+        comes back on this thread as it arrives. A failure or a cancel
+        in any chunk ends the chapter: the rest are not started, and
+        the ones already reading are cut short through the engine."""
+        total_chunks = len(chunks)
+        # Anything said once per book is said here, not once per clone.
+        self._structured_active()
+        futures = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            try:
+                for c_idx, chunk in enumerate(chunks, start=1):
+                    clone = self._clone()
+                    futures[pool.submit(
+                        clone._translate_chunk, chunk, context_text,
+                        chapter.index, chapter.title, c_idx, total_chunks,
+                        None, source_context(chunk))] = chunk
+                for future in as_completed(futures):
+                    chunk = futures[future]
+                    chunk_result = future.result()
+                    self._store_chunk(
+                        chapter, chunk, chunk_result, position,
+                        translations)
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                abort = getattr(self.translator, 'abort', None)
+                if callable(abort):
+                    abort()
+                raise
+            finally:
+                try:
+                    self.translator.clones = []
+                except Exception:
+                    pass
 
     def _settle_missing(self, chapter, missing, context_text, position,
                         translations, reserved):
@@ -4468,18 +5610,151 @@ class NovelTranslator:
                 'Summary (chapter {}): empty response.').format(
                     chapter.index), True)
 
-    def _report_progress(self):
+    def _report_progress(self, current_chars=0):
+        """Move the progress bar by the text translated, not by the
+        chapters done: the pages before the story are chapters too, and
+        counted as such the bar was at a third before the first real
+        chapter. ``current_chars`` is what the chapter being worked on
+        has already had translated."""
         done = self.ctx.get_progress()
         total = self.total_chapters or 1
-        fraction = min(1.0, done / float(total))
+        total_chars = sum(c.char_count for c in self.chapters) or 1
+        done_chars = sum(
+            c.char_count for c in self.chapters if c.index <= done)
+        fraction = min(1.0, (done_chars + current_chars) / float(total_chars))
         self.progress(
             fraction,
-            _('Novel mode: chapter {}/{} done.').format(done, total))
+            _('Novel mode: chapter {}/{} done, {}% of the text.').format(
+                done, total, int(100 * fraction)))
 
 
 # ---------------------------------------------------------------------------
 # Helper: cache-id namespacing for novel mode
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Probe: a few paragraphs through the translation path, to see what a
+# model and the provider behind it do before a whole book is sent
+# ---------------------------------------------------------------------------
+
+
+PROBE_PARAGRAPHS = (
+    'Chapter One',
+    '\u2018Leave the rest to the gods,\u2019 she said, and closed the '
+    'door behind her.',
+    'The house was quiet. From the street below came the smell of bread '
+    'and the noise of carts; nobody had yet noticed that the lamp in the '
+    'upper window had gone out.',
+    '\u2018And what does she want with me?\u2019',
+    'He did not answer. He put a sandalled foot out as if to move away, '
+    'then thought better of it and sat down again on the cold step, '
+    'looking at the {{id_00001}} mark on the wall.',
+)
+
+
+class _ProbeCache:
+    """Enough of a cache for a probe: it remembers nothing."""
+
+    def get_info(self, key):
+        return None
+
+    def set_info(self, key, value):
+        pass
+
+    def update_paragraphs(self, paragraphs):
+        pass
+
+    def update_paragraph(self, paragraph):
+        pass
+
+
+def probe_engine(engine, config=None, details=False):
+    """Send :data:`PROBE_PARAGRAPHS` through the translation path of a
+    configured engine and report what came back, the way a run would
+    see it: the provider, why the model stopped, what it cost, how many
+    paragraphs came back and whether they are the right ones. The
+    engine's languages must be set. Returns the report as text, or
+    ``(text, reliable)`` with ``details``."""
+    from .cache import Paragraph
+
+    lines = []
+    cache = _ProbeCache()
+    ctx = ContextManager(cache).load()
+    paragraphs = [
+        Paragraph(i, 'probe-%d' % i, text, text, page='probe')
+        for i, text in enumerate(PROBE_PARAGRAPHS)]
+    chapter = Chapter(1, 'Probe', ['probe'], paragraphs)
+    translator = NovelTranslator(
+        engine, [chapter], ctx, cache, config=dict(config or {}))
+    translator.set_logging(
+        lambda text, error=False: lines.append(
+            ('[ERROR] ' if error else '') + str(text)))
+    started = time.time()
+    error = None
+    try:
+        result = translator._translate_chunk(
+            paragraphs, '', 1, chapter.title, 1, 1)
+    except Exception as e:
+        result = {}
+        error = describe_error(e)
+    elapsed = round(time.time() - started, 1)
+
+    report = []
+    report.append(_('Engine: {}').format(getattr(engine, 'name', '?')))
+    model = getattr(engine, 'model', None)
+    if model:
+        report.append(_('Model: {}').format(model))
+    report.append(_('Languages: {} to {}').format(
+        getattr(engine, 'source_lang', '?'),
+        getattr(engine, 'target_lang', '?')))
+    report.append(_('Output format: {}').format(
+        _('structured JSON') if translator._structured_active()
+        else _('text markers')))
+    served = getattr(engine, 'last_provider', None)
+    if served:
+        report.append(_('Provider: {}').format(served))
+    reason = getattr(engine, 'last_finish_reason', None)
+    if reason:
+        report.append(_('Finish reason: {}').format(reason))
+    generation = getattr(engine, 'last_generation_id', None)
+    if generation:
+        report.append(_('Generation id: {}').format(generation))
+    usage = getattr(engine, 'last_usage', None) or {}
+    if usage.get('prompt_tokens') is not None:
+        cost = usage.get('cost')
+        report.append(_('Last reply: {} in + {} out tokens{}').format(
+            usage.get('prompt_tokens'), usage.get('completion_tokens'),
+            ', $' + _money(cost) if cost is not None else ''))
+    report.append(_('Time: {}s').format(elapsed))
+    if error:
+        report.append(_('Failed: {}').format(error))
+    expected = len(PROBE_PARAGRAPHS)
+    report.append(_('Paragraphs back: {} of {}').format(len(result), expected))
+    if len(result) == expected:
+        report.append(_('Numbers and content: aligned, every check passed.'))
+    else:
+        report.append(_(
+            'Numbers and content: NOT reliable -- {} paragraph(s) never '
+            'came back right, even after the retries. Do not send a book '
+            'to this model on this provider.').format(expected - len(result)))
+    calls = sum(
+        entry.get('requests', 0) for entry in translator.usage.values())
+    if calls > 1:
+        report.append(_('Requests needed: {} (retries were necessary).')
+                      .format(calls))
+    report.append('')
+    report.append(_('Translations:'))
+    for i, text in enumerate(PROBE_PARAGRAPHS, start=1):
+        report.append('  [%d] %s' % (i, text))
+        report.append('      -> %s' % (result.get(i) or _('(missing)')))
+    report.append('')
+    report.append(_('Log:'))
+    report.extend('  ' + line for line in lines)
+    text = '\n'.join(report)
+    if details:
+        return text, len(result) == expected and error is None
+    return text
 
 
 def novel_cache_id(input_path, engine_name, target_lang, encoding=''):

@@ -178,7 +178,7 @@ def get_novel_config():
     return {
         'novel_chunk_tokens': config.get('novel_chunk_tokens', 16000),
         'novel_max_paragraphs_per_chunk': config.get(
-            'novel_max_paragraphs_per_chunk', 75),
+            'novel_max_paragraphs_per_chunk', 50),
         'novel_overlap_paragraphs': config.get(
             'novel_overlap_paragraphs', 5),
         'novel_structured_output': config.get(
@@ -205,6 +205,23 @@ def get_novel_config():
             'novel_verify_alignment', True),
         'novel_log_reply_excerpt': config.get(
             'novel_log_reply_excerpt', 300),
+        'novel_realign_shifted_replies': config.get(
+            'novel_realign_shifted_replies', True),
+        'novel_retry_split': config.get('novel_retry_split', True),
+        'novel_provider_failures_before_exclusion': config.get(
+            'novel_provider_failures_before_exclusion', 2),
+        'novel_front_matter_titles': config.get(
+            'novel_front_matter_titles', None),
+        'novel_untranslated_titles': config.get(
+            'novel_untranslated_titles', None),
+        'novel_context_timing': config.get(
+            'novel_context_timing', 'before'),
+        'novel_parallel_chunks': config.get('novel_parallel_chunks', 1),
+        'novel_balanced_chunks': config.get('novel_balanced_chunks', True),
+        'novel_chunk_context': config.get(
+            'novel_chunk_context', 'translated'),
+        'novel_source_context_paragraphs': config.get(
+            'novel_source_context_paragraphs', 5),
         'novel_on_missing_paragraphs': config.get(
             'novel_on_missing_paragraphs', 'stop'),
         'novel_rate_limit_max_wait': config.get(

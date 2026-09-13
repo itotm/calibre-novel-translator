@@ -18,7 +18,10 @@ from .lib.config import get_config
 from .lib.utils import (
     log, css, is_proxy_available, traceback_error, socks_proxy)
 from .lib.translation import get_engine_class, get_translator
-from .lib.novel import DIALOGUE_CONVENTIONS
+from .lib.novel import (
+    DIALOGUE_CONVENTIONS, FRONT_MATTER_TITLES, UNTRANSLATED_TITLES,
+    probe_engine)
+from .lib.conversion import get_novel_config
 from .engines import (
     builtin_engines, GeminiTranslate, ChatgptTranslate, OpenRouterTranslate)
 from .engines.genai import GenAI
@@ -28,6 +31,25 @@ from .components import (
 
 
 load_translations()  # type: ignore
+
+
+class ProbeWorker(QObject):
+    """Send a few paragraphs through a configured engine, off the main
+    thread, and hand back the report (see ``lib.novel.probe_engine``)."""
+    start = pyqtSignal(object, object)
+    finished = pyqtSignal(str)
+
+    def __init__(self):
+        QObject.__init__(self)
+        self.start.connect(self.probe)
+
+    @pyqtSlot(object, object)
+    def probe(self, engine, novel_config):
+        try:
+            report = probe_engine(engine, novel_config)
+        except Exception:
+            report = _('The probe failed: {}').format(traceback_error())
+        self.finished.emit(report)
 
 
 class ModelWorker(QObject):
@@ -100,6 +122,12 @@ class TranslationSetting(QDialog):
         self.model_worker.moveToThread(self.model_thread)
         self.model_thread.finished.connect(self.model_worker.deleteLater)
         self.model_thread.start()
+
+        self.probe_thread = QThread()
+        self.probe_worker = ProbeWorker()
+        self.probe_worker.moveToThread(self.probe_thread)
+        self.probe_thread.finished.connect(self.probe_worker.deleteLater)
+        self.probe_thread.start()
 
         self.main_layout()
 
@@ -773,7 +801,20 @@ class TranslationSetting(QDialog):
             openrouter_edit(
                 'provider_ignore', 'novita, targon',
                 _('Comma separated providers that must never serve the '
-                  'request.')))
+                  'request. Novel Mode adds to this list for the length '
+                  'of one run when a provider keeps answering '
+                  'unreliably (see "Provider failures before exclusion" '
+                  'under Novel Mode); what is typed here stays.')))
+        openrouter_row(
+            _('Usage accounting'),
+            openrouter_check(
+                'usage_accounting', 'usage',
+                _('Ask OpenRouter to report, with every reply, the tokens '
+                  'as the provider counted them and what the request '
+                  'cost. On by default: it is one more event at the end '
+                  'of the stream and nothing on the bill, and it is what '
+                  'the Novel Mode report adds up. Off, the tokens are '
+                  'estimated and the cost is unknown.')))
         openrouter_row(
             _('Provider: quantizations'),
             openrouter_edit(
@@ -1045,6 +1086,208 @@ class TranslationSetting(QDialog):
         novel_layout.addRow(
             _('Reply excerpt in the log'), novel_reply_excerpt)
         self.disable_wheel_event(novel_reply_excerpt)
+
+        novel_realign = QCheckBox(_('Read them as they were meant'))
+        novel_realign.setToolTip(_(
+            'When the numbers of a reply slipped -- the model skipped a '
+            'paragraph and numbered on from there -- move the '
+            'translations back under their paragraph instead of asking '
+            'for them again.\n\n'
+            'On by default. A translation is moved only when it fails '
+            'the checks where it stands, passes them a few places '
+            'further on, and the next ones do too: one odd paragraph '
+            'moves nothing. It is logged as a warning either way, '
+            'because it means the model or the provider loses count at '
+            'this chunk size, and the report says how often it '
+            'happened.'))
+        novel_layout.addRow(_('Replies whose numbers slipped'), novel_realign)
+
+        novel_retry_split = QCheckBox(_('Ask for them in two halves'))
+        novel_retry_split.setToolTip(_(
+            'A retry asks for the paragraphs that are still missing in '
+            'two requests of half the size rather than one of the same '
+            'size as the request that failed.\n\n'
+            'On by default. What a model could not manage at one size '
+            'it seldom manages again at the same size: a chunk of 75 '
+            'that came back with 65 missing used to be asked for again '
+            'twice at 65 before the chapter-level pass in smaller '
+            'chunks.'))
+        novel_layout.addRow(_('Retries'), novel_retry_split)
+
+        novel_provider_failures = QSpinBox()
+        novel_provider_failures.setRange(0, 50)
+        novel_provider_failures.setToolTip(_(
+            'How many unreliable replies -- slipped numbers, or less '
+            'than half of what was asked -- a provider may give before '
+            'the engine is told not to route to it for the rest of the '
+            'run.\n\n'
+            '2 by default. Only engines that route between providers '
+            '(OpenRouter) act on it, and only for the run: the '
+            '"Provider: ignore" setting on disk is not touched, because '
+            'a provider unreliable with one model today is not '
+            'unreliable with every model always. 0 never excludes '
+            'anyone; the report still names the providers that '
+            'misbehaved.'))
+        novel_layout.addRow(
+            _('Provider failures before exclusion'), novel_provider_failures)
+        self.disable_wheel_event(novel_provider_failures)
+
+        novel_front_matter_titles = QLineEdit()
+        novel_front_matter_titles.setPlaceholderText(FRONT_MATTER_TITLES)
+        novel_front_matter_titles.setToolTip(_(
+            'Words a chapter title carries when the chapter is not part '
+            'of the story: it is translated, but no summary or glossary '
+            'is asked for it. Comma-separated, matched as whole words, '
+            'case-insensitive.\n\n'
+            'The shipped list is shown greyed out and used when the '
+            'field is empty. A copyright page, a list of the author\'s '
+            'other books, the praise page each used to cost one request '
+            'to be told they are not part of the story.'))
+        novel_layout.addRow(
+            _('Front matter by title'), novel_front_matter_titles)
+
+        novel_untranslated_titles = QLineEdit()
+        novel_untranslated_titles.setPlaceholderText(UNTRANSLATED_TITLES)
+        novel_untranslated_titles.setToolTip(_(
+            'Words a chapter title carries when the chapter stays in '
+            'its original language. Comma-separated, matched as whole '
+            'words, case-insensitive.\n\n'
+            'The shipped list is shown greyed out and used when the '
+            'field is empty. The list of the author\'s other books is a '
+            'list of titles the reader will look for as they were '
+            'published; translated, it names books that do not exist.'))
+        novel_layout.addRow(
+            _('Kept in the original language'), novel_untranslated_titles)
+
+        novel_context_timing = QComboBox()
+        novel_context_timing.addItem(
+            _('Before the chapter, from the source'), 'before')
+        novel_context_timing.addItem(
+            _('After the chapter, from source and translation'), 'after')
+        novel_context_timing.setToolTip(_(
+            'When the summary and the glossary of a chapter are asked '
+            'for.\n\n'
+            '"Before" is the default: the chapter is sent once, in the '
+            'source language, and the reply says how each new name is '
+            'to be rendered. Half the tokens of "after", which sends '
+            'source and translation together, and the names a chapter '
+            'introduces are rendered the same way in its first chunk '
+            'and in its last, because the glossary is already in the '
+            'prompt. "After" reads the names off the translation the '
+            'model actually wrote, which suits a model that renders '
+            'names better in context than when asked in advance.'))
+        novel_layout.addRow(
+            _('Summary and glossary'), novel_context_timing)
+        self.disable_wheel_event(novel_context_timing)
+
+        novel_parallel = QSpinBox()
+        novel_parallel.setRange(1, 16)
+        novel_parallel.setToolTip(_(
+            'How many chunks of one chapter may be in flight at once.\n\n'
+            '1 by default: one request at a time, each chunk reading '
+            'the translation of the previous one. More than 1 sends the '
+            'chunks of a chapter together, each on its own copy of the '
+            'engine, and a chapter of three chunks takes about as long '
+            'as its longest one. The context around each chunk is then '
+            'the source text before and after it (see the next row), '
+            'because the translated overlap needs the previous chunk to '
+            'be done. Chapters stay one after the other whatever the '
+            'value: each depends on the summary of the one before. '
+            'Providers apply their own limits on concurrent requests; '
+            'a rate limit is waited out as usual.'))
+        novel_layout.addRow(_('Chunks in flight at once'), novel_parallel)
+        self.disable_wheel_event(novel_parallel)
+
+        novel_balanced = QCheckBox(_('Cut them to the same size'))
+        novel_balanced.setToolTip(_(
+            'When chunks are in flight together, cut the chapter into '
+            'chunks of about the same size instead of filling each to '
+            'the cap and leaving the remainder to the last.\n\n'
+            'On by default. A chapter takes as long as its longest '
+            'chunk: 3637 + 1945 + 674 tokens waits for the first while '
+            'the third is done in a quarter of the time, 2085 + 2085 + '
+            '2086 is done in two thirds of it. The number of chunks and '
+            'the caps do not change. Sequential chunks are always filled '
+            'to the cap, which is the fewest requests.'))
+        novel_layout.addRow(_('Chunks in flight'), novel_balanced)
+
+        novel_chunk_context = QComboBox()
+        novel_chunk_context.addItem(
+            _('The previous chunk, translated'), 'translated')
+        novel_chunk_context.addItem(
+            _('The source text before and after'), 'source')
+        novel_chunk_context.setToolTip(_(
+            'What a chunk is shown of its surroundings, for reading '
+            'only.\n\n'
+            '"The previous chunk, translated" is the default: the last '
+            'paragraphs of the previous chunk as the model rendered '
+            'them, which carries its choices of wording across the '
+            'boundary. Sequential only. "The source text before and '
+            'after" shows the source paragraphs around the chunk, so '
+            'it needs nothing to have been translated yet and also '
+            'shows what comes next; it is what chunks in flight '
+            'together use, whatever is chosen here.'))
+        novel_layout.addRow(_('Context around a chunk'), novel_chunk_context)
+        self.disable_wheel_event(novel_chunk_context)
+
+        novel_source_context = QSpinBox()
+        novel_source_context.setRange(0, 30)
+        novel_source_context.setToolTip(_(
+            'How many source paragraphs before and after a chunk are '
+            'shown as context, when the context is the source text.\n\n'
+            '5 by default, each way. They are input tokens, the cheap '
+            'kind: about a fifth more on a chunk of 50. 0 shows '
+            'nothing.'))
+        novel_layout.addRow(
+            _('Source context paragraphs'), novel_source_context)
+        self.disable_wheel_event(novel_source_context)
+
+        novel_probe_button = QPushButton(_('Test the model'))
+        novel_probe_button.setToolTip(_(
+            'Send five short paragraphs through the translation path '
+            'with the engine and the settings as they are now, and show '
+            'what came back: the provider, why the model stopped, what '
+            'it cost, how many paragraphs came back and whether they '
+            'are the right ones. A minute and a fraction of a cent, '
+            'before a book of a hundred requests finds out the same '
+            'thing at chapter eleven.'))
+        novel_probe_output = QPlainTextEdit()
+        novel_probe_output.setReadOnly(True)
+        novel_probe_output.setFixedHeight(220)
+        novel_probe_output.setPlaceholderText(_(
+            'The result of "Test the model" appears here.'))
+        novel_layout.addRow(_('Try before a book'), novel_probe_button)
+        novel_layout.addRow('', novel_probe_output)
+
+        def run_probe():
+            if self.engine_needs_api_key() \
+                    and self.api_keys.toPlainText().strip() == '':
+                self.alert.pop(self.current_engine.api_key_error_message())
+                return
+            novel_probe_button.setEnabled(False)
+            novel_probe_output.setPlainText(_(
+                'Sending five paragraphs to the model, please wait...'))
+            try:
+                self.current_engine.set_config(self.get_engine_config())
+                engine = get_translator(self.current_engine)
+                engine_config = self.current_engine.config
+                engine.set_source_lang(
+                    engine_config.get('source_lang') or 'English')
+                engine.set_target_lang(
+                    engine_config.get('target_lang') or 'Italian')
+            except Exception:
+                novel_probe_output.setPlainText(
+                    _('The probe failed: {}').format(traceback_error()))
+                novel_probe_button.setEnabled(True)
+                return
+            self.probe_worker.start.emit(engine, get_novel_config())
+
+        def show_probe(report):
+            novel_probe_output.setPlainText(report)
+            novel_probe_button.setEnabled(True)
+
+        novel_probe_button.clicked.connect(run_probe)
+        self.probe_worker.finished.connect(show_probe)
 
         novel_prompt_cache = QCheckBox(_('Ask the engine to cache it'))
         novel_prompt_cache.setToolTip(_(
@@ -1381,7 +1624,7 @@ class TranslationSetting(QDialog):
             novel_chunk_tokens.setValue(int(self.config.get(
                 'novel_chunk_tokens', 16000) or 16000))
             novel_max_paragraphs.setValue(int(self.config.get(
-                'novel_max_paragraphs_per_chunk', 75) or 0))
+                'novel_max_paragraphs_per_chunk', 50) or 0))
             novel_overlap.setValue(int(self.config.get(
                 'novel_overlap_paragraphs', 5) or 0))
             structured_mode = self.config.get(
@@ -1397,6 +1640,31 @@ class TranslationSetting(QDialog):
                 'novel_verify_alignment', True)))
             novel_reply_excerpt.setValue(int(self.config.get(
                 'novel_log_reply_excerpt', 300) or 0))
+            novel_realign.setChecked(bool(self.config.get(
+                'novel_realign_shifted_replies', True)))
+            novel_retry_split.setChecked(bool(self.config.get(
+                'novel_retry_split', True)))
+            novel_provider_failures.setValue(int(self.config.get(
+                'novel_provider_failures_before_exclusion', 2) or 0))
+            novel_front_matter_titles.setText(
+                self.config.get('novel_front_matter_titles') or '')
+            novel_untranslated_titles.setText(
+                self.config.get('novel_untranslated_titles') or '')
+            timing = self.config.get('novel_context_timing') or 'before'
+            idx = novel_context_timing.findData(timing)
+            if idx >= 0:
+                novel_context_timing.setCurrentIndex(idx)
+            novel_parallel.setValue(int(self.config.get(
+                'novel_parallel_chunks', 1) or 1))
+            novel_balanced.setChecked(bool(self.config.get(
+                'novel_balanced_chunks', True)))
+            chunk_context = self.config.get(
+                'novel_chunk_context') or 'translated'
+            idx = novel_chunk_context.findData(chunk_context)
+            if idx >= 0:
+                novel_chunk_context.setCurrentIndex(idx)
+            novel_source_context.setValue(int(self.config.get(
+                'novel_source_context_paragraphs', 5) or 0))
             novel_prompt_cache.setChecked(bool(self.config.get(
                 'novel_prompt_cache', True)))
             novel_context_tokens.setValue(int(self.config.get(
@@ -1482,6 +1750,35 @@ class TranslationSetting(QDialog):
                 novel_verify_alignment=bool(checked)))
         novel_reply_excerpt.valueChanged.connect(
             _persist_novel('novel_log_reply_excerpt', int))
+        novel_realign.toggled.connect(
+            lambda checked: self.config.update(
+                novel_realign_shifted_replies=bool(checked)))
+        novel_retry_split.toggled.connect(
+            lambda checked: self.config.update(
+                novel_retry_split=bool(checked)))
+        novel_provider_failures.valueChanged.connect(
+            _persist_novel('novel_provider_failures_before_exclusion', int))
+        # An empty field means the shipped list, stored as None so a
+        # longer list shipped later reaches the user.
+        novel_front_matter_titles.textChanged.connect(
+            lambda text: self.config.update(
+                novel_front_matter_titles=text.strip() or None))
+        novel_untranslated_titles.textChanged.connect(
+            lambda text: self.config.update(
+                novel_untranslated_titles=text.strip() or None))
+        novel_context_timing.currentIndexChanged.connect(
+            lambda _idx: self.config.update(
+                novel_context_timing=novel_context_timing.currentData()))
+        novel_parallel.valueChanged.connect(
+            _persist_novel('novel_parallel_chunks', int))
+        novel_balanced.toggled.connect(
+            lambda checked: self.config.update(
+                novel_balanced_chunks=bool(checked)))
+        novel_chunk_context.currentIndexChanged.connect(
+            lambda _idx: self.config.update(
+                novel_chunk_context=novel_chunk_context.currentData()))
+        novel_source_context.valueChanged.connect(
+            _persist_novel('novel_source_context_paragraphs', int))
         novel_prompt_cache.toggled.connect(
             lambda checked: self.config.update(
                 novel_prompt_cache=bool(checked)))
@@ -2492,4 +2789,6 @@ class TranslationSetting(QDialog):
     def done(self, result):
         self.model_thread.quit()
         self.model_thread.wait()
+        self.probe_thread.quit()
+        self.probe_thread.wait()
         QDialog.done(self, result)

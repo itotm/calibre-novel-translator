@@ -168,6 +168,14 @@ class OpenRouterTranslate(ChatgptTranslate):
     web_search_mode = 'plugin'
     web_search_max_results = 5
 
+    # -- usage accounting ------------------------------------------------
+    # Ask OpenRouter to say, with every reply, what it cost: the tokens
+    # as the provider counted them and the money. It is one more event
+    # at the end of the stream and nothing on the bill; it is what the
+    # Novel Mode report adds up.
+    # https://openrouter.ai/docs/use-cases/usage-accounting
+    usage_accounting = True
+
     # -- attribution and escape hatches ---------------------------------
     app_referer = NovelTranslatorPlugin.homepage
     app_title = NovelTranslatorPlugin.name
@@ -184,7 +192,7 @@ class OpenRouterTranslate(ChatgptTranslate):
         'provider_only', 'provider_order', 'provider_ignore',
         'provider_quantizations', 'provider_sort',
         'provider_allow_fallbacks', 'provider_require_parameters',
-        'provider_data_collection', 'provider_zdr',
+        'provider_data_collection', 'provider_zdr', 'usage_accounting',
         'app_referer', 'app_title', 'extra_headers', 'extra_body')
 
     def __init__(self):
@@ -407,12 +415,56 @@ class OpenRouterTranslate(ChatgptTranslate):
         provider = self.get_provider_routing()
         if provider:
             body['provider'] = provider
+        if self.usage_accounting:
+            body.setdefault('usage', {'include': True})
         # Filtered before the escape hatch, which is how a field the
         # listing does not mention can still be forced through.
         self.drop_unsupported(body)
         # Applied last so it can override anything computed above.
         body.update(parse_object(self.extra_body))
         return body
+
+    def exclude_provider(self, name) -> bool:
+        """Keep OpenRouter from routing to ``name`` for the life of this
+        engine instance: the novel pipeline calls it when a provider has
+        given too many unreliable replies. The setting on disk is not
+        touched -- a provider bad with one model today is not bad with
+        every model always.
+
+        Routing takes the provider's slug, the reply names it by its
+        display name; the model's endpoint listing maps one to the
+        other, and the name itself is the fallback. Returns False when
+        the provider was already excluded.
+        """
+        slug = self.provider_slug(name)
+        current = parse_list(self.provider_ignore)
+        if slug.casefold() in [c.casefold() for c in current] \
+                or str(name).casefold() in [c.casefold() for c in current]:
+            return False
+        self.provider_ignore = ', '.join(current + [slug])
+        return True
+
+    def provider_slug(self, name) -> str:
+        """The routing slug of the provider called ``name`` in replies,
+        from the endpoint listing of the configured model; the name
+        lower-cased when the listing does not say."""
+        wanted = str(name or '').strip().casefold()
+        try:
+            response = request(
+                'https://openrouter.ai/api/v1/models/%s/endpoints'
+                % self.model, headers=self.get_headers(),
+                proxy_uri=self.proxy_uri)
+            endpoints = (json.loads(response).get('data') or {}).get(
+                'endpoints') or []
+            for endpoint in endpoints:
+                if str(endpoint.get('provider_name', '')).casefold() \
+                        == wanted:
+                    slug = str(endpoint.get('tag') or '').split('/')[0]
+                    if slug:
+                        return slug
+        except Exception:
+            pass
+        return str(name or '').strip().lower().replace(' ', '-')
 
     def get_body(self, text):
         return json.dumps(self.extend_body(json.loads(super().get_body(text))))

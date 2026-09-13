@@ -338,10 +338,15 @@ class ChatgptTranslate(GenAI):
     #: The id the gateway gave the reply, with which its record can be
     #: looked up afterwards (OpenRouter: GET /api/v1/generation?id=...).
     last_generation_id = None
+    #: What the reply cost as the provider counted it: prompt and
+    #: completion tokens and, through a gateway that bills per request
+    #: (OpenRouter with usage accounting on), the money. None until a
+    #: reply says.
+    last_usage = None
 
     def _note_reply(self, data, choice=None):
-        """Record the finish reason, the provider and the id a reply
-        carries."""
+        """Record the finish reason, the provider, the id and the usage
+        a reply carries."""
         if not isinstance(data, dict):
             return
         provider = data.get('provider')
@@ -350,6 +355,13 @@ class ChatgptTranslate(GenAI):
         generation = data.get('id')
         if generation:
             self.last_generation_id = str(generation)
+        usage = data.get('usage')
+        if isinstance(usage, dict) and usage.get('prompt_tokens') is not None:
+            self.last_usage = {
+                'prompt_tokens': usage.get('prompt_tokens'),
+                'completion_tokens': usage.get('completion_tokens') or 0,
+                'cost': usage.get('cost'),
+            }
         if isinstance(choice, dict):
             reason = choice.get('finish_reason') \
                 or choice.get('native_finish_reason')
@@ -362,6 +374,7 @@ class ChatgptTranslate(GenAI):
         self.last_finish_reason = None
         self.last_provider = None
         self.last_generation_id = None
+        self.last_usage = None
         # Parse JSON response with robust schema handling
         try:
             data = json.loads(response)
@@ -413,6 +426,7 @@ class ChatgptTranslate(GenAI):
         self.last_finish_reason = None
         self.last_provider = None
         self.last_generation_id = None
+        self.last_usage = None
         while True:
             try:
                 raw = response.readline()
@@ -448,6 +462,12 @@ class ChatgptTranslate(GenAI):
                     if 'choices' in data and len(data['choices']) > 0:
                         choice = data['choices'][0]
                         self._note_reply(data, choice)
+                    else:
+                        # The last event of a stream with usage
+                        # accounting carries the usage and no choices.
+                        self._note_reply(data)
+                    if 'choices' in data and len(data['choices']) > 0:
+                        choice = data['choices'][0]
                         # Standard streaming format
                         if 'delta' in choice and 'content' in choice['delta']:
                             content = choice['delta']['content']

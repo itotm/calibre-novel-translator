@@ -51,7 +51,7 @@ defaults: dict[str, Any] = {
     # lower than context windows (8k-32k tokens on most models).
     # Seventy-five paragraphs is a comfortable answer for any of them.
     'novel_chunk_tokens': 16000,
-    'novel_max_paragraphs_per_chunk': 75,
+    'novel_max_paragraphs_per_chunk': 50,
     # Structured output policy for the novel translator.
     #   'auto'  -> use JSON structured output when the engine advertises
     #              support (see engines.genai.GenAI.structured_output_mode),
@@ -134,6 +134,58 @@ defaults: dict[str, Any] = {
     # asked go into the log, so what the model did instead can be seen.
     # 0 logs the count only.
     'novel_log_reply_excerpt': 300,
+    # A reply whose numbers slipped -- the model skipped a paragraph and
+    # numbered on -- is read as it was meant instead of asked for again,
+    # when the translations make sense one or more places further on and
+    # nowhere else. Logged as a warning either way: it means the model or
+    # the provider loses count at this chunk size.
+    'novel_realign_shifted_replies': True,
+    # A retry asks for the missing paragraphs in two halves rather than
+    # all at once: what the model could not manage at one size it seldom
+    # manages again at the same size.
+    'novel_retry_split': True,
+    # How many unreliable replies (shifted numbers, less than half of
+    # what was asked) a provider may give before the engine is told not
+    # to route to it for the rest of the run. 0 never excludes anyone.
+    # Only engines that route between providers (OpenRouter) act on it,
+    # and only for the run: the setting on disk is not touched.
+    'novel_provider_failures_before_exclusion': 2,
+    # Words a chapter title carries when the chapter is not part of the
+    # story: it is translated, but no summary or glossary is asked for
+    # it. Comma-separated, matched as whole words, case-insensitive.
+    # None means the shipped list (see lib.novel.FRONT_MATTER_TITLES).
+    'novel_front_matter_titles': None,
+    # Words a chapter title carries when the chapter stays in its
+    # original language, such as the list of the author's other books.
+    # None means the shipped list (see lib.novel.UNTRANSLATED_TITLES).
+    'novel_untranslated_titles': None,
+    # When the summary and the glossary of a chapter are asked for:
+    #   'before' -> from the source, before the chapter is translated:
+    #               half the tokens, and the glossary already guides
+    #               every chunk of the chapter itself. Default.
+    #   'after'  -> from source and translation together, once the
+    #               chapter is done.
+    'novel_context_timing': 'before',
+    # How many chunks of one chapter may be in flight at once. 1 is the
+    # sequential pipeline. More sends the chunks of a chapter together,
+    # each on its own copy of the engine, with the source text around
+    # each chunk as context (the translated overlap needs the previous
+    # chunk to be done). Chapters stay sequential whatever the value.
+    'novel_parallel_chunks': 1,
+    # Chunks in flight together are cut to about the same size: the
+    # chapter takes as long as its longest chunk, and 3637 + 1945 + 674
+    # tokens waits for the first while 2085 + 2085 + 2086 is done in
+    # two thirds of the time. Sequential chunks are filled to the cap
+    # instead, which is the fewest requests.
+    'novel_balanced_chunks': True,
+    # What a chunk is shown of its surroundings: 'translated', the last
+    # paragraphs of the previous chunk as the model rendered them (the
+    # overlap above; sequential only), or 'source', the source text of
+    # the paragraphs before and after it, which also shows what comes
+    # next. Forced to 'source' when chunks are in flight together.
+    'novel_chunk_context': 'translated',
+    # Source paragraphs shown before and after a chunk with 'source'.
+    'novel_source_context_paragraphs': 5,
     # What to do with paragraphs the model never returned, after the
     # retries inside a chunk and one more pass in smaller chunks.
     #   'stop'     -> end the run with the chapter unfinished; a resume

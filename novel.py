@@ -14,6 +14,7 @@ from types import MethodType
 from qt.core import (  # type: ignore
     Qt, QObject, QDialog, QGroupBox, QWidget, QVBoxLayout, QHBoxLayout,
     QPlainTextEdit, QPushButton, QSplitter, QLabel, QThread, QGridLayout,
+    QTextBrowser,
     QProgressBar, pyqtSignal, pyqtSlot, QPixmap, QListWidget,
     QListWidgetItem, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QSpacerItem, QStackedWidget, QComboBox, QMessageBox,
@@ -37,7 +38,7 @@ from .lib.exception import TranslationCanceled, TranslationFailed
 from .lib.novel import (
     Chapter, ChapterBuilder, ContextManager, NovelTranslator,
     novel_cache_id, INFO_NOVEL_CHAPTERS, INFO_NOVEL_LOG, INFO_NOVEL_STYLE,
-    INFO_NOVEL_STYLE_NOTE)
+    INFO_NOVEL_STYLE_NOTE, INFO_NOVEL_REPORT)
 from .lib.conversion import get_novel_config
 from .engines.genai import GenAI
 from .components import (
@@ -209,6 +210,7 @@ class NovelTranslationWorker(QObject):
     progress = pyqtSignal(float, str)
     chapter_started = pyqtSignal(int)          # chapter index
     chapter_done = pyqtSignal(int, str, list)  # index, summary, glossary
+    report = pyqtSignal(str)                   # the report, rewritten
     finished = pyqtSignal(bool, str)           # success, message
 
     def __init__(self, engine_class, ebook, cache_id, retranslate=False):
@@ -387,6 +389,7 @@ class NovelTranslationWorker(QObject):
         translator_novel.set_chapter_done(
             lambda chapter, summary, delta:
                 self.chapter_done.emit(chapter.index, summary, delta or []))
+        translator_novel.set_report(lambda text: self.report.emit(text))
 
         try:
             translator_novel.run()
@@ -697,6 +700,18 @@ class NovelTranslation(QDialog):
         # Tabs.
         self.tabs = QTabWidget()
 
+        # Author brief tab, first: it is what the book is translated
+        # by. Read-only like the glossary: the worker writes it once,
+        # before the first chapter, and reads it back on every request.
+        self.style_view = QPlainTextEdit()
+        self.style_view.setReadOnly(True)
+        self.style_view.setPlaceholderText(_(
+            'The brief on how this book is written appears here once the '
+            'translation has started, or a note on why there is none. '
+            'How it is obtained is set under Novel Mode in the plugin '
+            'settings ("How the author writes").'))
+        self.tabs.addTab(self.style_view, _('Author'))
+
         # Summaries tab.
         self.summaries_view = QPlainTextEdit()
         self.summaries_view.setReadOnly(True)
@@ -733,22 +748,22 @@ class NovelTranslation(QDialog):
         # Glossary tab would then show its buttons and no table at all.
         self.tabs.addTab(glossary_wrap, _('Glossary'))
 
-        # Author brief tab. Read-only like the glossary: the worker
-        # writes it once, before the first chapter, and reads it back on
-        # every request.
-        self.style_view = QPlainTextEdit()
-        self.style_view.setReadOnly(True)
-        self.style_view.setPlaceholderText(_(
-            'The brief on how this book is written appears here once the '
-            'translation has started, or a note on why there is none. '
-            'How it is obtained is set under Novel Mode in the plugin '
-            'settings ("How the author writes").'))
-        self.tabs.addTab(self.style_view, _('Author'))
-
         # Log tab.
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.tabs.addTab(self.log_view, _('Log'))
+
+        # Report tab, last: what the book costs and takes, how the
+        # providers behave, what to do about it. Apart from the log,
+        # where those lines would scroll away under everything else,
+        # and as HTML so the columns of the table line up.
+        self.report_view = QTextBrowser()
+        self.report_view.setOpenExternalLinks(False)
+        self.report_view.setPlaceholderText(_(
+            'Requests, tokens, cost and time of this book, the providers '
+            'that served it and how reliably, and what to change if one '
+            'of them misbehaved: written after every chapter.'))
+        self.tabs.addTab(self.report_view, _('Report'))
 
         right_layout.addWidget(self.tabs, 1)
 
@@ -834,16 +849,26 @@ class NovelTranslation(QDialog):
         stored_log = cache.get_info(INFO_NOVEL_LOG)
         if stored_log:
             self.log_view.setPlainText(stored_log)
+        stored_report = cache.get_info(INFO_NOVEL_REPORT)
+        if stored_report:
+            self.report_view.setHtml(stored_report)
         cache.close()
 
         completed = sum(1 for s in self.status_by_chapter.values()
                         if s == self.STATUS_DONE)
         total = len(self.chapters_meta)
-        pct = int(100 * completed / max(1, total))
+        # The bar follows the text, not the chapters: the pages before
+        # the story are chapters too, and small ones.
+        total_chars = sum(
+            int(m.get('char_count') or 0) for m in self.chapters_meta) or 1
+        done_chars = sum(
+            int(m.get('char_count') or 0) for m in self.chapters_meta
+            if self.status_by_chapter.get(m['index']) == self.STATUS_DONE)
+        pct = int(100 * done_chars / total_chars)
         self.progress_bar.setValue(pct)
         self.progress_label.setText(_(
-            '{done}/{total} chapters done.').format(
-                done=completed, total=total))
+            '{done}/{total} chapters done, {pct}% of the text.').format(
+                done=completed, total=total, pct=pct))
         if completed >= total > 0:
             self.output_button.setEnabled(True)
             self.start_button.setText(_('Re-run all'))
@@ -976,6 +1001,7 @@ class NovelTranslation(QDialog):
                 self.trans_worker.progress.disconnect()
                 self.trans_worker.chapter_started.disconnect()
                 self.trans_worker.chapter_done.disconnect()
+                self.trans_worker.report.disconnect()
                 self.trans_worker.finished.disconnect()
             except (RuntimeError, TypeError):
                 pass
@@ -993,6 +1019,7 @@ class NovelTranslation(QDialog):
         self.trans_worker.chapter_started.connect(
             lambda idx: self._set_chapter_status(idx, self.STATUS_RUNNING))
         self.trans_worker.chapter_done.connect(self._on_chapter_done)
+        self.trans_worker.report.connect(self.report_view.setHtml)
         self.trans_worker.finished.connect(self._on_worker_finished)
         self.start_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
@@ -1019,8 +1046,21 @@ class NovelTranslation(QDialog):
         if message:
             self.progress_label.setText(message)
 
+    def _refresh_report_from_cache(self):
+        """Show the report the worker wrote last. It also arrives by
+        signal; reading it back here is what keeps the tab current when
+        the signal does not reach the widget."""
+        cache = get_cache(self.cache_id)
+        try:
+            stored = cache.get_info(INFO_NOVEL_REPORT)
+        finally:
+            cache.close()
+        if stored:
+            self.report_view.setHtml(stored)
+
     def _on_chapter_done(self, index, summary, glossary_delta):
         self._set_chapter_status(index, self.STATUS_DONE)
+        self._refresh_report_from_cache()
         # Merge the glossary delta received directly from the worker signal
         # into the in-memory accumulator. This avoids the SQLite read-back
         # race: the delta is already the freshly extracted data, so no need
@@ -1045,6 +1085,7 @@ class NovelTranslation(QDialog):
         if self.closing:
             self.done(0)
             return
+        self._refresh_report_from_cache()
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.progress_label.setText(message)

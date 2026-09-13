@@ -493,6 +493,18 @@ class TestChatgptStreamParsing(unittest.TestCase):
         self.assertEqual('DeepInfra', self.translator.last_provider)
         self.assertEqual('gen-1', self.translator.last_generation_id)
 
+    def test_the_usage_at_the_end_of_the_stream_is_recorded(self):
+        chunks = self._stream([
+            b'data: {"id":"gen-1","choices":[{"delta":{"content":"ciao"},'
+            b'"finish_reason":"stop"}]}',
+            b'data: {"id":"gen-1","choices":[],"usage":{"prompt_tokens":'
+            b'12,"completion_tokens":3,"cost":0.0004}}',
+            b'data: [DONE]'])
+        self.assertEqual('ciao', ''.join(chunks))
+        self.assertEqual(
+            {'prompt_tokens': 12, 'completion_tokens': 3, 'cost': 0.0004},
+            self.translator.last_usage)
+
     def test_a_new_stream_forgets_the_last_reply(self):
         self.translator.last_finish_reason = 'length'
         self.translator.last_provider = 'DeepInfra'
@@ -770,7 +782,7 @@ class TestOpenRouterTranslate(unittest.TestCase):
         self.assertNotIn('X-Session-Id', translator.get_headers())
         self.assertEqual(
             sorted(['model', 'messages', 'stream', 'temperature',
-                    'reasoning', 'provider']),
+                    'reasoning', 'provider', 'usage']),
             sorted(json.loads(translator.get_body('t')).keys()))
 
     def test_get_result_with_error_body(self):
@@ -1177,3 +1189,62 @@ class TestKeyErrorMatching(unittest.TestCase):
         # One request, no key swapped: the spare key is still there.
         self.assertEqual(1, mock_request.call_count)
         self.assertEqual(['b'], translator.api_keys)
+
+
+class TestOpenRouterProviderExclusion(unittest.TestCase):
+    def setUp(self):
+        OpenRouterTranslate.set_config(
+            {'api_keys': ['sk-or-v1-a'], 'model': 'vendor/model'})
+        OpenRouterTranslate.lang_codes = {
+            'source': {'English': 'EN'}, 'target': {'Italian': 'IT'}}
+        self.translator = OpenRouterTranslate()
+        self.translator.set_source_lang('English')
+        self.translator.set_target_lang('Italian')
+
+    @patch(module_name + '.openrouter.request')
+    def test_the_display_name_is_resolved_to_the_slug(self, mock_request):
+        mock_request.return_value = json.dumps({'data': {'endpoints': [
+            {'provider_name': 'OpenInference', 'tag': 'open-inference/fp8'},
+            {'provider_name': 'DeepInfra', 'tag': 'deepinfra/fp8'}]}})
+        self.assertTrue(self.translator.exclude_provider('OpenInference'))
+        self.assertEqual('open-inference', self.translator.provider_ignore)
+        body = json.loads(self.translator.get_body('x'))
+        self.assertEqual(['open-inference'], body['provider']['ignore'])
+        # Already excluded: nothing to add.
+        self.assertFalse(self.translator.exclude_provider('OpenInference'))
+        self.assertIn(
+            '/models/vendor/model/endpoints', mock_request.call_args[0][0])
+
+    @patch(module_name + '.openrouter.request')
+    def test_the_name_itself_when_the_listing_fails(self, mock_request):
+        mock_request.side_effect = Exception('offline')
+        self.translator.provider_ignore = 'novita'
+        self.assertTrue(self.translator.exclude_provider('Some Host'))
+        self.assertEqual('novita, some-host', self.translator.provider_ignore)
+
+    def test_the_setting_on_disk_is_not_touched(self):
+        with patch(module_name + '.openrouter.request',
+                   side_effect=Exception('offline')):
+            self.translator.exclude_provider('Flaky')
+        self.assertEqual('', OpenRouterTranslate.config.get(
+            'provider_ignore', ''))
+
+    def test_usage_accounting_is_asked_for(self):
+        body = json.loads(self.translator.get_body('x'))
+        self.assertEqual({'include': True}, body['usage'])
+        self.translator.usage_accounting = False
+        body = json.loads(self.translator.get_body('x'))
+        self.assertNotIn('usage', body)
+
+
+class TestAbortReachesClones(unittest.TestCase):
+    def test_clones_are_aborted_too(self):
+        ChatgptTranslate.set_config({'api_keys': ['a']})
+        engine = ChatgptTranslate()
+        clone = ChatgptTranslate()
+        clone.inflight = Mock()
+        engine.inflight = Mock()
+        engine.clones = [clone]
+        engine.abort()
+        clone.inflight.close.assert_called_once()
+        engine.inflight.close.assert_called_once()

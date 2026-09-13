@@ -237,6 +237,13 @@ class Base:
         Closing the response makes the read in the worker thread end
         at once; the pipeline sees the cancel and stops.
         """
+        # Copies of this engine reading a chunk each (Novel Mode with
+        # chunks in flight together) are cut short as well.
+        for clone in list(getattr(self, 'clones', None) or []):
+            try:
+                clone.abort()
+            except Exception:
+                pass
         response = self.inflight
         if response is None:
             return
