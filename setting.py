@@ -1403,12 +1403,28 @@ class TranslationSetting(QDialog):
             'stops only at its own output limit: one glossary call was '
             'measured writing 131072 tokens over eight minutes, '
             're-listing names it had been told to skip.\n\n'
-            'Only engines with a max tokens setting are affected, and a '
+            '8000 by default: room for a long summary and fifty entries '
+            'with their notes. 4000 cut a crowded chapter short. Only '
+            'engines with a max tokens setting are affected, and a '
             'tighter limit you set yourself is left alone. Set to 0 to '
             'send no limit at all.'))
         novel_layout.addRow(
             _('Summary/glossary reply cap (tokens)'), novel_context_max_tokens)
         self.disable_wheel_event(novel_context_max_tokens)
+
+        novel_glossary_chapter_max = QSpinBox()
+        novel_glossary_chapter_max.setRange(1, 500)
+        novel_glossary_chapter_max.setSingleStep(10)
+        novel_glossary_chapter_max.setToolTip(_(
+            'How many new glossary entries one chapter may add.\n\n'
+            '50 by default. The request states it as a hard limit, the '
+            'JSON schema enforces it where the server honours schemas, '
+            'and a longer list is cut to it anyway. Told "at most '
+            'forty" in prose, a model listed ninety-eight names on a '
+            'crowded chapter and ran into the reply cap.'))
+        novel_layout.addRow(
+            _('New glossary entries per chapter'), novel_glossary_chapter_max)
+        self.disable_wheel_event(novel_glossary_chapter_max)
 
         novel_summary_input = QSpinBox()
         novel_summary_input.setRange(0, 1000000)
@@ -1690,7 +1706,9 @@ class TranslationSetting(QDialog):
             novel_glossary_prompt_max.setValue(int(self.config.get(
                 'novel_glossary_prompt_max_entries', 150) or 0))
             novel_context_max_tokens.setValue(int(self.config.get(
-                'novel_context_max_tokens', 4000) or 0))
+                'novel_context_max_tokens', 8000) or 0))
+            novel_glossary_chapter_max.setValue(int(self.config.get(
+                'novel_glossary_chapter_max_entries', 50) or 0))
             novel_min_chars.setValue(int(self.config.get(
                 'novel_min_chars_for_context', 300) or 0))
             novel_summary_input.setValue(int(self.config.get(
@@ -1809,6 +1827,8 @@ class TranslationSetting(QDialog):
                 novel_glossary_relevant_only=bool(checked)))
         novel_glossary_prompt_max.valueChanged.connect(
             _persist_novel('novel_glossary_prompt_max_entries', int))
+        novel_glossary_chapter_max.valueChanged.connect(
+            _persist_novel('novel_glossary_chapter_max_entries', int))
         novel_context_max_tokens.valueChanged.connect(
             _persist_novel('novel_context_max_tokens', int))
         novel_min_chars.valueChanged.connect(

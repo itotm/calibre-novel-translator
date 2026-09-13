@@ -194,7 +194,9 @@ def get_novel_config():
         'novel_glossary_prompt_max_entries': config.get(
             'novel_glossary_prompt_max_entries', 150),
         'novel_context_max_tokens': config.get(
-            'novel_context_max_tokens', 4000),
+            'novel_context_max_tokens', 8000),
+        'novel_glossary_chapter_max_entries': config.get(
+            'novel_glossary_chapter_max_entries', 50),
         'novel_context_reasoning': config.get(
             'novel_context_reasoning', False),
         'novel_min_chars_for_context': config.get(

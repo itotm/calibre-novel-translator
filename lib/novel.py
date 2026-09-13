@@ -1142,8 +1142,9 @@ DEFAULT_NOVEL_GLOSSARY_PROMPT = (
     '"notes": ""}\n'
     ']}\n\n'
     'If no new entities, reply exactly: {"entities": []}\n\n'
-    'Never list the same name twice, and never list a name that is '
-    'already known.\n\n'
+    'Hard limit: {max_entities} entries, the most important first; '
+    'count them and stop there. Never list the same name twice, and '
+    'never list a name that is already known.\n\n'
     'Already known (skip these): {existing_keys}\n\n'
     'Source:\n{source_text}\n\n'
     'Translation:\n{translated_text}')
@@ -1181,9 +1182,11 @@ DEFAULT_NOVEL_CONTEXT_PROMPT = (
     'threads). No preamble, no metacommentary.\n\n'
     '"entities" lists only the NEW characters, places, unique objects '
     'and organizations, each with the translation you used for it, the '
-    'most important first and at most forty of them. Never list the '
-    'same name twice, and never list a name that is already known. Use '
-    'an empty list when there are none.\n\n'
+    'most important first. Hard limit: {max_entities} entries. Count '
+    'them and stop at {max_entities}, whatever is left out; a longer '
+    'list is cut off unread. Never list the same name twice, and never '
+    'list a name that is already known. Use an empty list when there '
+    'are none.\n\n'
     'Write "narrative" and "summary" before "entities": a reply cut '
     'short must still carry the summary.\n\n'
     'Chapter {chapter_num}: "{chapter_title}"\n\n'
@@ -1226,10 +1229,11 @@ DEFAULT_NOVEL_CONTEXT_SOURCE_PROMPT = (
     '<tlang>: keep a proper name in its original form unless <tlang> '
     'has a long-established equivalent, and render descriptive names, '
     'titles, and the names of objects and institutions the way a '
-    'published translation would. The most important first and at most '
-    'forty of them. Never list the same name twice, and never list a '
-    'name that is already known. Use an empty list when there are '
-    'none.\n\n'
+    'published translation would. The most important first. Hard '
+    'limit: {max_entities} entries. Count them and stop at '
+    '{max_entities}, whatever is left out; a longer list is cut off '
+    'unread. Never list the same name twice, and never list a name '
+    'that is already known. Use an empty list when there are none.\n\n'
     'Write "narrative" and "summary" before "entities": a reply cut '
     'short must still carry the summary.\n\n'
     'Chapter {chapter_num}: "{chapter_title}"\n\n'
@@ -2512,7 +2516,39 @@ class NovelTranslator:
         bounds the damage when it does not. Set to 0 to leave the
         engine's own limit alone.
         """
-        return int(self._cfg('novel_context_max_tokens', 4000))
+        return int(self._cfg('novel_context_max_tokens', 8000))
+
+    @property
+    def glossary_chapter_max_entries(self):
+        """How many new glossary entries one chapter may add: the
+        request says so, the JSON schema enforces it where the server
+        honours schemas, and the parser cuts a longer list anyway. A
+        model told "at most forty" listed ninety-eight on a crowded
+        chapter and ran into the reply cap."""
+        try:
+            return max(1, int(self._cfg(
+                'novel_glossary_chapter_max_entries', 50)))
+        except (TypeError, ValueError):
+            return 50
+
+    def _entities_schema(self):
+        """The entity list of the schemas, capped at
+        :attr:`glossary_chapter_max_entries`."""
+        schema = dict(self._GLOSSARY_RESPONSE_SCHEMA['properties']['entities'])
+        schema['maxItems'] = self.glossary_chapter_max_entries
+        return schema
+
+    def _glossary_schema(self):
+        schema = dict(self._GLOSSARY_RESPONSE_SCHEMA)
+        schema['properties'] = dict(schema['properties'])
+        schema['properties']['entities'] = self._entities_schema()
+        return schema
+
+    def _context_schema(self):
+        schema = dict(self._CONTEXT_RESPONSE_SCHEMA)
+        schema['properties'] = dict(schema['properties'])
+        schema['properties']['entities'] = self._entities_schema()
+        return schema
 
     @property
     def glossary_relevant_only(self):
@@ -3996,6 +4032,9 @@ class NovelTranslator:
             rejected[number] = reason
             if not hard:
                 doubted.add(number)
+        # What was set aside, kept for the log: once asked for again,
+        # the retry's answer is all the cache will ever show.
+        set_aside = {number: parsed[number] for number in rejected}
         for number in rejected:
             del parsed[number]
         if not rejected:
@@ -4011,6 +4050,10 @@ class NovelTranslator:
                     '%s (%s)' % (VERIFICATION_REASONS[reason],
                                  _ranges(numbers))
                     for reason, numbers in by_reason.items())), True)
+        for number in sorted(rejected)[:3]:
+            self.log('    [%d] %s\n        -> %s' % (
+                number, self._head(sources.get(number, ''), 100),
+                self._head(set_aside[number], 100)))
         return moved
 
     def _wait(self, seconds):
@@ -4827,6 +4870,8 @@ class NovelTranslator:
                 '{existing_keys}': (
                     model_text('Already known (skip these):'),
                     existing_keys),
+                '{max_entities}': (
+                    None, str(self.glossary_chapter_max_entries)),
                 '{source_text}': (model_text('Source:'), src_clipped),
                 '{translated_text}': (
                     model_text('Translation:'), tgt_clipped),
@@ -4837,7 +4882,7 @@ class NovelTranslator:
             response = self._translate_context_call(
                 system_prompt, user_prompt,
                 _('glossary of chapter {}').format(chapter.index),
-                schema=self._GLOSSARY_RESPONSE_SCHEMA)
+                schema=self._glossary_schema())
         except TranslationFailed as e:
             self.log(
                 _('Glossary extraction failed: {}').format(e), True)
@@ -4919,6 +4964,14 @@ class NovelTranslator:
                 'Glossary: {} of the {} entries returned for chapter {} '
                 'were already known and were dropped.').format(
                     already_known, len(entities), chapter.index))
+        limit = self.glossary_chapter_max_entries
+        if len(filtered) > limit:
+            self.log(_(
+                'Glossary: the model listed {} new entries for chapter {} '
+                'against a limit of {}; the first {} are kept '
+                '(novel_glossary_chapter_max_entries).').format(
+                    len(filtered), chapter.index, limit, limit))
+            filtered = filtered[:limit]
         if filtered:
             self.log(_('Glossary: +{} new entries (chapter {}).').format(
                 len(filtered), chapter.index))
@@ -4968,6 +5021,8 @@ class NovelTranslator:
                     '{existing_keys}': (
                         model_text('Already known (skip these):'),
                         existing_keys),
+                    '{max_entities}': (
+                        None, str(self.glossary_chapter_max_entries)),
                     '{source_text}': (model_text('Source:'), src_clipped),
                 },
                 required=('{existing_keys}', '{source_text}'))
@@ -4985,6 +5040,8 @@ class NovelTranslator:
                     '{existing_keys}': (
                         model_text('Already known (skip these):'),
                         existing_keys),
+                    '{max_entities}': (
+                        None, str(self.glossary_chapter_max_entries)),
                     '{source_text}': (model_text('Source:'), src_clipped),
                     '{translated_text}': (
                         model_text('Translation:'), tgt_clipped),
@@ -4997,7 +5054,7 @@ class NovelTranslator:
         try:
             response = self._translate_context_call(
                 system_prompt, user_prompt, label,
-                schema=self._CONTEXT_RESPONSE_SCHEMA)
+                schema=self._context_schema())
         except TranslationFailed as e:
             self.log(_(
                 'Summary + glossary extraction failed: {}').format(e), True)

@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.1.1
+## v1.2.0
 
 * The author brief is asked of the model alone, about the author alone.
   The web search is gone: the pages it found were about the plot of the
@@ -18,6 +18,15 @@
   translation goes on without a brief. The titles it names go into the
   request for the brief, which keeps it about this author and not another
   of the same name.
+* The summary and glossary reply may run to 8000 tokens, up from 4000,
+  which cut a crowded chapter short; and one chapter adds at most 50 new
+  glossary entries (`novel_glossary_chapter_max_entries`): the request
+  states it as a hard limit, the JSON schema enforces it where the server
+  honours schemas, and a longer list is cut anyway. Told "at most forty" in
+  prose, the model listed ninety-eight.
+* A translation set aside by the checks is written into the log, source
+  and translation, before it is asked for again: the retry's answer was all
+  the cache would ever show of it.
 
 ## v1.1.0
 

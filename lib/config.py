@@ -74,8 +74,15 @@ defaults: dict[str, Any] = {
     # Hard cap on what the summary and glossary calls may write. Both
     # answers are short by nature, but a model that starts repeating
     # itself only stops at its own output limit: one glossary call was
-    # measured writing 131072 tokens over eight minutes. 0 disables it.
-    'novel_context_max_tokens': 4000,
+    # measured writing 131072 tokens over eight minutes. 8000 leaves
+    # room for a long summary and fifty entries with their notes; 4000
+    # cut a crowded chapter short. 0 disables it.
+    'novel_context_max_tokens': 8000,
+    # How many new glossary entries one chapter may add. Said in the
+    # request, enforced by the JSON schema where the server honours it,
+    # and cut by the parser regardless: told "at most forty", a model
+    # listed ninety-eight on a crowded chapter and hit the reply cap.
+    'novel_glossary_chapter_max_entries': 50,
     # Length above which a chapter summary is truncated before being
     # stored. A summary is re-read in every later chapter's prompt, so a
     # model that answers with the whole chapter instead of 150-350 words

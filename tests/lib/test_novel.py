@@ -2549,7 +2549,7 @@ class TestGlossaryStaysSmall(unittest.TestCase):
         translator = self._make_translator(engine)
         translator._translate_context_call('system', 'user', 'glossary')
 
-        self.assertEqual([4000], engine.seen_caps)
+        self.assertEqual([8000], engine.seen_caps)
         self.assertEqual(0, engine.max_tokens)
 
     def test_a_tighter_user_cap_is_left_alone(self):
@@ -2654,9 +2654,10 @@ class TestGlossarySchema(unittest.TestCase):
             translator._extract_glossary_updates(
                 Chapter(1, 'One', ['a'], []), 'Source.', 'Traduzione.')
 
-        self.assertEqual(
-            NovelTranslator._GLOSSARY_RESPONSE_SCHEMA,
-            structured.call_args.kwargs['schema'])
+        sent = structured.call_args.kwargs['schema']
+        # The class schema, with the per-chapter limit on the list.
+        self.assertEqual(50, sent['properties']['entities'].pop('maxItems'))
+        self.assertEqual(NovelTranslator._GLOSSARY_RESPONSE_SCHEMA, sent)
 
     def test_an_engine_without_structured_support_is_asked_in_prose(self):
         translator = self._make_translator(FakeEngine())
@@ -3482,6 +3483,9 @@ class TestReplyCheck(unittest.TestCase):
             str(c.args[0]) for c in translator.log.call_args_list)
         self.assertIn('set aside', logged)
         self.assertIn('shortened with an ellipsis (2)', logged)
+        # What was set aside is in the log, source and translation.
+        self.assertIn('[2] ' + self.NARRATIVE[:60], logged)
+        self.assertIn('-> Claudia [\u2026] bevitori.', logged)
 
     def test_a_soft_sign_is_kept_the_second_time(self):
         translator = self._make_translator()
@@ -4495,3 +4499,67 @@ class TestAuthorCheck(unittest.TestCase):
         self.assertEqual(BRIEF, translator._ensure_author_style())
         self.assertEqual(1, len(texts))
         self.assertNotIn('published novelist', texts[0])
+
+
+class TestGlossaryChapterLimit(unittest.TestCase):
+    def _run(self, entities, config=None):
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        cache.reset_mock()
+        paragraphs = [make_paragraph(0, 'Alpha walked in.', page='a')]
+        chapter = Chapter(1, 'Chapter 1', ['a'], paragraphs)
+        sent = []
+        schemas = []
+
+        def side_effect(text, prompt):
+            if _is_translation_call(prompt):
+                return _echo_markers_as_json(text)
+            sent.append(text)
+            return json.dumps({'narrative': True, 'summary': 'S',
+                               'entities': entities})
+        engine = StructuredEngine(translate_side_effect=side_effect)
+        original = engine.get_body_for_structured
+
+        def record(text, schema=None):
+            schemas.append(schema)
+            return original(text, schema)
+        engine.get_body_for_structured = record
+        base = {'novel_min_chars_for_context': 0,
+                'novel_skip_context_last_chapter': False}
+        base.update(config or {})
+        translator = NovelTranslator(
+            engine, [chapter], ctx, cache, config=base)
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        translator.run()
+        return ctx, sent, schemas, translator
+
+    def _entities(self, n):
+        return [{'source': 'Name%d' % i, 'translation': 'Nome%d' % i,
+                 'type': 'character', 'notes': ''} for i in range(n)]
+
+    def test_the_limit_is_stated_enforced_and_applied(self):
+        ctx, sent, schemas, translator = self._run(self._entities(60))
+        self.assertIn('Hard limit: 50 entries', sent[0])
+        context_schema = [s for s in schemas
+                          if s and 'summary' in s['properties']][0]
+        self.assertEqual(
+            50, context_schema['properties']['entities']['maxItems'])
+        self.assertEqual(50, len(ctx.get_glossary()))
+        logged = ' '.join(
+            str(c.args[0]) for c in translator.log.call_args_list)
+        self.assertIn('listed 60 new entries', logged)
+
+    def test_the_limit_is_a_setting(self):
+        ctx, sent, schemas, translator = self._run(
+            self._entities(20), {'novel_glossary_chapter_max_entries': 10})
+        self.assertIn('Hard limit: 10 entries', sent[0])
+        self.assertEqual(10, len(ctx.get_glossary()))
+
+    def test_the_class_schema_is_not_changed(self):
+        self._run(self._entities(3))
+        self.assertNotIn('maxItems', NovelTranslator._CONTEXT_RESPONSE_SCHEMA[
+            'properties']['entities'])
+        self.assertNotIn('maxItems', NovelTranslator._GLOSSARY_RESPONSE_SCHEMA[
+            'properties']['entities'])
