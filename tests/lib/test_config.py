@@ -77,6 +77,7 @@ class TestFunction(unittest.TestCase):
             'novel_chapter_source': 'toc_level_1',
             'novel_front_matter_min_chars': 100,
             'novel_author_style': 'model',
+            'novel_author_check': True,
             'novel_dialogue_convention': 'auto',
             'novel_dialogue_rules': None,
             'novel_translation_prompt': None,

@@ -3118,16 +3118,15 @@ class TestDialogueRules(unittest.TestCase):
 
 
 class SearchingEngine(FakeEngine):
-    """A FakeEngine that advertises web search and records which body
-    builder each request went through.
+    """A FakeEngine that records which body builder each request went
+    through, with one alternative builder for the body-swap tests.
 
     ``get_body_for_search`` builds on ``get_body``, exactly as every real
-    engine does: it takes the normal body apart and adds the provider's
-    search field to it. A double that returned a constant instead would
-    not notice a body swap that makes the two call each other.
+    alternative builder does: it takes the normal body apart and adds to
+    it. A double that returned a constant instead would not notice a
+    body swap that makes the two call each other.
     """
 
-    web_search_mode = 'plugin'
     request_timeout = 30.0
 
     def __init__(self, reply):
@@ -3163,19 +3162,13 @@ class TestAuthorBrief(unittest.TestCase):
         config = dict(config or {})
         config.setdefault('novel_book_author', 'Italo Calvino')
         config.setdefault('novel_book_title', 'Il barone rampante')
+        # The recognition step has tests of its own below.
+        config.setdefault('novel_author_check', False)
         translator = NovelTranslator(
             engine or SearchingEngine(BRIEF), [], ctx, cache, config=config)
         translator.set_logging(Mock())
         translator.set_progress(Mock())
         return translator
-
-    def test_a_capable_engine_searches_the_web(self):
-        # When asked to: the default asks the model alone.
-        translator = self._translator({'novel_author_style': 'auto'})
-        self.assertEqual(BRIEF, translator._ensure_author_style())
-        self.assertEqual(['search+plain'], translator.translator.bodies)
-        # The raised timeout is put back afterwards.
-        self.assertEqual(30.0, translator.translator.request_timeout)
 
     def test_model_only_never_searches(self):
         translator = self._translator({'novel_author_style': 'model'})
@@ -3196,7 +3189,6 @@ class TestAuthorBrief(unittest.TestCase):
         note = self._note(translator)
         self.assertIn('Italo Calvino', note)
         self.assertIn('no reliable information', note)
-        self.assertIn('Search the web', note)
         self.assertIn('Reset context', note)
 
     def test_a_brief_replaces_the_note(self):
@@ -3218,33 +3210,23 @@ class TestAuthorBrief(unittest.TestCase):
                 self.assertEqual('', translator._ensure_author_style())
                 self.assertIn(expected, self._note(translator))
 
-    def test_the_prompt_says_where_the_brief_may_come_from(self):
-        # A model with no search behind it was told to search the web
-        # and to reply NO INFORMATION when it could not find anything,
-        # and did exactly that, every time.
+    def test_the_prompt_is_about_the_author_not_the_book(self):
         engine = FakeEngine(translate_side_effect=lambda text, prompt: BRIEF)
-        translator = self._translator(
-            {'novel_author_style': 'model'}, engine=engine)
-        translator._ensure_author_style()
+        translator = self._translator(engine=engine)
+        self.assertEqual(BRIEF, translator._ensure_author_style())
         sent = engine.translate_calls[-1]['text']
-        self.assertIn('Rely on what you know', sent)
-        self.assertNotIn('Search the web', sent)
+        self.assertIn('Author: Italo Calvino', sent)
+        self.assertIn('Book: Il barone rampante', sent)
+        self.assertIn('Do not search anything', sent)
+        self.assertIn('nothing about the plot, the setting', sent)
+        self.assertIn('this author and no other', sent)
+        self.assertNotIn('{author}', sent)
         self.assertNotIn('{sources}', sent)
 
-        engine = SearchingEngine(BRIEF)
-        engine.translate_calls = []
-        original = engine.translate
-
-        def translate(text):
-            engine.translate_calls.append({'text': text})
-            return original(text)
-        engine.translate = translate
-        translator = self._translator(
-            {'novel_author_style': 'auto'}, engine=engine)
-        translator._ensure_author_style()
-        sent = engine.translate_calls[-1]['text']
-        self.assertIn('Search the web', sent)
-        self.assertNotIn('Rely on what you know', sent)
+    def test_a_setting_stored_as_auto_asks_the_model(self):
+        translator = self._translator({'novel_author_style': 'auto'})
+        self.assertEqual(BRIEF, translator._ensure_author_style())
+        self.assertEqual(['plain'], translator.translator.bodies)
 
     def test_off_asks_nothing(self):
         translator = self._translator({'novel_author_style': 'off'})
@@ -4443,55 +4425,73 @@ class TestBalancedChunks(unittest.TestCase):
                 p.translation = None
 
 
-class TestAuthorBriefFallback(unittest.TestCase):
-    """A search that leaves the model saying it knows nothing is
-    followed by the question without the search."""
+class TestAuthorCheck(unittest.TestCase):
+    """The model is asked whether it knows the author before it is
+    asked how they write."""
 
-    class Engine(SearchingEngine):
-        def __init__(self, replies):
-            SearchingEngine.__init__(self, None)
-            self.replies = list(replies)
-            self.texts = []
-
-        def translate(self, text):
-            self.bodies.append(self.get_body(text))
-            self.texts.append(text)
-            return self.replies.pop(0)
+    KNOWN = ('{"recognised": true, "works": ["Il barone rampante", '
+             '"Le città invisibili"], "shared_name": false, '
+             '"note": "Italian novelist of the twentieth century."}')
+    UNKNOWN = ('{"recognised": false, "works": [], "shared_name": false, '
+               '"note": "unknown"}')
 
     def _translator(self, replies):
         cache = Mock()
         cache.get_info.return_value = None
         ctx = ContextManager(cache).load()
-        engine = self.Engine(replies)
+        replies = list(replies)
+        texts = []
+
+        def side_effect(text, prompt):
+            texts.append(text)
+            return replies.pop(0)
+        engine = FakeEngine(translate_side_effect=side_effect)
         translator = NovelTranslator(
             engine, [], ctx, cache,
-            config={'novel_book_author': 'Paul Doherty',
-                    'novel_book_title': 'Murder Imperial',
-                    'novel_author_style': 'auto'})
+            config={'novel_book_author': 'Italo Calvino',
+                    'novel_book_title': 'Il barone rampante'})
         translator.set_logging(Mock())
-        return translator, engine
+        return translator, texts, cache
 
-    def test_no_information_with_search_is_asked_again_without(self):
-        translator, engine = self._translator(
-            ['NO INFORMATION', BRIEF])
+    def test_a_known_author_gets_a_brief_anchored_on_their_works(self):
+        translator, texts, cache = self._translator([self.KNOWN, BRIEF])
         self.assertEqual(BRIEF, translator._ensure_author_style())
-        self.assertEqual(['search+plain', 'plain'], engine.bodies)
-        self.assertIn('Search the web', engine.texts[0])
-        self.assertIn('Do not search anything', engine.texts[1])
+        self.assertEqual(2, len(texts))
+        self.assertIn('Is "Italo Calvino" a published novelist', texts[0])
+        self.assertIn('Known works of this author, for orientation: '
+                      'Il barone rampante, Le città invisibili', texts[1])
         logged = ' '.join(
             str(c.args[0]) for c in translator.log.call_args_list)
-        self.assertIn('asking again from what it knows', logged)
+        self.assertIn('the model knows "Italo Calvino"', logged)
+        self.assertIn('works it names', logged)
 
-    def test_no_information_twice_is_the_final_answer(self):
-        translator, engine = self._translator(
-            ['NO INFORMATION', 'NO INFORMATION.'])
+    def test_an_unknown_author_gets_no_brief_and_a_note(self):
+        translator, texts, cache = self._translator([self.UNKNOWN, BRIEF])
         self.assertEqual('', translator._ensure_author_style())
-        self.assertEqual(2, len(engine.bodies))
-        notes = [c.args[1] for c in translator.cache.set_info.call_args_list
+        # The brief was never asked for.
+        self.assertEqual(1, len(texts))
+        notes = [c.args[1] for c in cache.set_info.call_args_list
                  if c.args and c.args[0] == INFO_NOVEL_STYLE_NOTE]
-        self.assertIn('no reliable information', notes[-1])
+        self.assertIn('cannot name any book by this author', notes[-1])
+        self.assertIn('Reset context', notes[-1])
 
-    def test_a_brief_from_the_search_is_kept(self):
-        translator, engine = self._translator([BRIEF])
+    def test_an_unreadable_check_does_not_cost_the_brief(self):
+        translator, texts, cache = self._translator(['Boh.', BRIEF])
         self.assertEqual(BRIEF, translator._ensure_author_style())
-        self.assertEqual(['search+plain'], engine.bodies)
+        self.assertEqual(2, len(texts))
+        self.assertIn('Known works of this author, for orientation:',
+                      texts[1])
+
+    def test_a_failed_check_does_not_cost_the_brief(self):
+        translator, texts, cache = self._translator(
+            [Exception('boom'), Exception('boom'), BRIEF])
+        translator.translator.request_attempt = 2
+        with patch.object(translator, '_wait'):
+            self.assertEqual(BRIEF, translator._ensure_author_style())
+
+    def test_the_check_can_be_turned_off(self):
+        translator, texts, cache = self._translator([BRIEF])
+        translator.config['novel_author_check'] = False
+        self.assertEqual(BRIEF, translator._ensure_author_style())
+        self.assertEqual(1, len(texts))
+        self.assertNotIn('published novelist', texts[0])

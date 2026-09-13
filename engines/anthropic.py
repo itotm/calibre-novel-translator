@@ -74,8 +74,6 @@ class ClaudeTranslate(GenAI):
     # the single request that researches how the author writes.
     # https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/
     # web-search-tool
-    web_search_mode = 'tool'
-    web_search_max_results = 5
 
     models: list[str] = []
     # TODO: better handle setting the default model
@@ -199,16 +197,6 @@ class ClaudeTranslate(GenAI):
         sampling_value = getattr(self, self.sampling)
         body.update({self.sampling: sampling_value})
 
-        return json.dumps(body)
-
-    def get_body_for_search(self, text):
-        """Attach the server-side web search tool to a normal body."""
-        body = json.loads(self.get_body(text))
-        body['tools'] = [{
-            'type': 'web_search_20250305',
-            'name': 'web_search',
-            'max_uses': int(self.web_search_max_results or 5),
-        }]
         return json.dumps(body)
 
     def get_result(self, response: Response | str) -> str:

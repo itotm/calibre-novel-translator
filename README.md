@@ -30,12 +30,12 @@ the chapter mentions. The same request says whether the chapter is part of
 the story at all: a copyright page, a list of the author's other books, a
 preface or a note is translated but leaves nothing in the running context.
 
-**The author is researched once.** Before the first chapter one request
-asks how this particular book is written, its register, the texture of its
-sentences, its use of irony, dialect or period language, and the answer is
-repeated in the prompt of every chapter. By default the model answers from
-what it knows; a setting lets the engines that can search the web do so
-(OpenRouter's web plugin, Claude's search tool, Gemini's grounding). A
+**The author is asked about once.** Before the first chapter one request
+asks how this author habitually writes, the register, the texture of the
+sentences, the use of irony, dialect or period language, and the answer is
+repeated in the prompt of every chapter. The brief is about the author in
+general, never about the book: the model is told to say nothing of its
+plot, setting or period, which the translation reads off the text. A
 model that knows nothing reliable about the author says so, and the
 Author tab of the window says so too, rather than carry a brief the
 model made up.
@@ -77,7 +77,7 @@ for the summaries, the glossary, the author brief and the log.
 |---|---|
 | **OpenRouter** | The default. One key, hundreds of models. The model listing carries each model's context window, reply limit and accepted parameters; the plugin sizes its requests against them and sends only the parameters the model takes. Reasoning, provider routing, sampling and two escape hatches (extra headers, extra body) are settings. |
 | **OpenAI-compatible** | One engine, a provider to pick: OpenAI, DeepSeek, Groq, Mistral, Together AI, Fireworks AI, xAI, Moonshot AI, Azure OpenAI, Ollama and LM Studio on this machine, or any custom endpoint. The preset fills in the endpoint, the key hint and a default model; keys and models are kept per provider. |
-| **Claude** | Anthropic's Messages API, with prompt caching and the web search tool. The reply limit is a setting, sized for the model by default. |
+| **Claude** | Anthropic's Messages API, with prompt caching. The reply limit is a setting, sized for the model by default. |
 | **Gemini** | Google's API, with structured output and Google Search grounding. |
 
 Every behaviour is a setting with a sensible default, under *Preferences →
@@ -99,7 +99,7 @@ It writes `../novel-translator_v<version>.zip`, checks that the archive is
 installable and prints the command that installs it:
 
 ```sh
-calibre-customize -a ../novel-translator_v1.1.0.zip
+calibre-customize -a ../novel-translator_v1.1.1.zip
 ```
 
 In the GUI the equivalent is *Preferences → Plugins → Load plugin from
@@ -151,8 +151,7 @@ and the sampling, then a section for the engine's own options and the
   whether the last chapter skips them, and whether those calls may spend
   reasoning tokens;
 * what to do with paragraphs the model never returns;
-* how the author brief is obtained (web search, the model alone, or not at
-  all) and how dialogue is punctuated;
+* whether the author brief is asked for, and how dialogue is punctuated;
 * the translation prompt, plain prose with no mandatory placeholder. The
   summary, glossary and author-brief prompts are the plugin's own: they
   ask for a shape the code parses, and are not settings.

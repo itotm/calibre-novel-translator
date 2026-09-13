@@ -44,22 +44,6 @@ class GenAI(Base, ABC):
 
     structured_output_mode: str | None = None
 
-    # Whether the engine can put a live web search behind one request,
-    # and how. None -- the default -- means it cannot, and the novel
-    # pipeline falls back to whatever the model already knows when it
-    # asks for the author brief (see
-    # ``NovelTranslator._ensure_author_style``). Engines that can set it
-    # to a short label naming the mechanism ('plugin' for OpenRouter's
-    # web plugin, 'tool' for a server-side search tool) and override
-    # ``get_body_for_search``; nothing but the truthiness is read.
-    web_search_mode: str | None = None
-
-    # How many results one search request may pull. Search is billed per
-    # result on most gateways and the pipeline runs exactly one search
-    # per book, so this is small on purpose: a translator's brief needs a
-    # handful of good pages, not a survey.
-    web_search_max_results: int = 5
-
     # Set by the novel pipeline when it wants the provider to keep the
     # prompt prefix in its cache: every chunk of a chapter is sent with
     # the same system prompt, a few thousand tokens of running summary
@@ -121,16 +105,6 @@ class GenAI(Base, ABC):
             response shape. Engines that support ``'schema'`` should
             enforce it; engines that only support ``'json'`` may ignore
             it and rely on prompt engineering to produce the right shape.
-        """
-        return self.get_body(text)
-
-    def get_body_for_search(self, text):
-        """Return the request body with the provider's web search enabled.
-
-        Default implementation is a graceful fallback returning the same
-        body as :meth:`get_body`, so an engine that cannot search simply
-        answers from what the model knows. Callers decide whether to use
-        this path at all by reading ``web_search_mode``.
         """
         return self.get_body(text)
 

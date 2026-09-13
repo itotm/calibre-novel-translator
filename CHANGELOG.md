@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.1.1
+
+* The author brief is asked of the model alone, about the author alone.
+  The web search is gone: the pages it found were about the plot of the
+  author's other books, the model declined with them in front of it or
+  placed the book in the wrong century, and every search was billed. The
+  request now asks how the author habitually writes, tells the model to say
+  nothing of this book's plot, setting, period or series, to make sure it
+  is describing this author and no other, and to decline rather than fill
+  the gaps with what such novels are usually like. A brief that used to
+  come back empty on every book by Paul Doherty comes back on all of them.
+* Before the brief, the model is asked whether it can name real books by
+  this author (`novel_author_check`, one small request). Asked for a brief
+  on an invented name, DeepSeek V4 Flash wrote a confident one about
+  nobody; asked first whether it knows the author, it says no and the
+  translation goes on without a brief. The titles it names go into the
+  request for the brief, which keeps it about this author and not another
+  of the same name.
+
 ## v1.1.0
 
 **A run that defends itself**

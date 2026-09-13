@@ -228,13 +228,18 @@ defaults: dict[str, Any] = {
     # chapter is translated by requests that know the story so far but
     # nothing about the manner it was told in, and the result drifts
     # towards neutral prose.
-    #   'auto'  -> search the web on engines that can (OpenRouter, Claude,
-    #              Gemini), fall back to what the model knows on the rest.
-    #   'model' -> never search, ask the model only. Default: a search
-    #              is billed per result and a model knows the published
-    #              authors well enough.
+    #   'model' -> ask the model what it knows of the author's prose.
+    #              Default. (A web search used to be an option: the
+    #              pages it found were about the plot of other books,
+    #              and the model declined or placed the book in the
+    #              wrong century. 'auto' from then reads as 'model'.)
     #   'off'   -> do not ask at all.
     'novel_author_style': 'model',
+    # Before the brief, ask the model whether it knows the author at
+    # all: one small request. Asked for a brief on an invented name, a
+    # model wrote a confident one; asked first whether it can name real
+    # books by that name, the same model says no.
+    'novel_author_check': True,
     # How direct speech is punctuated. 'auto' reads it off the source,
     # chapter by chapter, and states the answer in every request; a key
     # of lib.novel.DIALOGUE_CONVENTIONS prescribes that convention;

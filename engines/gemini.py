@@ -31,7 +31,6 @@ class GeminiTranslate(GenAI):
 
     # Google Search grounding, used once per book by Novel Mode to
     # research how the author writes.
-    web_search_mode = 'tool'
 
     prompt = (
         'You are a meticulous translator who translates any given content. '
@@ -138,15 +137,6 @@ class GeminiTranslate(GenAI):
         if schema:
             gen_config['responseSchema'] = schema
         body['generationConfig'] = gen_config
-        return json.dumps(body)
-
-    def get_body_for_search(self, text):
-        """Attach Google Search grounding to an otherwise normal body.
-
-        https://ai.google.dev/gemini-api/docs/google-search
-        """
-        body = json.loads(self.get_body(text))
-        body['tools'] = [{'google_search': {}}]
         return json.dumps(body)
 
     def get_result(self, response):

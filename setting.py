@@ -1534,22 +1534,21 @@ class TranslationSetting(QDialog):
             _('Context of the last chapter'), novel_skip_last)
 
         novel_author_style = QComboBox()
-        novel_author_style.addItem(
-            _('Search the web when the engine can'), 'auto')
-        novel_author_style.addItem(_('Ask the model only'), 'model')
+        novel_author_style.addItem(_('Ask the model'), 'model')
         novel_author_style.addItem(_('Do not ask'), 'off')
         novel_author_style.setToolTip(_(
-            'Before the first chapter, ask once how this author writes: '
-            'the register, the texture of the sentences, the use of '
-            'dialect or period language. The answer is repeated in the '
-            'prompt of every chapter so the translation keeps the '
-            'author\'s manner instead of drifting into neutral prose.\n\n'
-            'It costs one request per book. "Search the web" uses the '
-            'engine\'s own search where it has one (OpenRouter, Claude, '
-            'Gemini) and falls back to what the model already knows '
-            'elsewhere; searching is billed per result by the gateway. '
-            'An answer that admits it knows nothing about the author is '
-            'discarded rather than used.\n\n'
+            'Before the first chapter, ask the model once how this '
+            'author habitually writes: the register, the texture of the '
+            'sentences, the use of dialect or period language. The '
+            'answer is repeated in the prompt of every chapter so the '
+            'translation keeps the author\'s manner instead of drifting '
+            'into neutral prose.\n\n'
+            'It costs one small request per book. The brief is about the '
+            'author in general, never about this book: the model is told '
+            'to say nothing of its plot, setting or period, which the '
+            'translation reads off the text itself. An answer that '
+            'admits it knows nothing about the author is discarded '
+            'rather than used.\n\n'
             'The book needs an author in its calibre metadata. The brief '
             'is stored with the summaries, so it is paid for once and '
             'reused when you resume; "Reset context" in the translation '
@@ -1557,6 +1556,19 @@ class TranslationSetting(QDialog):
         novel_layout.addRow(
             _('How the author writes'), novel_author_style)
         self.disable_wheel_event(novel_author_style)
+
+        novel_author_check = QCheckBox(_('Ask first whether it knows them'))
+        novel_author_check.setToolTip(_(
+            'Before asking for the brief, ask the model whether it can '
+            'name real books by this author, and give up on the brief '
+            'when it cannot.\n\n'
+            'On by default. It costs one small request. Asked for a '
+            'brief on an invented name, a model wrote a confident one '
+            'about nobody; asked first whether it knows the author, the '
+            'same model said no. The titles it names go into the request '
+            'for the brief, which keeps it about this author and not '
+            'another of the same name.'))
+        novel_layout.addRow(_('The author'), novel_author_check)
 
         novel_dialogue = QComboBox()
         novel_dialogue.addItem(_('Follow the source'), 'auto')
@@ -1703,8 +1715,12 @@ class TranslationSetting(QDialog):
                 DEFAULT_NOVEL_TRANSLATION_PROMPT)
             novel_translation_prompt.setPlainText(
                 self.config.get('novel_translation_prompt') or '')
+            novel_author_check.setChecked(bool(self.config.get(
+                'novel_author_check', True)))
             author_style = self.config.get(
                 'novel_author_style', 'model') or 'model'
+            if author_style != 'off':
+                author_style = 'model'  # 'auto', the search, is gone
             idx = novel_author_style.findData(author_style)
             if idx >= 0:
                 novel_author_style.setCurrentIndex(idx)
@@ -1821,6 +1837,9 @@ class TranslationSetting(QDialog):
         novel_author_style.currentIndexChanged.connect(
             lambda _idx: self.config.update(
                 novel_author_style=novel_author_style.currentData()))
+        novel_author_check.toggled.connect(
+            lambda checked: self.config.update(
+                novel_author_check=bool(checked)))
         novel_dialogue.currentIndexChanged.connect(
             lambda _idx: self.config.update(
                 novel_dialogue_convention=novel_dialogue.currentData()))

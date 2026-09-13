@@ -159,15 +159,6 @@ class OpenRouterTranslate(ChatgptTranslate):
     provider_data_collection = 'allow'
     provider_zdr = False
 
-    # -- web search -----------------------------------------------------
-    # OpenRouter fronts every model it proxies with the same web plugin,
-    # so the capability belongs to the gateway rather than to the model:
-    # https://openrouter.ai/docs/features/web-search
-    # Novel Mode uses it exactly once per book, to research how the
-    # author writes before the first chapter.
-    web_search_mode = 'plugin'
-    web_search_max_results = 5
-
     # -- usage accounting ------------------------------------------------
     # Ask OpenRouter to say, with every reply, what it cost: the tokens
     # as the provider counted them and the money. It is one more event
@@ -472,22 +463,6 @@ class OpenRouterTranslate(ChatgptTranslate):
     def get_body_for_structured(self, text, schema=None):
         return json.dumps(self.extend_body(
             json.loads(super().get_body_for_structured(text, schema))))
-
-    def get_body_for_search(self, text):
-        """Attach OpenRouter's web plugin to an otherwise normal body.
-
-        https://openrouter.ai/docs/features/web-search
-
-        ``setdefault`` rather than an assignment so that a `plugins`
-        entry typed into the extra-body escape hatch -- a different
-        search engine, a different result count -- still wins.
-        """
-        body = json.loads(self.get_body(text))
-        body.setdefault('plugins', [{
-            'id': 'web',
-            'max_results': int(self.web_search_max_results or 5),
-        }])
-        return json.dumps(body)
 
     def get_result(self, response):
         # OpenRouter reports upstream provider failures inside a 200 body,

@@ -244,6 +244,7 @@ def get_novel_config():
         'novel_translation_prompt': config.get(
             'novel_translation_prompt', None),
         'novel_author_style': config.get('novel_author_style', 'model'),
+        'novel_author_check': config.get('novel_author_check', True),
         'novel_dialogue_convention': config.get(
             'novel_dialogue_convention', 'auto'),
         'novel_dialogue_rules': config.get('novel_dialogue_rules', None),

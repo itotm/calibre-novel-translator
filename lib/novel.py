@@ -1248,55 +1248,63 @@ DEFAULT_NOVEL_CONTEXT_SOURCE_PROMPT = (
 # ``NO INFORMATION`` reply, which the pipeline recognises and discards.
 NO_AUTHOR_INFORMATION = 'NO INFORMATION'
 
-# What the brief may draw on, one sentence per way of asking: the
-# prompt used to tell every model to search the web and to reply NO
-# INFORMATION when it could not find anything, and a model with no
-# search behind it did exactly that, every time. A model that does not
-# know the author well still answers NO INFORMATION, and that is the
-# answer wanted: the window then says so, and the user can turn the web
-# search on or pick another model, rather than get a brief made up.
-AUTHOR_STYLE_SOURCES = {
-    'search': (
-        'Search the web and rely first on what is actually documented '
-        'about this author and this book: criticism, reviews, '
-        'translators\' notes, encyclopaedia entries, publisher copy. '
-        'Prefer sources that discuss the prose itself rather than the '
-        'plot. Where the sources found say nothing about the prose, rely '
-        'on what you know of how this author writes from what you have '
-        'read; the sources come first where the two disagree.'),
-    'model': (
-        'Rely on what you know about this author and this book: the '
-        'criticism, reviews, translators\' notes and encyclopaedia '
-        'entries you have read. Prefer what concerns the prose itself '
-        'rather than the plot. Do not search anything.'),
-}
+# Asked before the brief: whether the model knows this author at all.
+# Asked for a brief on an invented name, a model wrote a confident one
+# about "the author's psychological thrillers"; asked first whether it
+# can name real books by that name, the same model says no. The titles
+# it names go into the brief request, which anchors it on that author.
+DEFAULT_NOVEL_AUTHOR_CHECK_PROMPT = (
+    'Is "{author}" a published novelist whose books you know? Answer '
+    'with one JSON object and nothing else, in this exact shape:\n'
+    '{"recognised": true, "works": ["...", "..."], "shared_name": false, '
+    '"note": "..."}\n\n'
+    '"recognised" is true only if you can name real, published books by '
+    'exactly this author. "works" lists up to five of them, real titles '
+    'only, none invented; an empty list when you know none. '
+    '"shared_name" is true if more than one published writer has this '
+    'name. "note" is one sentence on who this author is, or "unknown".\n\n'
+    'Author: {author}\n'
+    'Book in hand: {title}')
 
+
+# The brief is about the author's manner in general, not about the
+# book: a model asked about "this author and this book" declined every
+# time it did not know the book itself, and one given web results about
+# the author's other series placed the book in the wrong century. The
+# translator has the text for everything the book alone would tell.
 DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT = (
-    'You are preparing a brief for the translator of a novel. Describe '
-    'how this particular book is written, so that its manner can be '
-    'reproduced in <tlang>.\n\n'
-    '{sources}\n\n'
-    'The brief is about how the author writes: you need not know this '
-    'particular book, only the author\'s prose, and the translator has '
-    'the text itself for whatever the book alone would tell. Say '
-    'nothing about the setting or the period of this book unless the '
-    'sources state it.\n\n'
-    'Cover, in this order and only where the sources support it: the '
-    'genre and the period the book belongs to; the narrative voice and '
-    'the point of view; the texture of the sentences (long or short, '
-    'plain or ornate, paratactic or heavily subordinated); the level of '
-    'the vocabulary; how dialogue is written and how much of the book is '
+    'You are preparing a brief for the translator of a novel by '
+    '{author}. Describe how this author habitually writes, from what '
+    'you know of their published work and of what critics, reviewers '
+    'and translators have said about it, so that the manner can be '
+    'reproduced in <tlang>. Do not search anything.\n\n'
+    'The brief is about the author\'s manner in general, not about this '
+    'book: the translator has the text and will see for themselves what '
+    'it is about, where and when it is set and who is in it. Say '
+    'nothing about the plot, the setting, the period, the characters or '
+    'the series of this book, and do not guess any of them from the '
+    'title. Describe only what holds across the author\'s work.\n\n'
+    'Make sure you are describing this author and no other. If the '
+    'name belongs to several writers and you cannot tell which one '
+    'wrote this book, or if you know the name but not the prose, do not '
+    'describe someone else and do not fill the gaps with what novels of '
+    'that kind are usually like: give the reply below instead.\n\n'
+    'Cover, in this order and only what you can support: the genres the '
+    'author works in; the narrative voice and the point of view they '
+    'favour; the texture of the sentences (long or short, plain or '
+    'ornate, paratactic or heavily subordinated); the level of the '
+    'vocabulary; how dialogue is written and how much of a book is '
     'dialogue; the use of humour, irony, dialect, slang or period '
-    'language; recurring stylistic habits worth preserving; and anything '
-    'translators of this author are known to get wrong.\n\n'
-    'Write 150 to 300 words of plain prose in <tlang>. Describe only '
-    'what you can support. Do not summarise the plot, do not review or '
-    'praise the book, do not give advice that would apply to any novel, '
-    'and invent nothing. Only if you know nothing reliable about how '
-    'this author writes, reply with exactly: %s\n\n'
+    'language; recurring stylistic habits worth preserving; and '
+    'anything translators of this author are known to get wrong.\n\n'
+    'Write 150 to 300 words of plain prose in <tlang>. Do not review or '
+    'praise, do not give advice that would apply to any novel, and '
+    'invent nothing. Only if you know nothing reliable about how this '
+    'author writes, reply with exactly: %s\n\n'
     'Reply with the brief itself and nothing else: no preamble, no '
     'headings, no lists, no citations, no closing remarks.\n\n'
     'Author: {author}\n'
+    'Known works of this author, for orientation: {works}\n'
     'Book: {title}\n'
     'Original language: <slang>\n'
     'Translation language: <tlang>') % NO_AUTHOR_INFORMATION
@@ -2551,25 +2559,34 @@ class NovelTranslator:
     context_prompt = DEFAULT_NOVEL_CONTEXT_PROMPT
     context_source_prompt = DEFAULT_NOVEL_CONTEXT_SOURCE_PROMPT
     author_style_prompt = DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT
+    author_check_prompt = DEFAULT_NOVEL_AUTHOR_CHECK_PROMPT
 
     @property
     def author_style_setting(self):
         """Whether the book gets a brief on how its author writes.
 
         Values:
-          ``'auto'``  -- research it once before the first chapter,
-                         searching the web when the engine can and
-                         falling back to what the model already knows
-                         when it cannot. The default.
-          ``'model'`` -- ask the model, never search the web. Cheaper,
-                         and the only option that costs nothing extra on
-                         a gateway that bills search results.
+          ``'model'`` -- ask the model once, before the first chapter,
+                         what it knows of the author's prose. The
+                         default.
           ``'off'``   -- do not ask at all.
+
+        A web search used to be an option; it is gone. The pages a
+        search finds are about the plot of the author's other books, and
+        a model given them declined to answer or placed the book in the
+        wrong century. Anything stored as 'auto' from then reads as
+        'model'.
         """
         value = self._cfg('novel_author_style', 'model')
-        if value not in ('auto', 'model', 'off'):
-            value = 'auto'
-        return value
+        return 'off' if value == 'off' else 'model'
+
+    @property
+    def author_check(self):
+        """Whether the model is asked, before the brief, if it knows the
+        author at all (see ``DEFAULT_NOVEL_AUTHOR_CHECK_PROMPT``). One
+        small request; without it a model asked about an invented name
+        wrote a confident brief about nobody."""
+        return bool(self._cfg('novel_author_check', True))
 
     @property
     def dialogue_convention(self):
@@ -3055,11 +3072,6 @@ class NovelTranslator:
 
     # -- book-wide directives ---------------------------------------------
 
-    def _engine_supports_web_search(self):
-        """Whether the current engine can put a web search behind a
-        request (see ``GenAI.web_search_mode``)."""
-        return bool(getattr(self.translator, 'web_search_mode', None))
-
     @property
     def dialogue_rules(self):
         """How direct speech is punctuated, stated once for the book.
@@ -3168,55 +3180,50 @@ class NovelTranslator:
                 'No brief: the book carries no author in its calibre '
                 'metadata, so there was nobody to ask about. Set the '
                 'author in calibre and use "Reset context" to ask again.'))
-        search = (self.author_style_setting == 'auto'
-                  and self._engine_supports_web_search())
-        if search:
-            self.log(_('Author brief: researching "{author}" on the web '
-                       'through {engine}.').format(
-                           author=author,
-                           engine=getattr(self.translator, 'name', '?')))
-        else:
-            reason = _('the engine cannot search the web') \
-                if self.author_style_setting == 'auto' \
-                else _('web search is off in the settings')
-            self.log(_('Author brief: asking the model what it knows about '
-                       '"{author}" ({reason}).').format(
-                           author=author, reason=reason))
+        works = ''
+        if self.author_check:
+            known = self._recognise_author(author)
+            if known is not None and not known.get('recognised'):
+                self.log(_(
+                    'Author brief: the model does not know "{author}" '
+                    '(it says: {note}); the translation continues without '
+                    'a brief rather than with one made up.').format(
+                        author=author, note=known.get('note') or '-'))
+                return self._no_author_style(_(
+                    'No brief: asked whether it knows {author}, the model '
+                    'answered that it cannot name any book by this author '
+                    '({note}). A brief from it would be invented, so the '
+                    'translation goes on without one. Pick a model that '
+                    'knows the author, then use "Reset context" so the '
+                    'question is asked again.').format(
+                        author=author, note=known.get('note') or 'unknown'))
+            if known is not None:
+                works = ', '.join(
+                    str(w).strip() for w in known.get('works') or []
+                    if str(w).strip())
+                self.log(_(
+                    'Author brief: the model knows "{author}" ({note}){works}'
+                    '{shared}.').format(
+                        author=author, note=known.get('note') or '-',
+                        works=(_('; works it names: {}').format(works)
+                               if works else ''),
+                        shared=(_('; it warns that more than one writer '
+                                  'has this name') if known.get(
+                                      'shared_name') else '')))
+        self.log(_('Author brief: asking the model how "{author}" '
+                   'writes.').format(author=author))
         user_prompt = self._compose_prompt(
             self.author_style_prompt,
-            {'{sources}': (None, model_text(
-                AUTHOR_STYLE_SOURCES['search' if search else 'model'])),
-             '{author}': (model_text('Author:'), author),
+            {'{author}': (model_text('Author:'), author),
+             '{works}': (model_text('Known works:'), works),
              '{title}': (model_text('Book:'), self.book_title)},
-            required=('{sources}', '{author}', '{title}'))
+            required=('{author}', '{title}'))
         system_prompt = self._fill_placeholders(model_text(
             'You research how books are written and answer in plain '
             'prose, saying only what you can support.'))
         try:
-            response = self._author_style_call(
-                system_prompt, user_prompt, search)
+            response = self._author_style_call(system_prompt, user_prompt)
             brief = collapse_blank_lines(response)
-            if search and self._is_no_information(brief):
-                # The pages a search brings back are about the plot far
-                # more often than about the prose, and a model told to
-                # rely on them says it knows nothing when they do not;
-                # asked without them it will often say what it knows.
-                # The setting is "search when the engine can, fall back
-                # to the model", and this is the fallback.
-                self.log(_(
-                    'Author brief: with the web results in front of it '
-                    'the model said it has no reliable information; '
-                    'asking again from what it knows on its own.'))
-                user_prompt = self._compose_prompt(
-                    self.author_style_prompt,
-                    {'{sources}': (None, model_text(
-                        AUTHOR_STYLE_SOURCES['model'])),
-                     '{author}': (model_text('Author:'), author),
-                     '{title}': (model_text('Book:'), self.book_title)},
-                    required=('{sources}', '{author}', '{title}'))
-                response = self._author_style_call(
-                    system_prompt, user_prompt, False)
-                brief = collapse_blank_lines(response)
         except TranslationCanceled:
             raise
         except Exception as e:
@@ -3237,11 +3244,9 @@ class NovelTranslator:
                 'author and this book, which is the honest answer and '
                 'better than an invented one. The translation goes on '
                 'without a brief.\n\n'
-                'To get one, let an engine that can search the web do so '
-                '(Novel Mode, "How the author writes": "Search the web '
-                'when the engine can") or pick a model that knows the '
-                'author, then use "Reset context" so the question is '
-                'asked again.').format(author=author))
+                'To get one, pick a model that knows the author, then '
+                'use "Reset context" so the question is asked '
+                'again.').format(author=author))
         if len(brief) < 80:
             self.log(_('Author brief: nothing usable came back, the '
                        'translation continues without one.'))
@@ -3267,32 +3272,50 @@ class NovelTranslator:
         self.ctx.set_style_note(note)
         return ''
 
-    def _author_style_call(self, system_prompt, user_prompt, search):
-        """Run the research request, with the engine's web search behind
-        it when ``search`` is set.
-
-        The search body is swapped in through :meth:`_body_builder`.
-        """
-        label = _('the author brief')
+    def _recognise_author(self, author):
+        """Ask whether the model knows ``author``: the parsed JSON reply
+        (``recognised``, ``works``, ``shared_name``, ``note``), or None
+        when the request failed or the reply was not readable, in which
+        case the brief is asked for anyway: a parsing problem is no
+        reason to lose it."""
+        user_prompt = self._compose_prompt(
+            self.author_check_prompt,
+            {'{author}': (model_text('Author:'), author),
+             '{title}': (model_text('Book in hand:'), self.book_title)},
+            required=('{author}', '{title}'))
+        system_prompt = model_text(
+            'You answer with strict JSON only, and only from what you '
+            'actually know. Never invent a book or an author.')
         self._request_kind = 'author'
-        if not search:
-            return self._translate_context_call(
-                system_prompt, user_prompt, label)
-        translator = self.translator
-        original_timeout = getattr(translator, 'request_timeout', None)
-        # A search runs several fetches before the model writes a word,
-        # and the reply is one short brief: the wait is all latency.
-        min_search_timeout = 300.0
-        if original_timeout is not None \
-                and original_timeout < min_search_timeout:
-            translator.request_timeout = min_search_timeout
         try:
-            with self._body_builder(translator.get_body_for_search):
-                return self._translate_context_call(
-                    system_prompt, user_prompt, label)
-        finally:
-            if original_timeout is not None:
-                translator.request_timeout = original_timeout
+            response = self._translate_context_call(
+                system_prompt, user_prompt, _('the author check'),
+                schema=self._AUTHOR_CHECK_SCHEMA)
+        except TranslationCanceled:
+            raise
+        except Exception as e:
+            self.log(_('Author check: the request failed ({}); asking for '
+                       'the brief anyway.').format(describe_error(e)), True)
+            return None
+        obj = _extract_json_object(response)
+        if not isinstance(obj, dict) or 'recognised' not in obj:
+            self.log(_('Author check: the reply was not readable; asking '
+                       'for the brief anyway.'))
+            return None
+        return {
+            'recognised': bool(obj.get('recognised')),
+            'works': [w for w in (obj.get('works') or [])
+                      if isinstance(w, str)][:5],
+            'shared_name': bool(obj.get('shared_name')),
+            'note': str(obj.get('note') or '').strip(),
+        }
+
+    def _author_style_call(self, system_prompt, user_prompt):
+        """Run the request for the brief: one context call, counted
+        under its own kind."""
+        self._request_kind = 'author'
+        return self._translate_context_call(
+            system_prompt, user_prompt, _('the author brief'))
 
     def _translation_system_prompt(self, context_text):
         """Build the system prompt of one translation request.
@@ -4324,6 +4347,18 @@ class NovelTranslator:
     # first so a model that follows the schema order writes it before
     # the entity list: if the answer is cut short, the field that cannot
     # be salvaged from a broken object is the one already finished.
+    _AUTHOR_CHECK_SCHEMA = {
+        'type': 'object',
+        'additionalProperties': False,
+        'properties': {
+            'recognised': {'type': 'boolean'},
+            'works': {'type': 'array', 'items': {'type': 'string'}},
+            'shared_name': {'type': 'boolean'},
+            'note': {'type': 'string'},
+        },
+        'required': ['recognised', 'works', 'shared_name', 'note'],
+    }
+
     _CONTEXT_RESPONSE_SCHEMA = {
         'type': 'object',
         'additionalProperties': False,
@@ -4425,9 +4460,9 @@ class NovelTranslator:
         ``build`` receives the request text and returns the body. It runs
         with the *plain* builder back in place, because every alternative
         body is built by taking the normal one apart and adding to it --
-        ``get_body_for_search`` on every engine, ``get_body_for_structured``
-        on Gemini -- and leaving the swap in place while it runs makes it
-        call itself until the stack ends.
+        ``get_body_for_structured`` on Gemini, say -- and leaving the
+        swap in place while it runs makes it call itself until the stack
+        ends.
 
         Swapping rather than threading a flag through
         :meth:`_translate_with_retry` keeps the retry, backoff and cancel
