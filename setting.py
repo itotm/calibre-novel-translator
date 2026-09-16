@@ -488,7 +488,7 @@ class TranslationSetting(QDialog):
         genai_model_limits.setStyleSheet('color:grey;')
         genai_model_limits.setToolTip(_(
             'What the provider says about the selected model. The reply '
-            'limit is the one that matters most in Novel Mode: a chunk '
+            'limit is the one that matters most here: a chunk '
             'is answered with a translation about as long as the chunk '
             'itself, so it is what a request can be sized against.\n\n'
             'Shown for engines whose model listing publishes the '
@@ -774,9 +774,8 @@ class TranslationSetting(QDialog):
             openrouter_spin(
                 'max_tokens', 'max_tokens', 0, 1000000, step=256,
                 tooltip=_('Cap the length of the answer. 0 lets the model '
-                          'use its own limit -- keep it at 0 for Novel '
-                          'Mode, where a whole chunk is translated in one '
-                          'answer.')),
+                          'use its own limit -- keep it at 0: a whole '
+                          'chunk is translated in one answer.')),
             openrouter_spin(
                 'seed', 'seed', 0, 2147483647,
                 tooltip=_('Ask for deterministic sampling. 0 disables it. '
@@ -801,10 +800,11 @@ class TranslationSetting(QDialog):
             openrouter_edit(
                 'provider_ignore', 'novita, targon',
                 _('Comma separated providers that must never serve the '
-                  'request. Novel Mode adds to this list for the length '
-                  'of one run when a provider keeps answering '
-                  'unreliably (see "Provider failures before exclusion" '
-                  'under Novel Mode); what is typed here stays.')))
+                  'request. A run adds to this list, for its own length, '
+                  'a provider that keeps answering unreliably (see '
+                  '"Provider failures before exclusion" under Chapters '
+                  'and context), unless it is the only one allowed '
+                  'above; what is typed here stays.')))
         openrouter_row(
             _('Usage accounting'),
             openrouter_check(
@@ -813,7 +813,7 @@ class TranslationSetting(QDialog):
                   'as the provider counted them and what the request '
                   'cost. On by default: it is one more event at the end '
                   'of the stream and nothing on the bill, and it is what '
-                  'the Novel Mode report adds up. Off, the tokens are '
+                  'the report of a run adds up. Off, the tokens are '
                   'estimated and the cost is unknown.')))
         openrouter_row(
             _('Provider: quantizations'),
@@ -917,8 +917,8 @@ class TranslationSetting(QDialog):
             finally:
                 openrouter_loading.clear()
 
-        # Novel Mode settings (visible only for GenAI engines).
-        novel_group = QGroupBox(_('Novel Mode'))
+        # The pipeline's own settings: chapters, chunks, context, prompts.
+        novel_group = QGroupBox(_('Chapters and context'))
         novel_group.setVisible(False)
         novel_layout = QFormLayout(novel_group)
         self.apply_form_layout_policy(novel_layout)
@@ -1624,9 +1624,9 @@ class TranslationSetting(QDialog):
         novel_translation_prompt = QPlainTextEdit()
         novel_translation_prompt.setFixedHeight(320)
         novel_translation_prompt.setToolTip(_(
-            'System prompt for Novel Mode. It replaces the engine prompt '
-            'of the Fine-tuning section entirely; leave it empty to use '
-            'the shipped one, shown greyed out.\n\n'
+            'The system prompt of every chunk. It replaces the engine '
+            'prompt of the Fine-tuning section entirely; leave it empty '
+            'to use the shipped one, shown greyed out.\n\n'
             'Write it in plain prose: no placeholder is required. The '
             'languages and the running summary and glossary are added on '
             'their own when you do not mention them. Should you want to '

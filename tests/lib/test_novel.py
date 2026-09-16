@@ -18,14 +18,14 @@ from ...lib.novel import (
     DIALOGUE_CONVENTIONS,
     NO_AUTHOR_INFORMATION,
     INFO_NOVEL_SUMMARIES, INFO_NOVEL_GLOSSARY, INFO_NOVEL_PROGRESS,
-    INFO_NOVEL_MODE, INFO_NOVEL_STYLE, INFO_NOVEL_STYLE_NOTE)
+    INFO_NOVEL_STYLE, INFO_NOVEL_STYLE_NOTE)
 
 
 module_name = 'calibre_plugins.novel_translator.lib.novel'
 
 
 def make_paragraph(pid, text, page='p1', ignored=False):
-    """Build a Paragraph suitable for novel-mode tests."""
+    """Build a Paragraph suitable for the pipeline tests."""
     return Paragraph(
         pid, 'md5-%s' % pid, text, text, ignored=ignored, page=page)
 
@@ -547,8 +547,6 @@ class TestContextManager(unittest.TestCase):
         self.assertEqual([], ctx.get_summaries())
         self.assertEqual({}, ctx.get_glossary())
         self.assertEqual(0, ctx.get_progress())
-        # load() also marks the cache as novel-mode.
-        self.cache.set_info.assert_any_call(INFO_NOVEL_MODE, '1')
 
     def test_load_existing(self):
         summaries = [{'chapter': 1, 'title': 'a', 'summary': 'ok'}]
@@ -4219,11 +4217,11 @@ class TestProgressByText(unittest.TestCase):
         translator.run()
         # The copyright page is 19 of 1000 characters: not a third.
         after_front_matter = [
-            f for f, m in fractions if 'chapter 1/2' in m]
+            f for f, m in fractions if 'Chapter 1/2' in m]
         self.assertTrue(after_front_matter)
         self.assertLess(after_front_matter[0], 0.05)
         self.assertIn('1% of the text', [
-            m for f, m in fractions if 'chapter 1/2' in m][0])
+            m for f, m in fractions if 'Chapter 1/2' in m][0])
         self.assertEqual(1.0, fractions[-1][0])
 
 
@@ -4336,6 +4334,95 @@ class TestSourceContextAndChunksInFlight(unittest.TestCase):
         with self.assertRaises(TranslationFailed):
             translator.run()
         engine.abort.assert_called()
+
+    def test_a_chunk_cut_short_by_another_failing_does_not_ask_again(self):
+        """The abort that follows a failed chunk closes the response the
+        other chunks are reading, and their read ends in an error. It is
+        not a passing one: the chunk that took it for one asked again,
+        and again, with the pauses in between, for a reply nobody was
+        waiting for any more."""
+        import threading
+        cache, ctx, paragraphs, chapter = self._book(4)
+        aborted = threading.Event()
+
+        def side_effect(text, prompt):
+            if '"source": "Paragraph 2 of the chapter."' in text:
+                raise TranslationFailed('boom')
+            # Still reading when the other chunk fails: the abort ends
+            # the read the way a closed response does.
+            aborted.wait(5)
+            raise Exception(
+                'PyMemoryView_FromBuffer(): info->buf must not be NULL')
+        engine = StructuredEngine(translate_side_effect=side_effect)
+        engine.request_attempt = 2
+        engine.abort = Mock(side_effect=aborted.set)
+        translator = NovelTranslator(
+            engine, [chapter], ctx, cache,
+            config={'novel_min_chars_for_context': 0,
+                    'novel_max_paragraphs_per_chunk': 2,
+                    'novel_parallel_chunks': 2})
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        with patch(module_name + '.time.sleep'):
+            with self.assertRaises(TranslationFailed):
+                translator.run()
+        asked = [c['text'] for c in engine.translate_calls
+                 if _is_translation_call(c['prompt'])]
+        # The failing chunk spent its two attempts; the one cut short
+        # sent one request and did not send it again.
+        self.assertEqual(3, len(asked))
+        self.assertEqual(
+            1, sum(1 for text in asked
+                   if '"source": "Paragraph 0 of the chapter."' in text))
+
+    def test_a_copy_of_the_engine_carries_no_copies_of_its_own(self):
+        """The list of copies belongs to the root engine. A copy made
+        once the list existed used to share it, and an abort that asked
+        every copy to abort its copies went round it without end."""
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        engine = StructuredEngine()
+        translator = NovelTranslator(engine, [], ctx, cache, config={})
+        first = translator._clone()
+        second = translator._clone()
+        self.assertEqual([first.translator, second.translator],
+                         engine.clones)
+        self.assertIsNone(first.translator.clones)
+        self.assertIsNone(second.translator.clones)
+
+    def test_a_refused_exclusion_is_said_once_and_not_asked_again(self):
+        """An engine that cannot leave the provider out -- it is the
+        only one the settings allow -- says so; the run keeps counting
+        the failures but does not ask again at each of them."""
+        class PinnedEngine(StructuredEngine):
+            def __init__(self):
+                super().__init__()
+                self.asked = 0
+
+            def exclude_provider(self, name):
+                self.asked += 1
+                raise ValueError(
+                    'it is the only provider the settings allow')
+
+        cache = Mock()
+        cache.get_info.return_value = None
+        ctx = ContextManager(cache).load()
+        engine = PinnedEngine()
+        translator = NovelTranslator(engine, [], ctx, cache, config={})
+        log = Mock()
+        translator.set_logging(log)
+        engine.last_provider = 'Pinned'
+        for _ in range(4):
+            translator._note_provider_failure('short')
+        self.assertEqual(1, engine.asked)
+        stats = translator.provider_stats['Pinned']
+        self.assertFalse(stats['excluded'])
+        self.assertEqual(4, stats['failures'])
+        logged = ' '.join(str(c.args[0]) for c in log.call_args_list)
+        self.assertIn('but it is not excluded: it is the only provider',
+                      logged)
+        self.assertEqual(1, logged.count('not excluded'))
 
     def test_an_exclusion_reaches_the_root_engine(self):
         class ExcludingEngine(StructuredEngine):

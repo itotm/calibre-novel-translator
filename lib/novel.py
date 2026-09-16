@@ -1,8 +1,8 @@
-"""Novel Mode: chapter-aware sequential translation pipeline for LLMs.
+"""The chapter-aware sequential translation pipeline.
 
-This module implements a dedicated translation pipeline optimized for narrative
-long-form content (novels). Unlike the default paragraph-by-paragraph parallel
-pipeline (see ``lib/translation.py``), the novel pipeline:
+A pipeline for narrative long-form content, which a language model
+translates chapter by chapter. Rather than sending paragraphs one by one,
+in parallel, it:
 
   * groups paragraphs by chapter, using the ebook Table of Contents when
     available (fallback: one XHTML file per chapter);
@@ -520,7 +520,7 @@ class TokenBudget:
                     current_tokens = 0
                     current_translatable = 0
                 log.warn(
-                    'Novel mode: paragraph estimated at %d tokens exceeds '
+                    'Paragraph estimated at %d tokens exceeds the '
                     'per-chunk budget %d; sending as-is.'
                     % (tokens, available))
                 chunks.append(([p], tokens, self.REASON_OVERSIZED))
@@ -616,7 +616,6 @@ class TokenBudget:
 
 
 # Cache info keys (single source of truth).
-INFO_NOVEL_MODE = 'novel_mode'
 INFO_NOVEL_SUMMARIES = 'novel_summaries'
 INFO_NOVEL_GLOSSARY = 'novel_glossary'
 INFO_NOVEL_PROGRESS = 'novel_progress'
@@ -718,7 +717,6 @@ class ContextManager:
         except (ValueError, TypeError):
             self.progress = 0
 
-        self.cache.set_info(INFO_NOVEL_MODE, '1')
         return self
 
     def _persist(self):
@@ -1000,7 +998,7 @@ class ContextManager:
 # The shipped prompt holds only craft rules that hold for any novel:
 # what to do with register, period, voice and tone. Anything specific to
 # an author, a series or a single book belongs in the "Translation
-# prompt" field of the Novel Mode settings, which replaces this text.
+# prompt" field of the settings, which replaces this text.
 #
 # The three placeholders at the end are filled by
 # NovelTranslator._translation_system_prompt and are ordered by how often
@@ -2314,6 +2312,10 @@ class NovelTranslator:
         # ``_root`` and take this lock to change them.
         self._root = self
         self._lock = threading.RLock()
+        # Set on the root when a chunk in flight failed and the chapter
+        # is being abandoned: the other chunks stop instead of asking
+        # again for what nobody will keep (see :meth:`_stop_requested`).
+        self._aborting = False
 
     # -- setters (mirroring lib.translation.Translation) -------------------
 
@@ -3200,8 +3202,8 @@ class NovelTranslator:
         """
         if self.author_style_setting == 'off':
             return self._no_author_style(_(
-                'The author brief is turned off in the settings (Novel '
-                'Mode, "How the author writes").'))
+                'The author brief is turned off in the settings ("How '
+                'the author writes").'))
         existing = self.ctx.get_style()
         if existing:
             self._author_style = existing
@@ -3382,6 +3384,17 @@ class NovelTranslator:
         # behind.
         return collapse_blank_lines(prompt)
 
+    def _stop_requested(self):
+        """Whether the request under way must not go on: the user
+        cancelled, or a chunk in flight alongside this one failed and
+        the chapter is being abandoned (see
+        :meth:`_translate_chunks_in_flight`). A request cut short from
+        outside comes back as an error, and without this the chunk took
+        it for a passing one and asked again -- twice, with the pauses
+        in between, for a reply the pipeline was no longer waiting for.
+        """
+        return bool(self.cancel_request() or self._root._aborting)
+
     def _run_translation_call(self, user_text):
         """Invoke ``translator.translate`` handling both plain-string and
         generator (streaming) return values.
@@ -3433,7 +3446,7 @@ class NovelTranslator:
         limited = 0
         relaxed = False
         while attempt < attempts:
-            if self.cancel_request():
+            if self._stop_requested():
                 raise TranslationCanceled(_('Translation canceled.'))
             started = time.time()
             self.log(_(
@@ -3444,7 +3457,7 @@ class NovelTranslator:
             try:
                 self._apply_prompt(system_prompt)
                 result = self._run_translation_call(user_text)
-                if self.cancel_request():
+                if self._stop_requested():
                     # The request was cut short from outside (see
                     # ``Base.abort``): whatever came back is not a reply.
                     raise TranslationCanceled(_('Translation canceled.'))
@@ -3458,7 +3471,7 @@ class NovelTranslator:
             except TranslationCanceled:
                 raise
             except Exception as e:
-                if self.cancel_request():
+                if self._stop_requested():
                     raise TranslationCanceled(_('Translation canceled.'))
                 last_error = e
                 elapsed = round(time.time() - started, 1)
@@ -3494,7 +3507,7 @@ class NovelTranslator:
                     continue
                 attempt += 1
                 self.log(
-                    _('Novel mode request failed after {}s '
+                    _('Request failed after {}s '
                       '(attempt {}/{}): {}').format(
                           elapsed, attempt, attempts,
                           describe_error(e)), True)
@@ -3503,7 +3516,7 @@ class NovelTranslator:
             finally:
                 self._restore_prompt()
         raise TranslationFailed(
-            _('Novel mode: giving up after {} attempts. Last error: {}')
+            _('Giving up after {} attempts. Last error: {}')
             .format(attempts, describe_error(last_error)))
 
     def _reply_fact(self, name, kind=str):
@@ -3618,7 +3631,7 @@ class NovelTranslator:
             stats['failures'] += 1
             threshold = self.provider_failures_before_exclusion
             if not provider or not threshold or stats['excluded'] \
-                    or stats['failures'] < threshold:
+                    or stats.get('kept') or stats['failures'] < threshold:
                 return
             # Every engine in play: this one, the root one the next
             # chunks are cloned from, and the copies in flight.
@@ -3635,8 +3648,18 @@ class NovelTranslator:
                 try:
                     excluded = bool(exclude(provider)) or excluded
                 except Exception as e:
-                    self.log(_('Could not exclude {}: {}').format(
-                        provider, describe_error(e)), True)
+                    # Said once: the engine refused (the provider is
+                    # the only one the settings allow) or could not
+                    # (the listing was unreachable), and asking again
+                    # at every failure would cost the same call each
+                    # time.
+                    stats['kept'] = True
+                    self.log(_(
+                        '{provider} gave {count} unreliable replies (the '
+                        'last: {what}), but it is not excluded: '
+                        '{reason}.').format(
+                            provider=provider, count=stats['failures'],
+                            what=what, reason=describe_error(e)), True)
                     return
         if excluded:
             stats['excluded'] = True
@@ -4061,7 +4084,7 @@ class NovelTranslator:
         pause out."""
         step = 0.5
         for _step in range(int(seconds / step)):
-            if self.cancel_request():
+            if self._stop_requested():
                 raise TranslationCanceled(_('Translation canceled.'))
             time.sleep(step)
 
@@ -5165,7 +5188,7 @@ class NovelTranslator:
         self.total_chapters = len(self.chapters)
         self.completed_chapters = 0
         if self.total_chapters == 0 and not self.aux_paragraphs:
-            self.log(_('Novel mode: no chapters to translate.'))
+            self.log(_('No chapters to translate.'))
             return 0
 
         self._load_usage()
@@ -5180,12 +5203,12 @@ class NovelTranslator:
         start = self.ctx.get_progress()
         if start >= self.total_chapters:
             self.log(
-                _('Novel mode: nothing to do (progress={}, chapters={}).')
+                _('Nothing to do (progress={}, chapters={}).')
                 .format(start, self.total_chapters))
             return 0
 
         self.log(sep())
-        self.log(_('Novel mode: starting.'))
+        self.log(_('Starting.'))
         self.log(_('Total chapters: {}').format(self.total_chapters))
         if self.model_output_limit:
             self.log(_('Model reply limit: {} tokens.').format(
@@ -5216,11 +5239,11 @@ class NovelTranslator:
 
         elapsed = round((time.time() - start_ts) / 60, 2)
         self.log(sep())
-        self.log(_('Novel mode: completed {} chapter(s) in {} minutes.')
+        self.log(_('Completed {} chapter(s) in {} minutes.')
                  .format(self.completed_chapters, elapsed))
         for line in self.build_report().split('\n'):
             self.log(line)
-        self.progress(1.0, _('Novel mode: completed.'))
+        self.progress(1.0, _('Translation completed.'))
         return self.completed_chapters
 
     def _translate_chapter(self, chapter):
@@ -5569,6 +5592,11 @@ class NovelTranslator:
         engine = copy.copy(self.translator)
         try:
             engine.inflight = None
+            # The list of copies belongs to the root engine alone. A
+            # copy made once the list existed shared it, and an abort
+            # that asked each copy to abort its copies went round the
+            # list without end.
+            engine.clones = None
         except Exception:
             pass
         clone.translator = engine
@@ -5596,6 +5624,7 @@ class NovelTranslator:
         total_chunks = len(chunks)
         # Anything said once per book is said here, not once per clone.
         self._structured_active()
+        self._root._aborting = False
         futures = {}
         with ThreadPoolExecutor(max_workers=workers) as pool:
             try:
@@ -5612,6 +5641,11 @@ class NovelTranslator:
                         chapter, chunk, chunk_result, position,
                         translations)
             except BaseException:
+                # The flag first, so a chunk whose request is cut short
+                # below reads the error as the stop it is; then the pool
+                # is left to wind down, which is what closing it waits
+                # for.
+                self._root._aborting = True
                 for future in futures:
                     future.cancel()
                 abort = getattr(self.translator, 'abort', None)
@@ -5721,12 +5755,12 @@ class NovelTranslator:
         fraction = min(1.0, (done_chars + current_chars) / float(total_chars))
         self.progress(
             fraction,
-            _('Novel mode: chapter {}/{} done, {}% of the text.').format(
+            _('Chapter {}/{} done, {}% of the text.').format(
                 done, total, int(100 * fraction)))
 
 
 # ---------------------------------------------------------------------------
-# Helper: cache-id namespacing for novel mode
+# Helper: the cache id of a book
 # ---------------------------------------------------------------------------
 
 
@@ -5855,13 +5889,11 @@ def probe_engine(engine, config=None, details=False):
 
 
 def novel_cache_id(input_path, engine_name, target_lang, encoding=''):
-    """Compute a cache id specific to novel mode.
+    """Compute the cache id of a book.
 
-    The classic cache id (see ``lib/conversion.py:convert_item``) mixes in
-    ``merge_length``. Novel mode has no merge length, so we substitute the
-    tag ``novel_v1`` to keep the two caches strictly separated. That way,
-    switching modes on the same book does not clobber the other mode's
-    stored translations.
+    The upstream cache id mixed in ``merge_length``; this pipeline has no
+    merge length, so the tag ``novel_v1`` stands in its place. The tag
+    is part of the id of every cache written so far, and stays.
     """
     return uid(
         input_path + engine_name + target_lang + 'novel_v1'

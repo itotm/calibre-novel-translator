@@ -52,10 +52,10 @@ class ClaudeTranslate(GenAI):
     # The longest reply a request may carry. The Messages API insists
     # on the figure and stops the reply dead at it, so a value below
     # what a chunk needs comes back as a translation cut off half-way
-    # -- which is what a hardcoded 4096 did to every chunk Novel Mode
-    # sent. 0 sizes it for the model (see ``reply_limit``); the novel
-    # pipeline reads that figure to size its chunks, and lowers it for
-    # the summary and glossary calls.
+    # -- which is what a hardcoded 4096 did to every chunk the plugin
+    # sent. 0 sizes it for the model (see ``reply_limit``); the pipeline
+    # reads that figure to size its chunks, and lowers it for the
+    # summary and glossary calls.
     max_tokens = 0
 
     # event types for streaming are listed here:
@@ -69,11 +69,6 @@ class ClaudeTranslate(GenAI):
         'message_start',
         'message_delta',
         'message_stop']
-
-    # Anthropic's server-side search tool. Novel Mode turns it on for
-    # the single request that researches how the author writes.
-    # https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/
-    # web-search-tool
 
     models: list[str] = []
     # TODO: better handle setting the default model
@@ -206,8 +201,8 @@ class ClaudeTranslate(GenAI):
         response_json = json.loads(response)
         blocks = response_json['content']
         # Every text block, not just the first one: a reply that used a
-        # server-side tool -- the web search above -- opens with the
-        # tool call and its result, and the prose comes after them.
+        # server-side tool opens with the tool call and its result, and
+        # the prose comes after them.
         texts = [block['text'] for block in blocks
                  if isinstance(block, dict) and 'text' in block]
         if not texts:

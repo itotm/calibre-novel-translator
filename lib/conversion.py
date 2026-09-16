@@ -168,7 +168,7 @@ def convert_book(
 def get_novel_config():
     """Return a dict of all ``novel_*`` settings read from the plugin config.
 
-    Single source of truth for the novel-mode configuration dict. Both
+    Single source of truth for the pipeline's configuration dict. Both
     the interactive UI worker (``NovelTranslationWorker`` in ``novel.py``)
     and the background job entry point (``convert_item_novel``) call this
     function so that any future additions to the config surface
@@ -286,7 +286,6 @@ def convert_item(
     cache.set_info('target_lang', target_lang)
     cache.set_info('plugin_version', NovelTranslatorPlugin.__version__)
     cache.set_info('calibre_version', __version__)
-    cache.set_info('novel_mode', '1')
 
     debug_info = '{0}\n| Diagnosis Information\n{0}'.format(sep())
     debug_info += '\n| Calibre Version: %s\n' % __version__

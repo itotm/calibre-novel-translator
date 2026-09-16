@@ -2,9 +2,11 @@
 
 A calibre plugin that translates a novel chapter by chapter with a
 language model, keeping a running summary and glossary. Forked from
-bookfere's Ebook-Translator-Calibre-Plugin; Novel Mode originated in
-upstream PR #590 by BiG86. Those two credits stay in the README and the
-About dialog; no other upstream branding, links or legacy modes come back.
+bookfere's Ebook-Translator-Calibre-Plugin; the chapter-by-chapter
+pipeline originated in upstream PR #590 by BiG86. Those two credits stay
+in the README and the About dialog; no other upstream branding, links or
+legacy modes come back. The plugin does one thing, so nothing in it is
+called "Novel Mode": there is no other mode for it to be set against.
 
 ## Every editing session ends with a rebuilt, installed package
 

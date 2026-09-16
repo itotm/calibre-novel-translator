@@ -5,7 +5,6 @@ on a single ebook. The model operates on whole chapters, so the window
 shows chapter-level progress plus tabs for the running summaries, the
 dynamic glossary, the author brief and the log.
 
-Only engines that inherit from ``engines.genai.GenAI`` are eligible.
 """
 import time
 import traceback
@@ -95,15 +94,14 @@ class NovelPreparationWorker(QObject):
 
         cache = get_cache(cache_id)
         cache.set_info('title', self.ebook.title)
-        # Novel Mode researches the author once per book. Written here so
-        # a translation started from the background job -- which only
+        # The author is asked about once per book. Written here so a
+        # translation started from the background job -- which only
         # receives the title -- can still find it.
         cache.set_info('author', self.ebook.get_author())
         cache.set_info('engine_name', translator_name)
         cache.set_info('target_lang', self.ebook.target_lang)
         cache.set_info('plugin_version', NovelTranslatorPlugin.__version__)
         cache.set_info('calibre_version', __version__)
-        cache.set_info('novel_mode', '1')
 
         chapters_meta = []
         # A cache without its chapter list is one a previous preparation
@@ -249,7 +247,7 @@ class NovelTranslationWorker(QObject):
             self.logging.emit(traceback.format_exc(), True)
             self.finished.emit(False, str(e))
         else:
-            self.finished.emit(True, _('Novel mode: completed.'))
+            self.finished.emit(True, _('Translation completed.'))
 
     def _chapters_from_meta(self, cache, chapters_meta):
         """Rebuild the chapters from what the preparation worker stored.
@@ -360,7 +358,7 @@ class NovelTranslationWorker(QObject):
 
         novel_config = get_novel_config()
         # Not part of the settings: these two describe the book being
-        # translated, not the way Novel Mode works.
+        # translated, not the way the pipeline works.
         novel_config.update({
             'novel_book_title': (
                 self.ebook.custom_title or self.ebook.title or ''),
@@ -372,32 +370,40 @@ class NovelTranslationWorker(QObject):
         translator_novel = NovelTranslator(
             translator, chapters, ctx, cache, config=novel_config,
             aux_paragraphs=aux_paragraphs)
-        # Every line goes to the window and, at the end, to the cache,
-        # so the log of a run survives the window being closed.
+        # Every line goes to the window and to the cache -- after every
+        # chapter and at the end -- so the log of a run survives the
+        # window being closed, and most of it survives calibre being
+        # killed: the run that froze the window took its log with it,
+        # and the cache held the log of the run before.
         lines = [cache.get_info(INFO_NOVEL_LOG) or '', '=' * 38,
                  time.strftime('%Y-%m-%d %H:%M:%S')]
 
         def logging(text, error=False):
             lines.append(('[ERROR] ' if error else '') + text)
             self.logging.emit(text, error)
+
+        def store_log():
+            # The last 300 KB: enough for the run that matters, not a
+            # transcript of every attempt ever made on the book.
+            cache.set_info(INFO_NOVEL_LOG, '\n'.join(
+                line for line in lines if line)[-300000:])
+
+        def chapter_done(chapter, summary, delta):
+            self.chapter_done.emit(chapter.index, summary, delta or [])
+            store_log()
         translator_novel.set_logging(logging)
         translator_novel.set_progress(
             lambda frac, msg: self.progress.emit(frac, msg))
         translator_novel.set_cancel_request(self.cancel_request)
         translator_novel.set_chapter_started(
             lambda chapter: self.chapter_started.emit(chapter.index))
-        translator_novel.set_chapter_done(
-            lambda chapter, summary, delta:
-                self.chapter_done.emit(chapter.index, summary, delta or []))
+        translator_novel.set_chapter_done(chapter_done)
         translator_novel.set_report(lambda text: self.report.emit(text))
 
         try:
             translator_novel.run()
         finally:
-            # The last 300 KB: enough for the run that matters, not a
-            # transcript of every attempt ever made on the book.
-            cache.set_info(INFO_NOVEL_LOG, '\n'.join(
-                line for line in lines if line)[-300000:])
+            store_log()
             cache.close()
 
 
@@ -427,20 +433,6 @@ class CreateNovelProject(QDialog):
         widget = QWidget()
         layout = QGridLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
-
-        # Warning if the engine does not support novel mode.
-        if not getattr(engine_class, 'supports_novel_mode', False):
-            warn = QLabel(_(
-                'A language model is required (OpenRouter, an '
-                'OpenAI-compatible provider, Claude or Gemini). The '
-                'current engine "{}" is not one. Please switch engine in '
-                'Setting.').format(engine_class.name))
-            warn.setWordWrap(True)
-            warn.setStyleSheet('color:crimson;font-weight:bold;')
-            layout.addWidget(warn, 0, 0, 1, 6)
-            self.eligible = False
-        else:
-            self.eligible = True
 
         input_group = QGroupBox(_('Input Format'))
         input_layout = QGridLayout(input_group)
@@ -501,11 +493,6 @@ class CreateNovelProject(QDialog):
 
     @pyqtSlot()
     def show_novel(self):
-        if not self.eligible:
-            self.alert.pop(_(
-                'Please select a GenAI engine before starting novel mode.'),
-                'warning')
-            return
         self.done(0)
         self.start_translation.emit(self.ebook)
 
@@ -516,7 +503,7 @@ class CreateNovelProject(QDialog):
 
 
 class NovelTranslation(QDialog):
-    """Main window for Novel Mode.
+    """The main window.
 
     Layout:
       * Left column: cover thumbnail, book title, chapter list with
@@ -650,7 +637,7 @@ class NovelTranslation(QDialog):
     def _on_prep_failed(self, message):
         self.preparing = False
         self.alert.pop(
-            _('Failed to prepare novel mode: {}').format(message), 'error')
+            _('Failed to prepare the book: {}').format(message), 'error')
         self.done(0)
 
     # -- layout: main view -------------------------------------------------
@@ -708,8 +695,8 @@ class NovelTranslation(QDialog):
         self.style_view.setPlaceholderText(_(
             'The brief on how this book is written appears here once the '
             'translation has started, or a note on why there is none. '
-            'How it is obtained is set under Novel Mode in the plugin '
-            'settings ("How the author writes").'))
+            'How it is obtained is set in the plugin settings ("How the '
+            'author writes").'))
         self.tabs.addTab(self.style_view, _('Author'))
 
         # Summaries tab.
@@ -962,14 +949,8 @@ class NovelTranslation(QDialog):
             for m in self.chapters_meta)
 
     def _on_start(self):
-        # Sanity: engine must still support novel mode (user may have
-        # changed it in Setting).
+        # The engine may have been changed in the settings meanwhile.
         self.current_engine = get_engine_class()
-        if not getattr(self.current_engine, 'supports_novel_mode', False):
-            self.alert.pop(_(
-                'Novel mode requires a GenAI engine. Please choose one '
-                'in Setting.'), 'warning')
-            return
         retranslate = False
         if self._all_chapters_done():
             # "Re-run all". The button used to just start the worker,
@@ -1099,8 +1080,8 @@ class NovelTranslation(QDialog):
                 self.output_button.setEnabled(True)
                 self.start_button.setText(_('Re-run all'))
                 self.alert.pop(_(
-                    'Novel mode: all chapters translated. Click '
-                    '"Build translated ebook" to produce the output.'))
+                    'All chapters translated. Click "Build translated '
+                    'ebook" to produce the output.'))
         else:
             self.alert.pop(message, 'warning')
 

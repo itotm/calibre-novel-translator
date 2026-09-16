@@ -149,7 +149,7 @@ class OpenRouterTranslate(ChatgptTranslate):
     # 30 on another.
     provider_sort = 'price'
     provider_allow_fallbacks = True
-    # Novel Mode asks for JSON with `response_format` and for reasoning
+    # The pipeline asks for JSON with `response_format` and for reasoning
     # to be off; a provider that supports neither is free to ignore both
     # unless this is set, which is how the model ends up echoing the
     # source text back and burning thinking tokens anyway. Turn it off
@@ -163,7 +163,7 @@ class OpenRouterTranslate(ChatgptTranslate):
     # Ask OpenRouter to say, with every reply, what it cost: the tokens
     # as the provider counted them and the money. It is one more event
     # at the end of the stream and nothing on the bill; it is what the
-    # Novel Mode report adds up.
+    # report of a run adds up.
     # https://openrouter.ai/docs/use-cases/usage-accounting
     usage_accounting = True
 
@@ -265,8 +265,8 @@ class OpenRouterTranslate(ChatgptTranslate):
     #
     # `response_format` is deliberately not in the list: whether to ask
     # for a JSON schema is decided once, by `structured_output_mode`
-    # below, and a user who overrides that decision in the Novel Mode
-    # settings means it.
+    # below, and a user who overrides that decision in the settings
+    # means it.
     optional_parameters = (
         'temperature', 'top_p', 'top_k', 'min_p', 'top_a',
         'frequency_penalty', 'presence_penalty', 'repetition_penalty',
@@ -309,7 +309,7 @@ class OpenRouterTranslate(ChatgptTranslate):
 
     @property
     def structured_output_mode(self):
-        """Whether Novel Mode may ask this model for a JSON schema.
+        """Whether the pipeline may ask this model for a JSON schema.
 
         Inherited from the ChatGPT engine as a plain class attribute, it
         described the gateway. Behind the gateway sit hundreds of models
@@ -417,29 +417,64 @@ class OpenRouterTranslate(ChatgptTranslate):
 
     def exclude_provider(self, name) -> bool:
         """Keep OpenRouter from routing to ``name`` for the life of this
-        engine instance: the novel pipeline calls it when a provider has
-        given too many unreliable replies. The setting on disk is not
-        touched -- a provider bad with one model today is not bad with
-        every model always.
+        engine instance: the pipeline calls it when a provider has given
+        too many unreliable replies. The setting on disk is not touched
+        -- a provider bad with one model today is not bad with every
+        model always.
 
         Routing takes the provider's slug, the reply names it by its
         display name; the model's endpoint listing maps one to the
         other, and the name itself is the fallback. Returns False when
         the provider was already excluded.
+
+        A provider the settings pin the request to (``provider_only``)
+        is taken off that list when others remain on it. When it is the
+        only one, the exclusion is refused with a ValueError: ignoring
+        the one provider allowed left OpenRouter nothing to route to,
+        and every request of the rest of the run failed with "All
+        providers have been ignored".
         """
         slug = self.provider_slug(name)
+        only = parse_list(self.provider_only)
+        if only:
+            remaining = [
+                entry for entry in only
+                if not self._same_provider(entry, slug, name)]
+            if not remaining:
+                raise ValueError(_(
+                    'it is the only provider the settings allow '
+                    '(provider_only), so the run keeps using it'))
+            self.provider_only = ', '.join(remaining)
         current = parse_list(self.provider_ignore)
-        if slug.casefold() in [c.casefold() for c in current] \
-                or str(name).casefold() in [c.casefold() for c in current]:
+        if any(self._same_provider(entry, slug, name) for entry in current):
             return False
         self.provider_ignore = ', '.join(current + [slug])
         return True
+
+    @staticmethod
+    def _same_provider(entry, slug, name) -> bool:
+        """Whether a routing list ``entry`` -- a slug, possibly with a
+        quantization suffix ("deepinfra/fp8") -- names the provider
+        with this ``slug`` or display ``name``."""
+        head = str(entry).split('/')[0].strip().casefold()
+        return head in (str(slug).casefold(), str(name).strip().casefold())
+
+    # Display name -> routing slug, per model, so that the copies of
+    # this engine reading a chapter's chunks together do not each ask
+    # the listing for the same answer, one after the other, under the
+    # lock that holds the other chunks up.
+    _provider_slugs: dict[tuple, str] = {}
 
     def provider_slug(self, name) -> str:
         """The routing slug of the provider called ``name`` in replies,
         from the endpoint listing of the configured model; the name
         lower-cased when the listing does not say."""
         wanted = str(name or '').strip().casefold()
+        key = (self.model, wanted)
+        cached = self._provider_slugs.get(key)
+        if cached:
+            return cached
+        slug = ''
         try:
             response = request(
                 'https://openrouter.ai/api/v1/models/%s/endpoints'
@@ -452,10 +487,12 @@ class OpenRouterTranslate(ChatgptTranslate):
                         == wanted:
                     slug = str(endpoint.get('tag') or '').split('/')[0]
                     if slug:
-                        return slug
+                        break
         except Exception:
             pass
-        return str(name or '').strip().lower().replace(' ', '-')
+        slug = slug or str(name or '').strip().lower().replace(' ', '-')
+        self._provider_slugs[key] = slug
+        return slug
 
     def get_body(self, text):
         return json.dumps(self.extend_body(json.loads(super().get_body(text))))

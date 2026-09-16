@@ -553,7 +553,6 @@ class TestOpenRouterTranslate(unittest.TestCase):
     def test_created_engine(self):
         self.assertIsInstance(self.translator, GenAI)
         self.assertIsInstance(self.translator, ChatgptTranslate)
-        self.assertTrue(OpenRouterTranslate.supports_novel_mode)
 
     @patch(module_name + '.openrouter.request')
     def test_get_models(self, mock_request):
@@ -1192,7 +1191,12 @@ class TestKeyErrorMatching(unittest.TestCase):
 
 
 class TestOpenRouterProviderExclusion(unittest.TestCase):
+    LISTING = json.dumps({'data': {'endpoints': [
+        {'provider_name': 'OpenInference', 'tag': 'open-inference/fp8'},
+        {'provider_name': 'DeepInfra', 'tag': 'deepinfra/fp8'}]}})
+
     def setUp(self):
+        OpenRouterTranslate._provider_slugs.clear()
         OpenRouterTranslate.set_config(
             {'api_keys': ['sk-or-v1-a'], 'model': 'vendor/model'})
         OpenRouterTranslate.lang_codes = {
@@ -1229,6 +1233,47 @@ class TestOpenRouterProviderExclusion(unittest.TestCase):
         self.assertEqual('', OpenRouterTranslate.config.get(
             'provider_ignore', ''))
 
+    @patch(module_name + '.openrouter.request')
+    def test_the_only_provider_allowed_is_kept(self, mock_request):
+        """Ignoring the one provider the request is pinned to left
+        OpenRouter nothing to route to, and every request of the rest
+        of the run failed with "All providers have been ignored"."""
+        mock_request.return_value = self.LISTING
+        self.translator.provider_only = 'deepinfra/fp8'
+        with self.assertRaises(ValueError) as caught:
+            self.translator.exclude_provider('DeepInfra')
+        self.assertIn('provider_only', str(caught.exception))
+        self.assertEqual('deepinfra/fp8', self.translator.provider_only)
+        self.assertEqual('', self.translator.provider_ignore)
+        body = json.loads(self.translator.get_body('x'))
+        self.assertEqual(['deepinfra/fp8'], body['provider']['only'])
+        self.assertNotIn('ignore', body['provider'])
+
+    @patch(module_name + '.openrouter.request')
+    def test_a_pinned_provider_among_others_is_taken_off_the_list(
+            self, mock_request):
+        mock_request.return_value = self.LISTING
+        self.translator.provider_only = 'deepinfra/fp8, open-inference'
+        self.assertTrue(self.translator.exclude_provider('DeepInfra'))
+        self.assertEqual('open-inference', self.translator.provider_only)
+        self.assertEqual('deepinfra', self.translator.provider_ignore)
+        body = json.loads(self.translator.get_body('x'))
+        self.assertEqual(['open-inference'], body['provider']['only'])
+        self.assertEqual(['deepinfra'], body['provider']['ignore'])
+
+    @patch(module_name + '.openrouter.request')
+    def test_the_slug_is_looked_up_once_per_model(self, mock_request):
+        """The copies of the engine reading a chapter's chunks together
+        each exclude the provider, under the lock that holds the other
+        chunks up: one listing serves them all."""
+        import copy
+        mock_request.return_value = self.LISTING
+        copies = [copy.copy(self.translator) for _ in range(3)]
+        for engine in [self.translator] + copies:
+            self.assertTrue(engine.exclude_provider('DeepInfra'))
+            self.assertEqual('deepinfra', engine.provider_ignore)
+        self.assertEqual(1, mock_request.call_count)
+
     def test_usage_accounting_is_asked_for(self):
         body = json.loads(self.translator.get_body('x'))
         self.assertEqual({'include': True}, body['usage'])
@@ -1248,3 +1293,28 @@ class TestAbortReachesClones(unittest.TestCase):
         engine.abort()
         clone.inflight.close.assert_called_once()
         engine.inflight.close.assert_called_once()
+
+    def test_a_copy_that_shares_the_list_is_closed_once(self):
+        """A copy made by ``copy.copy`` once the list of copies existed
+        carries the same list, itself included. Asking each copy to
+        abort its copies in turn went round that list without end,
+        swallowing a RecursionError at every turn, with the window
+        frozen behind it."""
+        import copy
+        ChatgptTranslate.set_config({'api_keys': ['a']})
+        engine = ChatgptTranslate()
+        engine.clones = []
+        clone = copy.copy(engine)
+        engine.clones.append(clone)
+        clone.inflight = Mock()
+        engine.inflight = Mock()
+        engine.abort()
+        clone.inflight.close.assert_called_once()
+        engine.inflight.close.assert_called_once()
+        # A copy told to abort on its own closes its own response and
+        # does not go through the list it happens to carry.
+        clone.inflight.reset_mock()
+        engine.inflight.reset_mock()
+        clone.abort()
+        clone.inflight.close.assert_called_once()
+        engine.inflight.close.assert_not_called()

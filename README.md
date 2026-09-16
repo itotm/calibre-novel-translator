@@ -78,7 +78,7 @@ for the summaries, the glossary, the author brief and the log.
 | **OpenRouter** | The default. One key, hundreds of models. The model listing carries each model's context window, reply limit and accepted parameters; the plugin sizes its requests against them and sends only the parameters the model takes. Reasoning, provider routing, sampling and two escape hatches (extra headers, extra body) are settings. |
 | **OpenAI-compatible** | One engine, a provider to pick: OpenAI, DeepSeek, Groq, Mistral, Together AI, Fireworks AI, xAI, Moonshot AI, Azure OpenAI, Ollama and LM Studio on this machine, or any custom endpoint. The preset fills in the endpoint, the key hint and a default model; keys and models are kept per provider. |
 | **Claude** | Anthropic's Messages API, with prompt caching. The reply limit is a setting, sized for the model by default. |
-| **Gemini** | Google's API, with structured output and Google Search grounding. |
+| **Gemini** | Google's API, with structured output. |
 
 Every behaviour is a setting with a sensible default, under *Preferences →
 Plugins → Novel Translator*, or from the plugin's own menu.
@@ -99,7 +99,7 @@ It writes `../novel-translator_v<version>.zip`, checks that the archive is
 installable and prints the command that installs it:
 
 ```sh
-calibre-customize -a ../novel-translator_v1.2.0.zip
+calibre-customize -a ../novel-translator_v1.2.1.zip
 ```
 
 In the GUI the equivalent is *Preferences → Plugins → Load plugin from
@@ -139,7 +139,7 @@ notifications.
 
 *Engine*: the engine, its key, the languages, the request timing, the model
 and the sampling, then a section for the engine's own options and the
-**Novel Mode** section, which holds among others:
+**Chapters and context** section, which holds among others:
 
 * chapter detection and the front-matter threshold;
 * the chunk caps: tokens, paragraphs, overlap, and whether the reply limit
@@ -184,7 +184,8 @@ Novel Translator is a fork of
 [Ebook Translator](https://github.com/bookfere/Ebook-Translator-Calibre-Plugin)
 by bookfere.com, whose code is still most of what runs here: the ebook
 handling, the caches, the settings dialog and the engines all come from
-there. Novel Mode, the idea this plugin is built around, originated in
+there. The chapter-by-chapter translation with a running summary and
+glossary, the idea this plugin is built around, originated in
 [pull request #590](https://github.com/bookfere/Ebook-Translator-Calibre-Plugin/pull/590)
 to that project by [Simone Norcini (BiG86)](https://github.com/BiG86).
 Thank you both.

@@ -215,8 +215,8 @@ def keepalive_socket(enable=True) -> Generator[ModuleType, None, None]:
 
     This is coordinated with :func:`socks_proxy` (which also
     monkey-patches ``socket.socket``): the two must not be active
-    simultaneously on the same request. The novel-mode caller does not
-    use SOCKS, so there is no conflict in practice.
+    simultaneously on the same request. The pipeline does not use
+    SOCKS, so there is no conflict in practice.
     """
     if not enable:
         yield socket

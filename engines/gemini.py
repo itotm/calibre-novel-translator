@@ -29,9 +29,6 @@ class GeminiTranslate(GenAI):
 
     structured_output_mode = 'schema'
 
-    # Google Search grounding, used once per book by Novel Mode to
-    # research how the author writes.
-
     prompt = (
         'You are a meticulous translator who translates any given content. '
         'Translate the given content from <slang> to <tlang> only. Do not '

@@ -202,7 +202,7 @@ class TestUtils(unittest.TestCase):
 
 
 class TestKeepAliveSocket(unittest.TestCase):
-    """Tests for the TCP keepalive helper used by novel-mode structured
+    """Tests for the TCP keepalive helper used by the structured
     output (see lib/novel.py::_translate_with_retry_structured)."""
 
     def test_class_is_a_socket_subclass(self):

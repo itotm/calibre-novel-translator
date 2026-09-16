@@ -329,7 +329,7 @@ class ChatgptTranslate(GenAI):
         return json.dumps(body)
 
     #: What the last reply said about itself besides its text, for the
-    #: log of Novel Mode: why the model stopped ("stop" when it had
+    #: log of the run: why the model stopped ("stop" when it had
     #: finished, "length" when it ran into the output limit, a filter
     #: name when a filter cut it) and, through a gateway that names it,
     #: which provider served it. None until a reply says.

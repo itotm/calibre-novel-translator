@@ -33,13 +33,6 @@ class Base:
     placeholder = ('{{{{id_{}}}}}', r'({{\s*)+id\s*_\s*{}\s*(\s*}})+')
     using_tip = None
 
-    # Novel Mode (see lib/novel.py) requires stateful, chat-style engines
-    # able to accept a customized system prompt with a running summary and
-    # glossary. Only GenAI subclasses opt-in to True. Kept as a plain class
-    # attribute rather than an ABC method so all builtin/custom engines can
-    # be introspected uniformly at UI level.
-    supports_novel_mode: bool = False
-
     concurrency_limit: int = 0
     request_interval: float = 0.0
     request_attempt: int = 3
@@ -237,13 +230,19 @@ class Base:
         Closing the response makes the read in the worker thread end
         at once; the pipeline sees the cancel and stops.
         """
-        # Copies of this engine reading a chunk each (Novel Mode with
-        # chunks in flight together) are cut short as well.
+        # Copies of this engine reading a chunk each (chunks in flight
+        # together) are cut short as well. Each copy closes its own
+        # response and nothing else: a copy is made by ``copy.copy`` and
+        # so carries the same ``clones`` list as the root, and asking
+        # every copy to abort its clones in turn went round the list
+        # without end, swallowing one RecursionError after another, with
+        # the window frozen behind it.
         for clone in list(getattr(self, 'clones', None) or []):
-            try:
-                clone.abort()
-            except Exception:
-                pass
+            if clone is not self:
+                clone._close_inflight()
+        self._close_inflight()
+
+    def _close_inflight(self):
         response = self.inflight
         if response is None:
             return

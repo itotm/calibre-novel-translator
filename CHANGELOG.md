@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.2.1
+
+**A cancel that ends, not a window that freezes**
+
+* Cancelling a chapter whose chunks were in flight together froze the
+  window, and so did a chunk failing while the others were still reading.
+  The copies of the engine reading the chunks were made by `copy.copy`
+  once the list of copies existed, so each carried that same list, itself
+  included; an abort that asked every copy to abort its copies in turn
+  went round the list without end, swallowed a RecursionError at every
+  turn and never came back, on the worker thread and, on Cancel, on the
+  window's own. Each copy now closes its own response and nothing else,
+  and a copy carries no list.
+* A chunk whose request was cut short by that abort read the error as a
+  passing one and asked again, twice, with the pauses in between, for a
+  reply nobody was waiting for. A chunk in flight now stops when the
+  chapter is being abandoned, the way it stops on a cancel.
+* A provider that the settings pin the request to (*Provider: only*) is
+  no longer excluded when it keeps answering unreliably: ignoring the
+  one provider allowed left OpenRouter nothing to route to, and every
+  request of the rest of the run failed with "All providers have been
+  ignored". The run says so once and keeps using it; a pinned provider
+  among others is taken off the list instead. The lookup of a
+  provider's routing slug is made once per model, not once per engine
+  copy under the lock that holds the other chunks up.
+* The log of a run is written to the cache after every chapter, not only
+  at the end: the run that froze the window took its log with it.
+* Nothing is called "Novel Mode" any more, in the window, the settings
+  (the section is now *Chapters and context*), the log or the code: the
+  plugin does one thing, and there is no other mode for it to be set
+  against. The credit for the idea stays.
+
 ## v1.2.0
 
 * The author brief is asked of the model alone, about the author alone.

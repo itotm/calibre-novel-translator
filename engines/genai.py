@@ -15,26 +15,18 @@ class GenAI(Base, ABC):
     top_p: float
     top_k: int
 
-    # Marker consumed by the novel translation pipeline (lib/novel.py) and
-    # by the UI: only engines that expose an LLM chat interface should be
-    # eligible for novel mode, since it relies on a system prompt carrying
-    # a running summary and glossary. Non-GenAI engines (Google, DeepL, ...)
-    # leave this at False on ``Base``.
-    supports_novel_mode: bool = True
-
     @abstractmethod
     def get_models(self) -> list[str]:
         """Automatically get the models for the engine."""
 
     # ------------------------------------------------------------------
-    # Novel mode support: transient prompt override.
+    # Transient prompt override.
     # ------------------------------------------------------------------
     #
-    # The default paragraph-per-request pipeline uses ``self.prompt`` as the
-    # system prompt for every call. The novel pipeline instead wants to
-    # inject a *different* system prompt for each request (containing the
-    # running summary and the dynamic glossary) without permanently mutating
-    # the engine configuration.
+    # ``self.prompt`` is the system prompt as configured. The pipeline
+    # instead wants to inject a *different* system prompt for each request
+    # (containing the running summary and the dynamic glossary) without
+    # permanently mutating the engine configuration.
     #
     # ``override_prompt`` saves the current prompt (once, so nested calls
     # remain safe) and swaps in the new one; ``restore_prompt`` puts the
