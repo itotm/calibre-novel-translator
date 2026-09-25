@@ -493,6 +493,14 @@ class TestChatgptStreamParsing(unittest.TestCase):
         self.assertEqual('DeepInfra', self.translator.last_provider)
         self.assertEqual('gen-1', self.translator.last_generation_id)
 
+    def test_the_service_tier_that_served_is_recorded(self):
+        chunks = self._stream([
+            b'data: {"id":"gen-1","service_tier":"flex","choices":'
+            b'[{"delta":{"content":"ciao"},"finish_reason":"stop"}]}',
+            b'data: [DONE]'])
+        self.assertEqual('ciao', ''.join(chunks))
+        self.assertEqual('flex', self.translator.last_service_tier)
+
     def test_the_usage_at_the_end_of_the_stream_is_recorded(self):
         chunks = self._stream([
             b'data: {"id":"gen-1","choices":[{"delta":{"content":"ciao"},'
@@ -641,6 +649,33 @@ class TestOpenRouterTranslate(unittest.TestCase):
 
         self.assertEqual(0.2, body['temperature'])
         self.assertEqual(42, body['seed'])
+
+    def test_the_service_tier_is_left_out_by_default(self):
+        body = json.loads(self.translator.get_body('test content'))
+        self.assertNotIn('service_tier', body)
+
+    def test_a_service_tier_is_sent_and_flex_waits_longer(self):
+        translator = self.reconfigure(service_tier='flex')
+        body = json.loads(translator.get_body('test content'))
+        self.assertEqual('flex', body['service_tier'])
+        self.assertGreaterEqual(translator.request_timeout, 900)
+        structured = json.loads(translator.get_body_for_structured(
+            'test content', {'type': 'object'}))
+        self.assertEqual('flex', structured['service_tier'])
+
+    def test_priority_keeps_the_timeout(self):
+        translator = self.reconfigure(
+            service_tier='priority', request_timeout=120)
+        body = json.loads(translator.get_body('test content'))
+        self.assertEqual('priority', body['service_tier'])
+        self.assertEqual(120, translator.request_timeout)
+
+    def test_an_unknown_service_tier_is_the_default(self):
+        translator = self.reconfigure()
+        translator.set_service_tier('turbo')
+        self.assertEqual('default', translator.service_tier)
+        body = json.loads(translator.get_body('test content'))
+        self.assertNotIn('service_tier', body)
 
     def test_extra_body_forces_a_filtered_parameter(self):
         translator = self.reconfigure(

@@ -16,7 +16,7 @@ from calibre.utils.localization import _  # type: ignore
 from . import NovelTranslatorPlugin
 from .lib.config import get_config
 from .lib.utils import (
-    log, css, is_proxy_available, traceback_error, socks_proxy)
+    css, is_proxy_available, traceback_error, socks_proxy)
 from .lib.translation import get_engine_class, get_translator
 from .lib.novel import (
     DIALOGUE_CONVENTIONS, FRONT_MATTER_TITLES, UNTRANSLATED_TITLES,
@@ -27,7 +27,7 @@ from .engines import (
 from .engines.genai import GenAI
 from .components import (
     Footer, AlertMessage, TargetLang, SourceLang, EngineList, EngineTester,
-    InputFormat, OutputFormat, set_shortcut)
+    InputFormat, OutputFormat, ModelWorker, set_shortcut)
 
 
 load_translations()  # type: ignore
@@ -50,31 +50,6 @@ class ProbeWorker(QObject):
         except Exception:
             report = _('The probe failed: {}').format(traceback_error())
         self.finished.emit(report)
-
-
-class ModelWorker(QObject):
-    start = pyqtSignal(object)
-    success = pyqtSignal(bool, str)
-    finished = pyqtSignal()
-
-    def __init__(self):
-        QObject.__init__(self)
-        self.log = log
-        self.start.connect(self.get_models)
-
-    @pyqtSlot(object)
-    def get_models(self, engine_class):
-        try:
-            engine = get_translator(engine_class)
-            if not isinstance(engine, GenAI):
-                raise Exception(f'{engine.__class__} is not a GenAI instance.')
-            engine_class.models = engine.get_models()
-            self.success.emit(True, '')
-        except Exception:
-            error = traceback_error()
-            self.log.error('Failed to fetch models: %s' % error)
-            self.success.emit(False, error)
-        self.finished.emit()
 
 
 def layout_scroll_area(name):
@@ -712,6 +687,30 @@ class TranslationSetting(QDialog):
                 _('Reason internally but leave the chain of thought out of '
                   'the response. Recommended: the plugin only reads the '
                   'translated text, so returning it just costs bandwidth.')))
+
+        openrouter_row(
+            _('Service tier'),
+            openrouter_combo(
+                'service_tier', OpenRouterTranslate.service_tiers,
+                _('The price and speed the request is served at, sent as '
+                  '"service_tier".\n\n'
+                  '- Default: omit the field; the standard price.\n'
+                  '- flex: discounted and slower. A book is hundreds of '
+                  'requests with no one waiting on each, so it is often '
+                  'the right trade; the request timeout is raised to 15 '
+                  'minutes, since a flex request can wait in the '
+                  'provider\'s queue. It never falls back to the standard '
+                  'tier: a model or a provider without flex capacity fails '
+                  'every request.\n'
+                  '- priority: costs more for faster, steadier service; '
+                  'without priority capacity it falls back to the standard '
+                  'tier and price.\n\n'
+                  'Only some providers offer them (OpenAI, Google; '
+                  'Anthropic for priority). The reply says which tier '
+                  'served it, that is the one billed, and the log and the '
+                  'report say it too. Left at the default because it is '
+                  'a choice about money and time: a new translation can '
+                  'ask for its own tier together with its model.')))
 
         openrouter_advanced = QCheckBox(_('Show'))
         openrouter_advanced.setToolTip(_(
@@ -2105,9 +2104,7 @@ class TranslationSetting(QDialog):
             genai_group.setVisible(True)
 
         # What a provider keeps for itself when another one is chosen.
-        per_provider = (
-            'api_keys', 'endpoint', 'model', 'model_max_output_tokens',
-            'model_supported_parameters')
+        per_provider = ChatgptTranslate.per_provider_keys
 
         def change_provider(config, provider):
             engine = self.current_engine

@@ -2303,6 +2303,11 @@ class NovelTranslator:
         # ones whose translation had to be set aside, moved or asked
         # for again: the share of the text that gave trouble.
         self.text_stats = {'chars': 0, 'bad_chars': 0}
+        # Replies per service tier that served them, where the engine
+        # says: a priority request can come back served at the standard
+        # tier, and billed at its price. (Flex never falls back: without
+        # flex capacity the request fails.)
+        self.tier_stats = {}
         # Wall-clock seconds of the runs on this book, this one included.
         self.run_seconds = 0.0
         self.report = dummy         # (html: str)
@@ -3515,9 +3520,17 @@ class NovelTranslator:
                     self._wait(min(30, 5 * attempt))
             finally:
                 self._restore_prompt()
-        raise TranslationFailed(
-            _('Giving up after {} attempts. Last error: {}')
-            .format(attempts, describe_error(last_error)))
+        message = _('Giving up after {} attempts. Last error: {}').format(
+            attempts, describe_error(last_error))
+        if getattr(self.translator, 'service_tier', None) == 'flex':
+            # Flex never falls back to the standard tier: a model or a
+            # provider without flex capacity fails every request.
+            message += ' ' + _(
+                'The requests ask for the flex service tier, which fails '
+                'instead of falling back when there is no flex capacity: '
+                'try again later, or translate the book with the default '
+                'tier.')
+        raise TranslationFailed(message)
 
     def _reply_fact(self, name, kind=str):
         """What the engine recorded about its last reply under ``name``
@@ -3538,6 +3551,9 @@ class NovelTranslator:
         served = self._reply_fact('last_provider')
         if served:
             notes += _(' via {}').format(served)
+        tier = self._served_tier()
+        if tier:
+            notes += _(', {} tier').format(tier)
         usage = self._reply_fact('last_usage', dict) or {}
         if usage.get('prompt_tokens') is not None:
             notes += _(', {} in + {} out tokens').format(
@@ -3552,6 +3568,25 @@ class NovelTranslator:
             # What the gateway's own records list the reply under.
             notes += ' [%s]' % generation
         return notes
+
+    # The tiers that are a choice. The others are names providers give
+    # the standard one: 'default', 'standard' (Anthropic), 'on_demand'
+    # (Groq), 'auto'.
+    CHOSEN_TIERS = ('flex', 'priority')
+
+    def _served_tier(self):
+        """The service tier that served the last reply, when it is worth
+        a word: flex or priority, or any tier at all when one of those
+        was asked for and another served. None otherwise, and on engines
+        that do not report it."""
+        served = self._reply_fact('last_service_tier')
+        if not served:
+            return None
+        asked = getattr(self.translator, 'service_tier', None)
+        if served in self.CHOSEN_TIERS or (
+                asked in self.CHOSEN_TIERS and served != asked):
+            return served
+        return None
 
     # -- what the book costs ---------------------------------------------
 
@@ -3590,6 +3625,9 @@ class NovelTranslator:
         provider = self._reply_fact('last_provider')
         if provider:
             self._provider(provider)['requests'] += 1
+        tier = self._reply_fact('last_service_tier')
+        if tier:
+            self.tier_stats[tier] = self.tier_stats.get(tier, 0) + 1
 
     def _provider(self, name):
         stats = self.provider_stats.setdefault(
@@ -3704,6 +3742,11 @@ class NovelTranslator:
             self.run_seconds = float(stored.get('run_seconds') or 0.0)
         except (TypeError, ValueError):
             self.run_seconds = 0.0
+        tiers = stored.get('tiers')
+        if isinstance(tiers, dict):
+            self.tier_stats = {
+                str(name): int(count) for name, count in tiers.items()
+                if isinstance(count, int)}
 
     def _publish_report(self):
         """Write the totals and the report to the cache, and hand the
@@ -3712,6 +3755,7 @@ class NovelTranslator:
             self.cache.set_info(INFO_NOVEL_USAGE, json.dumps({
                 'usage': self.usage, 'providers': self.provider_stats,
                 'realigned': self.realigned, 'text': self.text_stats,
+                'tiers': self.tier_stats,
                 'run_seconds': self.run_seconds + self._run_elapsed()}))
             html = self.build_report_html()
             self.cache.set_info(INFO_NOVEL_REPORT, html)
@@ -3816,7 +3860,21 @@ class NovelTranslator:
             'bad_chars': self.text_stats.get('bad_chars', 0),
             'providers': providers,
             'advice': advice,
+            'tiers': self._tiers_line(),
         }
+
+    def _tiers_line(self):
+        """How many replies each service tier served, as one line, or ''
+        when the engine never said or every reply came at the default
+        tier without another being asked for."""
+        stats = self.tier_stats
+        asked = getattr(self.translator, 'service_tier', None)
+        if not stats or (asked not in self.CHOSEN_TIERS and not any(
+                name in self.CHOSEN_TIERS for name in stats)):
+            return ''
+        return _('Service tier that served the replies: {}.').format(
+            ', '.join('%s %d' % (name, count) for name, count in sorted(
+                stats.items(), key=lambda item: -item[1])))
 
     def build_report(self):
         """The report on the book so far as plain text, for the log:
@@ -3853,6 +3911,8 @@ class NovelTranslator:
             'again.').format(
                 chars=data['chars'],
                 share=self._share(data['bad_chars'], data['chars'])))
+        if data['tiers']:
+            lines.append('  ' + data['tiers'])
         lines.append('')
         lines.append(_('Providers'))
         if not data['providers']:
@@ -3928,6 +3988,8 @@ class NovelTranslator:
                 'again.').format(
                     chars='{:,}'.format(data['chars']),
                     share=self._share(data['bad_chars'], data['chars'])))))
+        if data['tiers']:
+            out.append('<p>%s</p>' % escape(data['tiers']))
         out.append('<h3>%s</h3>' % escape(_('Providers')))
         if not data['providers']:
             out.append('<p>%s</p>' % escape(_('(none named by the engine)')))
@@ -5845,6 +5907,12 @@ def probe_engine(engine, config=None, details=False):
     served = getattr(engine, 'last_provider', None)
     if served:
         report.append(_('Provider: {}').format(served))
+    tier = getattr(engine, 'last_service_tier', None)
+    asked = getattr(engine, 'service_tier', None)
+    if tier in NovelTranslator.CHOSEN_TIERS \
+            or asked in NovelTranslator.CHOSEN_TIERS:
+        report.append(_('Service tier: {} (asked for: {})').format(
+            tier or _('not stated'), asked or 'default'))
     reason = getattr(engine, 'last_finish_reason', None)
     if reason:
         report.append(_('Finish reason: {}').format(reason))

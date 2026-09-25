@@ -10,7 +10,7 @@ class TestImports(unittest.TestCase):
 
     def test_every_module_imports(self):
         package = __name__.rsplit('.', 1)[0].rsplit('.', 1)[0]
-        for name in ('ui', 'setting', 'novel', 'cache', 'about',
+        for name in ('ui', 'setting', 'novel', 'text_view', 'cache', 'about',
                      'components', 'engines', 'lib.conversion'):
             with self.subTest(module=name):
                 import_module('%s.%s' % (package, name))

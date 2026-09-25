@@ -66,8 +66,14 @@ contents and the front matter (title page, dedication, part dividers) are
 translated too, apart from the narrative. When every chapter is done the
 ebook is built from the cache with no further requests.
 
+**Several translations of a book.** Each translation is kept apart, with
+the model and the service tier it was made with, so a book can be
+translated by two models and the results read side by side, corrected by
+hand, and built from whichever you prefer.
+
 The window shows the chapter list with its status, a progress bar, and tabs
-for the summaries, the glossary, the author brief and the log.
+for the text (to read and correct), the author brief, the summaries, the
+glossary, the log and the report.
 
 ---
 
@@ -75,7 +81,7 @@ for the summaries, the glossary, the author brief and the log.
 
 | Engine | Notes |
 |---|---|
-| **OpenRouter** | The default. One key, hundreds of models. The model listing carries each model's context window, reply limit and accepted parameters; the plugin sizes its requests against them and sends only the parameters the model takes. Reasoning, provider routing, sampling and two escape hatches (extra headers, extra body) are settings. |
+| **OpenRouter** | The default. One key, hundreds of models. The model listing carries each model's context window, reply limit and accepted parameters; the plugin sizes its requests against them and sends only the parameters the model takes. Reasoning, service tier (flex, priority), provider routing, sampling and two escape hatches (extra headers, extra body) are settings. |
 | **OpenAI-compatible** | One engine, a provider to pick: OpenAI, DeepSeek, Groq, Mistral, Together AI, Fireworks AI, xAI, Moonshot AI, Azure OpenAI, Ollama and LM Studio on this machine, or any custom endpoint. The preset fills in the endpoint, the key hint and a default model; keys and models are kept per provider. |
 | **Claude** | Anthropic's Messages API, with prompt caching. The reply limit is a setting, sized for the model by default. |
 | **Gemini** | Google's API, with structured output. |
@@ -99,7 +105,7 @@ It writes `../novel-translator_v<version>.zip`, checks that the archive is
 installable and prints the command that installs it:
 
 ```sh
-calibre-customize -a ../novel-translator_v1.2.1.zip
+calibre-customize -a ../novel-translator_v1.3.0.zip
 ```
 
 In the GUI the equivalent is *Preferences → Plugins → Load plugin from
@@ -113,22 +119,40 @@ under *Preferences → Toolbars & menus* whenever you want it back.
 
 1. Open the settings from the plugin's menu, choose the engine, paste the
    API key, pick a model and save. OpenRouter is preselected.
-2. Select one book in the library and click the plugin's button.
-3. Choose the input and output formats and the languages, then *Start*.
+2. Select one book in the library and click the plugin's button. It lists
+   the translations of that book already in the cache, with the model
+   that made each one.
+3. *Open* one to continue it, or start a new one: choose the formats, the
+   languages and the model (and, with OpenRouter, the service tier), then
+   *Start new translation*. Everything else comes from the settings. A
+   book can have as many translations as you like, by different models or
+   into different languages, and two can be open side by side.
 4. The window prepares the book, lists its chapters and waits. *Start /
    Resume* runs the translation; *Cancel* stops it at once, cutting short
    the request in flight, and everything done so far is kept. The log of
-   a run is kept with the book and shown again when the window reopens.
-5. When every chapter is done, *Build translated ebook* writes the
-   translated book into the library (or to the folder set in the General
-   tab). *Re-run all* translates the whole book again while keeping the
-   summaries, the glossary and the author brief; *Reset context* discards
-   those too.
+   a run is kept with the translation and shown again when it reopens.
+5. The *Text* tab shows the chapter chosen on the left, original and
+   translation side by side; *Search* looks through that chapter or the
+   whole book, in both.
+   Select a paragraph to correct its translation and save it: the book is
+   built from what is saved.
+6. When every chapter is done, *Build translated ebook* writes the
+   translated book, in the output format chosen next to it, into the
+   library (or to the folder set in the General tab); build again after a
+   correction. *Re-run all* translates the whole book again while keeping
+   the summaries, the glossary and the author brief, and replaces the
+   corrections, which it says first; *Reset context* discards those too.
 
-The cache manager, in the plugin's menu, lists the books in the cache and
-lets you move, inspect or delete them. The cache lives under calibre's own
-cache directory and survives calibre being closed, so a book can be
-finished across several sessions.
+To compare translations of a book, select two or more of them, in the
+list of the book or in the cache manager, and click *Compare*: the
+original and every translation side by side, paragraph by paragraph, to
+read, correct, and copy a paragraph from one translation into another.
+
+The cache manager, in the plugin's menu, lists every translation in the
+cache with its model and lets you open, compare, move, inspect or delete
+them. The cache
+lives under calibre's own cache directory and survives calibre being
+closed, so a book can be finished across several sessions.
 
 ---
 

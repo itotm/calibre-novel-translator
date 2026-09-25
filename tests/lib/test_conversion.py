@@ -21,7 +21,8 @@ class TestConversionWorker(unittest.TestCase):
         self.ebook = Mock(Ebook)
         self.job = Mock()
         self.worker.working_jobs = {
-            self.job: (self.ebook, str(Path('/path/to/test.epub')))}
+            self.job: (self.ebook, str(Path('/path/to/test.epub')),
+                       'vendor/model')}
 
     def test_create_worker(self):
         self.assertIsInstance(self.worker, ConversionWorker)
@@ -115,6 +116,34 @@ class TestConversionWorker(unittest.TestCase):
         self.assertEqual(True, arguments.get('log_is_file'))
         self.assertIs(self.icon, arguments.get('icon'))
 
+
+    @patch(module_name + '.open')
+    @patch(module_name + '.os.rename')
+    @patch(module_name + '.os.path.exists')
+    @patch(module_name + '.get_metadata')
+    @patch(module_name + '.set_metadata')
+    def test_a_book_already_built_is_not_replaced(
+            self, mock_set_metadata, mock_get_metadata, mock_exists,
+            mock_os_rename, mock_open):
+        """Two translations of one book built into the same folder."""
+        self.job.failed = False
+        self.job.description = 'build'
+        self.worker.config = {'ebook_metadata': {}, 'to_library': False,
+                              'show_notification': False}
+        self.ebook.output_format = 'epub'
+        self.ebook.custom_title = None
+        metadata = Mock()
+        metadata.title = 'Title'
+        metadata.tags = []
+        mock_get_metadata.return_value = metadata
+        taken = {str(Path('/path/to/Title.epub'))}
+        mock_exists.side_effect = lambda path: path in taken
+
+        self.worker.translate_done(self.job)
+
+        mock_os_rename.assert_called_once_with(
+            str(Path('/path/to/test.epub')),
+            str(Path('/path/to/Title (vendor_model).epub')))
 
     @patch(module_name + '.open')
     @patch(module_name + '.os.rename')

@@ -1,5 +1,85 @@
 # Changelog
 
+## v1.3.0
+
+**Several translations of a book, to read, correct and compare**
+
+* A book can be translated more than once, and every translation is kept:
+  by another model, into another language, at another service tier. The
+  plugin's button now opens the list of the translations of the selected
+  book, with the model that made each one in bold, its tier, engine,
+  language, how many chapters are done, how many paragraphs were
+  corrected by hand and when it last changed. *Open* continues one, reads
+  it or builds the book from it; *Delete* removes it; *Start new
+  translation* makes another. Two translations of the same book can be
+  open side by side.
+* A new translation asks for one thing besides the formats and the
+  languages: the model, searchable in the engine's listing and open to one
+  it does not carry, with the model of the settings preselected. With
+  OpenRouter the service tier goes with it. Everything else is what the
+  settings say. The model and the tier are recorded with the translation
+  and used whenever it runs again, whatever the settings name by then;
+  what the listing says about the model (its reply limit, the parameters
+  it takes) is recorded with it, so a model other than the one in the
+  settings is not sized or filtered by that one's figures.
+* The window of a translation has a *Text* tab, first: the paragraphs of
+  the chapter chosen on the left, or of the whole book, original and
+  translation side by side, with a search over both. The translation of
+  the paragraph selected can be corrected and saved into the cache before
+  the book is built, or built again. The search runs when asked, with
+  *Search* or Enter, never while typing, and the whole book is only ever
+  searched, never listed whole; a search showing more than a thousand
+  paragraphs asks to be narrowed. The metadata, the table of contents
+  and the front matter are an entry of their own at the top of the
+  chapter list. Corrections wait for a run to end; a resume keeps them;
+  *Re-run all* says how many it would replace before it does. The output
+  format is now chosen next to *Build translated ebook*.
+* Two or more translations of a book can be compared: select them in the
+  list of the book, or in the cache manager, and *Compare*. The window
+  shows the chapters of the book and, for each paragraph, the original
+  and every translation side by side, each column named by its model
+  (with the tier, and the language when they differ); the search looks
+  through all of them. Any translation can be corrected there, and a
+  paragraph copied from one into another, or to the clipboard; the
+  table's menu copies a whole cell. The paragraphs are lined up by their
+  text, not their position, so one extra paragraph in an extraction does
+  not shift all the others. *Compare* is enabled only for translations of
+  one book made from the same file of it, and a translation that a run
+  is writing stays read-only. The Text tab of a translation window is
+  the same view with one column.
+* OpenRouter's service tiers (*Service tier* in the OpenRouter section,
+  and per translation): *flex* is discounted and slower, *priority* costs
+  more for faster service; the default leaves the field out. A flex
+  request is given fifteen minutes before it is taken for a dead
+  connection, and never falls back to the standard tier: with no flex
+  capacity it fails, and a run that gives up says so. A priority request
+  may fall back. The reply says which tier served it, which is the one
+  billed: the log says it whenever flex or priority is involved, and the
+  report counts the replies per tier.
+* Corrections are not lost by accident. Leaving a paragraph, a chapter
+  or the window with a correction not saved asks *Save*, *Discard* or
+  *Cancel*: Enter saves and Esc stays. Clicking another cell of the same
+  paragraph keeps what is typed. A paragraph saved from another window
+  since it was shown is not overwritten without asking. A correction that
+  cannot be saved because a run is writing that translation says so.
+* A translation keeps what it was made with: the model, the service tier
+  and, on the OpenAI-compatible engine, the provider, whose key, endpoint
+  and model are taken from the ones kept for it even after the settings
+  moved to another. A translation written before this version records
+  them at its next run. With the cache turned off, a translation already
+  in the cache is opened, compared and built from there, not from an
+  empty temporary copy.
+* A book built into a folder does not replace one built there before
+  from another translation: it takes the model in its name. A build
+  whose translation was deleted meanwhile stops instead of writing a book
+  with nothing translated in it.
+* The cache manager shows the model of every cache, and opens one with
+  *Open* or a double click, as the list of a book does. Caches written before
+  this version are listed with their book as they are, the model "not
+  recorded" until they next run, and learn which book they belong to the
+  first time they are opened, so a book whose files calibre moves (a new
+  title or author) keeps its translations.
+
 ## v1.2.1
 
 **A cancel that ends, not a window that freezes**

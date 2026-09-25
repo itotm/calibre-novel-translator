@@ -16,11 +16,11 @@ from .. import NovelTranslatorPlugin
 
 from .config import get_config
 from .utils import log, sep
-from .cache import get_cache
+from .cache import get_cache, cache_exists
 from .element import (
     get_element_handler, get_toc_elements, get_page_elements,
     get_metadata_elements)
-from .translation import get_translator
+from .translation import get_engine_class, get_translator
 from .novel import (
     ChapterBuilder, ContextManager, NovelTranslator, novel_cache_id)
 
@@ -255,7 +255,7 @@ def get_novel_config():
 
 def convert_item(
         ebook_title, input_path, output_path, source_lang, target_lang,
-        cache_only, format, encoding, direction, notification):
+        cache_only, format, encoding, direction, cache_id, notification):
     """The background job: translate one book, or build it from the cache.
 
     Calibre's ``arbitrary_n`` job runner injects ``notification`` as the
@@ -264,8 +264,24 @@ def convert_item(
     :cache_only: If True, do not ask the model anything. Reuse the cache
         the window filled and only rebuild the output ebook through
         Plumber. What the "Build translated ebook" button does.
+    :cache_id: the translation to build: a book can have several. None
+        works the id out from the book, the engine and the language, as
+        it was before a book could.
     """
-    translator = get_translator()
+    from .book_translations import engine_class_for
+    info = {}
+    if cache_id:
+        # Opened, a cache that is not there any more is an empty one,
+        # and the book would be built with nothing translated in it.
+        if not cache_exists(cache_id):
+            raise Exception(_(
+                'This translation is no longer in the cache: it was '
+                'deleted after the build was started.'))
+        cache = get_cache(cache_id)
+        info = cache.all_info()
+        cache.close()
+    translator = get_translator(engine_class_for(
+        get_engine_class(info.get('engine_name')), info))
     translator.set_source_lang(source_lang)
     translator.set_target_lang(target_lang)
 
@@ -277,13 +293,18 @@ def convert_item(
     _encoding = ''
     if encoding.lower() != 'utf-8':
         _encoding = encoding.lower()
-    cache_id = novel_cache_id(
+    cache_id = cache_id or novel_cache_id(
         input_path, translator.name, target_lang, _encoding)
     cache = get_cache(cache_id)
     cache.set_cache_only(cache_only)
     cache.set_info('title', ebook_title)
-    cache.set_info('engine_name', translator.name)
-    cache.set_info('target_lang', target_lang)
+    # What the translation was made with is its own record: an engine
+    # name this version does not know is not replaced by the default.
+    if not cache.get_info('engine_name'):
+        cache.set_info('engine_name', translator.name)
+    if not cache.get_info('target_lang'):
+        cache.set_info('target_lang', target_lang)
+    model = cache.get_info('model')
     cache.set_info('plugin_version', NovelTranslatorPlugin.__version__)
     cache.set_info('calibre_version', __version__)
 
@@ -291,6 +312,8 @@ def convert_item(
     debug_info += '\n| Calibre Version: %s\n' % __version__
     debug_info += '| Plugin Version: %s\n' % NovelTranslatorPlugin.__version__
     debug_info += '| Translation Engine: %s\n' % translator.name
+    if model:
+        debug_info += '| Model: %s\n' % model
     debug_info += '| Source Language: %s\n' % source_lang
     debug_info += '| Target Language: %s\n' % target_lang
     debug_info += '| Encoding: %s\n' % encoding
@@ -324,11 +347,12 @@ class ConversionWorker:
         self.api = self.db.new_api
         self.working_jobs = self.gui.novel_translator.jobs
 
-    def translate_ebook(self, ebook, cache_only=True):
+    def translate_ebook(self, ebook, cache_id, cache_only=True, label=None):
         """Launch the background job.
 
         Used with ``cache_only=True`` to rebuild the output ebook after
-        the window has filled the cache.
+        the window has filled the cache ``cache_id``. ``label`` says
+        which translation it is in the jobs panel: the model, usually.
         """
         input_path = ebook.get_input_path()
         if not self.config.get('to_library'):
@@ -337,8 +361,11 @@ class ConversionWorker:
             if output_path is None or not os.path.isdir(output_path):
                 raise Exception(
                     _('Please set a valid output path.'))
-            output_path = os.path.join(
-                output_path, f'{filename}.{ebook.output_format}')
+            # Named after the translation while it is built: two
+            # translations of a book built at once would otherwise write
+            # the same file. It gets the book's title when done.
+            output_path = os.path.join(output_path, '%s [%s].%s' % (
+                filename, cache_id[:8], ebook.output_format))
         else:
             output_path = PersistentTemporaryFile(
                 suffix='.' + ebook.output_format).name
@@ -350,13 +377,14 @@ class ConversionWorker:
                 'convert_item',
                 (ebook.title, input_path, output_path, ebook.source_lang,
                  ebook.target_lang, cache_only, ebook.input_format,
-                 ebook.encoding, ebook.target_direction)),
+                 ebook.encoding, ebook.target_direction, cache_id)),
             description=(_('[{} > {}] Building "{}"').format(
-                ebook.source_lang, ebook.target_lang, ebook.title)))
-        self.working_jobs[job] = (ebook, output_path)
+                ebook.source_lang, ebook.target_lang, ebook.title)
+                + (' (%s)' % label if label else '')))
+        self.working_jobs[job] = (ebook, output_path, label)
 
     def translate_done(self, job):
-        ebook, output_path = self.working_jobs.pop(job)
+        ebook, output_path, label = self.working_jobs.pop(job)
 
         if job.failed:
             if not DEBUG:
@@ -391,8 +419,20 @@ class ConversionWorker:
         else:
             dirname = os.path.dirname(output_path)
             filename = sanitize_file_name(ebook_title[:200])
-            new_output_path = os.path.join(
-                dirname, '%s.%s' % (filename, ebook.output_format))
+            # A book built from another translation, or earlier, is not
+            # replaced: this one takes the model in its name, then a
+            # number.
+            candidates = [filename]
+            if label:
+                candidates.append(sanitize_file_name(
+                    '%s (%s)' % (ebook_title[:150], label[:40])))
+            candidates += ['%s (%d)' % (candidates[-1], number)
+                           for number in range(2, 100)]
+            for name in candidates:
+                new_output_path = os.path.join(
+                    dirname, '%s.%s' % (name, ebook.output_format))
+                if not os.path.exists(new_output_path):
+                    break
             os.rename(output_path, new_output_path)
             output_path = new_output_path
 

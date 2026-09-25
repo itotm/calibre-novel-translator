@@ -1,4 +1,4 @@
-from .engine import EngineList, EngineTester
+from .engine import EngineList, EngineTester, ModelWorker
 from .footer import Footer
 from .lang import SourceLang, TargetLang
 from .format import InputFormat, OutputFormat

@@ -30,3 +30,16 @@ class AlertMessage:
         alert.setDefaultButton(QMessageBox.No)
         alert.setText(text)
         return self.actions.get(alert.exec_())
+
+    def ask_save(self, text):
+        """Save, discard or stay: 'save', 'discard' or 'cancel'. Enter
+        saves and Esc stays, so a stray key never throws work away."""
+        alert = QMessageBox(self.parent)
+        alert.setIcon(QMessageBox.Question)
+        alert.setStandardButtons(
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+        alert.setDefaultButton(QMessageBox.Save)
+        alert.setEscapeButton(QMessageBox.Cancel)
+        alert.setText(text)
+        return {QMessageBox.Save: 'save', QMessageBox.Discard: 'discard'}.get(
+            alert.exec_(), 'cancel')

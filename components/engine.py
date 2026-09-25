@@ -6,7 +6,9 @@ from qt.core import (  # type: ignore
     QPlainTextEdit, QObject, QTextCursor, QLabel, QComboBox)
 
 from ..lib.utils import log, traceback_error
+from ..lib.translation import get_translator
 from ..engines import builtin_engines
+from ..engines.genai import GenAI
 
 from .lang import SourceLang, TargetLang
 
@@ -30,6 +32,34 @@ class EngineList(QComboBox):
     def refresh(self):
         self.clear()
         self.layout()
+
+
+class ModelWorker(QObject):
+    """Fetch the model listing of an engine off the main thread. The
+    listing lands on the engine class (``models``, and ``model_details``
+    where the provider publishes them)."""
+    start = pyqtSignal(object)
+    success = pyqtSignal(bool, str)
+    finished = pyqtSignal()
+
+    def __init__(self):
+        QObject.__init__(self)
+        self.log = log
+        self.start.connect(self.get_models)
+
+    @pyqtSlot(object)
+    def get_models(self, engine_class):
+        try:
+            engine = get_translator(engine_class)
+            if not isinstance(engine, GenAI):
+                raise Exception(f'{engine.__class__} is not a GenAI instance.')
+            engine_class.models = engine.get_models()
+            self.success.emit(True, '')
+        except Exception:
+            error = traceback_error()
+            self.log.error('Failed to fetch models: %s' % error)
+            self.success.emit(False, error)
+        self.finished.emit()
 
 
 class EngineWorker(QObject):

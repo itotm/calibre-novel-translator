@@ -128,15 +128,21 @@ class TranslationCache:
         self.cache_only = False
         self.connection = sqlite3.connect(
             self.file_path, check_same_thread=False)
-        self.cursor = self.connection.cursor()
-        self.cursor.execute(
-            'CREATE TABLE IF NOT EXISTS cache('
-            'id UNIQUE, md5 UNIQUE, raw, original, ignored, '
-            'attributes DEFAULT NULL, page DEFAULT NULL,'
-            'translation DEFAULT NULL, engine_name DEFAULT NULL, '
-            'target_lang DEFAULT NULL)')
-        self.cursor.execute(
-            'CREATE TABLE IF NOT EXISTS info(key UNIQUE, value)')
+        try:
+            self.cursor = self.connection.cursor()
+            self.cursor.execute(
+                'CREATE TABLE IF NOT EXISTS cache('
+                'id UNIQUE, md5 UNIQUE, raw, original, ignored, '
+                'attributes DEFAULT NULL, page DEFAULT NULL,'
+                'translation DEFAULT NULL, engine_name DEFAULT NULL, '
+                'target_lang DEFAULT NULL)')
+            self.cursor.execute(
+                'CREATE TABLE IF NOT EXISTS info(key UNIQUE, value)')
+        except Exception:
+            # Not a database of ours (a stray *.db in the folder): the
+            # file is not kept open by a connection nobody will close.
+            self.connection.close()
+            raise
 
     @classmethod
     def move(cls, dest):
@@ -173,11 +179,14 @@ class TranslationCache:
             cache = cls(os.path.splitext(name)[0])
             title = cache.get_info('title') or '[%s]' % _('Unknown')
             engine = cache.get_info('engine_name')
+            # The model is what tells two translations of a book apart;
+            # caches written before 1.3 do not record it.
+            model = cache.get_info('model') or ''
             lang = cache.get_info('target_lang')
             size = size_by_unit(os.path.getsize(file_path), 'MB')
             time = datetime.fromtimestamp(os.path.getmtime(file_path)) \
                 .strftime('%Y-%m-%d %H:%M:%S')
-            names.append((title, engine, lang, size, time, name))
+            names.append((title, engine, model, lang, size, time, name))
             cache.close()
         return names
 
@@ -218,6 +227,11 @@ class TranslationCache:
             'SELECT value FROM info WHERE key=?', (key,))
         result = resource.fetchone()
         return result[0] if result else None
+
+    def all_info(self):
+        """Every key of the info table with its value, as a dict."""
+        resource = self.cursor.execute('SELECT key, value FROM info')
+        return {key: value for key, value in resource.fetchall()}
 
     def del_info(self, key):
         self.cursor.execute(
@@ -293,6 +307,19 @@ class TranslationCache:
     def paragraph(self, id=None):
         return Paragraph(*self.first(id=id))
 
+    def texts(self):
+        """Every paragraph not ignored, in order, with its text and its
+        translation but not its HTML: what the text views read, for a
+        whole book at once."""
+        resource = self.cursor.execute(
+            'SELECT id, md5, original, translation, engine_name, '
+            'target_lang FROM cache WHERE NOT ignored ORDER BY id')
+        return [
+            Paragraph(id, md5, None, original, translation=translation,
+                      engine_name=engine_name, target_lang=target_lang)
+            for id, md5, original, translation, engine_name, target_lang
+            in resource.fetchall()]
+
     def get_paragraphs(self, ids):
         return [Paragraph(*item) for item in self.get(ids)]
 
@@ -336,6 +363,19 @@ class TranslationCache:
         self.ignore([paragraph.id for paragraph in paragraphs])
 
 
+def cache_exists(uid):
+    """Whether a cache ``uid`` is on disk, kept or temporary."""
+    return any(os.path.exists(os.path.join(path, '%s.db' % uid)) for path in (
+        TranslationCache.cache_path, TranslationCache.temp_path))
+
+
 def get_cache(uid):
+    """The cache ``uid``, kept or temporary as the settings say. A
+    translation already kept is used where it is whatever they say now:
+    with the cache turned off, opening one used to start an empty
+    temporary copy of it, translate the book again and throw the copy
+    away."""
     config = get_config()
-    return TranslationCache(uid, config.get('cache_enabled') or False)
+    persistent = bool(config.get('cache_enabled')) or os.path.exists(
+        os.path.join(TranslationCache.cache_path, '%s.db' % uid))
+    return TranslationCache(uid, persistent)

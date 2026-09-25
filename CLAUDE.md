@@ -43,6 +43,12 @@ and remove the previous zip from the parent directory.
   cache writes stay on the worker's own thread. Do not raise the default.
 - The model's reply carries the translation keyed by its paragraph
   number, never the source text echoed back.
+- A book has any number of translations, each a cache of its own whose
+  id is unique to it (`lib/book_translations.py`): the cache records the
+  book, the engine, the model and the service tier, and those, not the
+  settings, are what a run of that translation uses. Nothing may work a
+  cache id out from the book again, except to recognise a cache written
+  before 1.3.
 - OpenRouter is the primary engine: the default, listed first, the one new
   features are designed against. Other OpenAI-compatible providers are
   presets of the OpenAI-compatible engine, not engine classes.

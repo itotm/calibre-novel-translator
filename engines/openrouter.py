@@ -159,6 +159,23 @@ class OpenRouterTranslate(ChatgptTranslate):
     provider_data_collection = 'allow'
     provider_zdr = False
 
+    # -- service tier ----------------------------------------------------
+    # 'default' omits the field and the request is served at the
+    # standard price. 'flex' is a discounted tier that trades latency and
+    # availability for price, and never falls back to the standard tier:
+    # with no flex capacity the request fails. 'priority' costs more for
+    # faster, steadier service, and does fall back, billed at the tier
+    # that served it. Only some providers offer them (OpenAI, Google,
+    # Anthropic for priority); the reply says which tier served it. Left at the default because a tier is a choice about
+    # money and time that only the user can make, and it is the one
+    # setting worth changing per translation, not per engine.
+    # https://openrouter.ai/docs/guides/features/service-tiers
+    service_tiers = ['default', 'flex', 'priority']
+    service_tier = 'default'
+    # A flex request may wait in the provider's queue before its first
+    # token: OpenAI asks for a timeout of fifteen minutes on that tier.
+    flex_request_timeout = 900.0
+
     # -- usage accounting ------------------------------------------------
     # Ask OpenRouter to say, with every reply, what it cost: the tokens
     # as the provider counted them and the money. It is one more event
@@ -183,14 +200,33 @@ class OpenRouterTranslate(ChatgptTranslate):
         'provider_only', 'provider_order', 'provider_ignore',
         'provider_quantizations', 'provider_sort',
         'provider_allow_fallbacks', 'provider_require_parameters',
-        'provider_data_collection', 'provider_zdr', 'usage_accounting',
-        'app_referer', 'app_title', 'extra_headers', 'extra_body')
+        'provider_data_collection', 'provider_zdr', 'service_tier',
+        'usage_accounting', 'app_referer', 'app_title', 'extra_headers',
+        'extra_body')
 
     def __init__(self):
         super().__init__()
         self.endpoint = type(self).endpoint
         for key in self.preference_keys:
             setattr(self, key, self.config.get(key, getattr(self, key)))
+        # The timeout the settings ask for, which flex raises and any
+        # other tier gives back.
+        self.base_request_timeout = self.request_timeout
+        self.set_service_tier(self.service_tier)
+
+    def set_service_tier(self, tier):
+        """Ask for ``tier`` ('default', 'flex' or 'priority').
+
+        A translation can name its own tier, set after the engine is
+        built; this is where the timeout follows it, so a flex request
+        waiting in the queue is not given up on as a dead connection.
+        """
+        tier = tier if tier in self.service_tiers else 'default'
+        self.service_tier = tier
+        base = float(getattr(self, 'base_request_timeout', None)
+                     or self.request_timeout or 0)
+        self.request_timeout = max(base, self.flex_request_timeout) \
+            if tier == 'flex' else base
 
     def get_models(self):
         """https://openrouter.ai/docs/api-reference/list-available-models
@@ -406,6 +442,8 @@ class OpenRouterTranslate(ChatgptTranslate):
         provider = self.get_provider_routing()
         if provider:
             body['provider'] = provider
+        if self.service_tier and self.service_tier != 'default':
+            body['service_tier'] = self.service_tier
         if self.usage_accounting:
             body.setdefault('usage', {'include': True})
         # Filtered before the escape hatch, which is how a field the

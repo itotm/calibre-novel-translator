@@ -114,6 +114,11 @@ class ChatgptTranslate(GenAI):
 
     providers: dict = OPENAI_PROVIDERS
     provider = 'openai'
+    # The preferences each provider keeps for itself: the others' sit
+    # under ``providers`` in the engine preferences, keyed by provider.
+    per_provider_keys = (
+        'api_keys', 'endpoint', 'model', 'model_max_output_tokens',
+        'model_supported_parameters')
 
     concurrency_limit = 1
     # One request at a time, so there is nothing to space out; a
@@ -343,15 +348,22 @@ class ChatgptTranslate(GenAI):
     #: (OpenRouter with usage accounting on), the money. None until a
     #: reply says.
     last_usage = None
+    #: The service tier that served the reply ('default', 'flex',
+    #: 'priority'), where the server says: it is the tier billed, which
+    #: is not always the one asked for. None until a reply says.
+    last_service_tier = None
 
     def _note_reply(self, data, choice=None):
-        """Record the finish reason, the provider, the id and the usage
-        a reply carries."""
+        """Record the finish reason, the provider, the id, the usage and
+        the service tier a reply carries."""
         if not isinstance(data, dict):
             return
         provider = data.get('provider')
         if provider:
             self.last_provider = provider
+        tier = data.get('service_tier')
+        if tier:
+            self.last_service_tier = str(tier)
         generation = data.get('id')
         if generation:
             self.last_generation_id = str(generation)
@@ -375,6 +387,7 @@ class ChatgptTranslate(GenAI):
         self.last_provider = None
         self.last_generation_id = None
         self.last_usage = None
+        self.last_service_tier = None
         # Parse JSON response with robust schema handling
         try:
             data = json.loads(response)
@@ -427,6 +440,7 @@ class ChatgptTranslate(GenAI):
         self.last_provider = None
         self.last_generation_id = None
         self.last_usage = None
+        self.last_service_tier = None
         while True:
             try:
                 raw = response.readline()

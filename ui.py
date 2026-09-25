@@ -8,7 +8,6 @@ from calibre.utils.config_base import plugin_dir  # type: ignore
 from calibre.ebooks.conversion.config import (  # type: ignore
     get_input_format_for_book)
 from . import NovelTranslatorPlugin
-from .lib.utils import uid
 from .lib.ebook import Ebooks
 from .lib.config import get_config
 from .lib.conversion import ConversionWorker
@@ -16,7 +15,11 @@ from .setting import TranslationSetting
 from .cache import CacheManager
 from .about import AboutDialog
 from .components import AlertMessage
-from .novel import CreateNovelProject, NovelTranslation
+from .lib.utils import uid
+from .lib.cache import TranslationCache
+from .lib.book_translations import BookTranslation, matching_format
+from .novel import BookTranslations, NovelTranslation, apply_translation
+from .text_view import CompareTranslations
 
 
 load_translations()  # type: ignore
@@ -91,12 +94,15 @@ class NovelTranslatorGui(InterfaceAction):
         if not getattr(self.gui, 'novel_translator', False):
             self.gui.novel_translator = self.Status()
 
-    def novel_translation_window(self, ebook):
-        name = 'novel_' + uid(ebook.get_input_path())
+    def novel_translation_window(self, ebook, cache_id):
+        # One window per translation: two translations of the same book
+        # can be open side by side, to compare them.
+        name = 'novel_' + cache_id
         if self.show_window(name):
             return
         worker = ConversionWorker(self.gui, self.icon)
-        window = NovelTranslation(self, self.gui, worker, ebook)
+        window = NovelTranslation(
+            self, self.gui, worker, ebook, cache_id, self.library_id())
         window.setMinimumWidth(1000)
         window.setMinimumHeight(640)
         window.setWindowTitle(self.title)
@@ -113,11 +119,54 @@ class NovelTranslatorGui(InterfaceAction):
             return self.alert.pop(
                 _('One book at a time: please select a single book.'),
                 'warning')
-        window = CreateNovelProject(self.gui, ebooks.first())
-        window.start_translation.connect(self.novel_translation_window)
+        window = BookTranslations(
+            self.gui, ebooks.first(), self.library_id(),
+            is_open=self.cache_in_use)
+        window.open_translation.connect(self.novel_translation_window)
+        window.compare_translations.connect(self.compare_window)
         window.setModal(True)
+        window.setMinimumWidth(760)
+        window.setMinimumHeight(520)
         window.setWindowTitle(self.title)
         window.show()
+
+    def compare_window(self, cache_ids):
+        """Open the comparison of the translations ``cache_ids``."""
+        name = 'compare_' + uid(*sorted(cache_ids))
+        if self.show_window(name):
+            return
+        window = CompareTranslations(
+            self.gui, cache_ids, busy=self.translation_running)
+        window.setMinimumWidth(1000)
+        window.setMinimumHeight(640)
+        window.setWindowTitle('%s - %s' % (_('Compare'), self.title))
+        window.setWindowIcon(self.icon)
+        window.show()
+        self.add_window(name, window)
+
+    def translation_running(self, cache_id):
+        """Whether a run is writing the translation ``cache_id`` now."""
+        window = self.get_window('novel_' + cache_id)
+        return bool(window is not None and getattr(
+            window, 'translating', False))
+
+    def cache_in_use(self, cache_id):
+        """Whether a window shows the translation ``cache_id``: its own,
+        or a comparison. It is not deleted from under it."""
+        for name, window in self.gui.novel_translator.windows.items():
+            if name == 'novel_' + cache_id or (
+                    name.startswith('compare_')
+                    and cache_id in getattr(window, 'cache_ids', ())):
+                return True
+        return False
+
+    def library_id(self):
+        """The id of the library open in calibre: book ids are only
+        unique within one."""
+        try:
+            return self.gui.current_db.new_api.library_id
+        except Exception:
+            return None
 
     def show_setting(self):
         if self.has_running_jobs():
@@ -208,25 +257,79 @@ class NovelTranslatorGui(InterfaceAction):
 
     def get_selected_ebooks(self):
         ebooks = Ebooks()
-        db = self.gui.current_db
-        api = db.new_api
         rows = self.gui.library_view.selectionModel().selectedRows()
         model = self.gui.library_view.model()
         for row in rows:
-            row_id = row.row()
-            book_id = model.id(row)
-            book_metadata = api.get_proxy_metadata(book_id)
-            fmt, fmts = get_input_format_for_book(db, book_id, 'epub')
-            ebooks.add(
-                book_id,  # Book ID in db
-                model.title(row_id),  # Title
-                # Format and path
-                dict(zip(
-                    map(lambda fmt: fmt.lower(), fmts),
-                    map(lambda fmt: api.format_abspath(book_id, fmt), fmts),
-                )),
-                fmt.lower(),  # Input format
-                book_metadata.language,  # Source language
-                list(book_metadata.authors or []),  # Authors
-            )
+            self.add_ebook(ebooks, model.id(row))
         return ebooks
+
+    def add_ebook(self, ebooks, book_id):
+        db = self.gui.current_db
+        api = db.new_api
+        book_metadata = api.get_proxy_metadata(book_id)
+        fmt, fmts = get_input_format_for_book(db, book_id, 'epub')
+        ebooks.add(
+            book_id,  # Book ID in db
+            api.field_for('title', book_id),  # Title
+            # Format and path
+            dict(zip(
+                map(lambda fmt: fmt.lower(), fmts),
+                map(lambda fmt: api.format_abspath(book_id, fmt), fmts),
+            )),
+            fmt.lower(),  # Input format
+            book_metadata.language,  # Source language
+            list(book_metadata.authors or []),  # Authors
+        )
+
+    def find_cached_translation(self, cache_id):
+        """The book of the translation in cache ``cache_id``, set up to
+        open it, for the cache manager. Returns ``(ebook, None)``, or
+        ``(None, why not)``.
+
+        The book is found by its id in this library, as the cache records
+        it; a cache written before 1.3 records only the title, and is
+        the book's of that title whose file it was made from.
+        """
+        cache = TranslationCache(cache_id)
+        try:
+            info = cache.all_info()
+        finally:
+            cache.close()
+        api = self.gui.current_db.new_api
+        library_id = self.library_id()
+        book_id = info.get('book_id')
+        recorded_library = info.get('library_id')
+        if book_id and recorded_library and library_id \
+                and recorded_library != str(library_id):
+            return None, _(
+                'This translation is of a book in another calibre library: '
+                'switch to that library to open it.')
+        if book_id:
+            candidates = [int(book_id)]
+        else:
+            title = info.get('title')
+            if not title:
+                return None, _(
+                    'This cache does not say which book it translates.')
+            titles = api.all_field_for('title', api.all_book_ids())
+            candidates = [
+                candidate for candidate, value in titles.items()
+                if value == title]
+        for candidate in candidates:
+            if not api.has_id(candidate):
+                continue
+            ebooks = Ebooks()
+            try:
+                self.add_ebook(ebooks, candidate)
+            except Exception:
+                continue
+            ebook = ebooks.first()
+            fmt = matching_format(info, cache_id, ebook, library_id)
+            if fmt is None:
+                continue
+            error = apply_translation(
+                ebook, BookTranslation(cache_id, info, fmt))
+            return (None, error) if error else (ebook, None)
+        return None, _(
+            'The book this translation was made from is no longer in the '
+            'library.')

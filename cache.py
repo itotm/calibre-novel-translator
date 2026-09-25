@@ -10,6 +10,7 @@ from calibre.utils.localization import _  # type: ignore
 
 from .lib.utils import open_path
 from .lib.cache import default_cache_path, TranslationCache
+from .lib.book_translations import comparison_problem
 from .lib.config import get_config
 from .components import Footer, AlertMessage
 
@@ -40,6 +41,9 @@ class CacheManager(QDialog):
 
         self.cache_list.selected_rows.connect(
             lambda rows: self.delete_button.setDisabled(len(rows) < 1))
+        self.cache_list.selected_rows.connect(
+            lambda rows: self.open_button.setDisabled(len(rows) != 1))
+        self.cache_list.selected_rows.connect(self.update_compare)
 
         def clear_button_status():
             self.clear_button.setDisabled(
@@ -58,6 +62,10 @@ class CacheManager(QDialog):
         self.cache_reveal.clicked.connect(self.reveal)
         self.clear_button.clicked.connect(self.clear)
         self.delete_button.clicked.connect(self.cache_list.delete_cache)
+        self.open_button.clicked.connect(self.open_cache)
+        self.compare_button.clicked.connect(self.compare_caches)
+        self.cache_list.doubleClicked.connect(
+            lambda index: self.open_cache())
 
         self.cache_count.emit()
 
@@ -91,10 +99,19 @@ class CacheManager(QDialog):
         self.clear_button.setDisabled(True)
         self.delete_button = QPushButton(_('Delete'))
         self.delete_button.setDisabled(True)
+        self.open_button = QPushButton(_('&Open'))
+        self.open_button.setToolTip(_(
+            'Open the translation, as from its book: to continue it, read '
+            'and correct its text, or build the book from it.'))
+        self.open_button.setDisabled(True)
+        self.compare_button = QPushButton(_('&Compare'))
+        self.compare_button.setDisabled(True)
 
         layout.addWidget(self.clear_button)
         layout.addStretch(1)
         layout.addWidget(self.delete_button)
+        layout.addWidget(self.compare_button)
+        layout.addWidget(self.open_button)
 
         return widget
 
@@ -138,6 +155,11 @@ class CacheManager(QDialog):
         self.config.save(cache_path=path)
 
     def clear(self):
+        if self.in_use(os.listdir(TranslationCache.cache_path)):
+            self.alert.pop(_(
+                'A comparison window shows some of these translations: '
+                'close it first.'), 'warning')
+            return
         action = self.alert.ask(
             _('Are you sure you want to clear all caches?'))
         if action != 'yes':
@@ -151,6 +173,57 @@ class CacheManager(QDialog):
         if not os.path.exists(cache_path):
             return self.alert.pop(_('No cache exists.'), 'warning')
         open_path(cache_path)
+
+    def open_cache(self):
+        """Open the window of the translation selected, and close this
+        one: a translation window is not opened under a modal dialog."""
+        rows = self.cache_list.selectionModel().selectedRows()
+        if len(rows) != 1:
+            return
+        cache_id = os.path.splitext(rows[0].data(Qt.UserRole))[0]
+        ebook, error = self.plugin.find_cached_translation(cache_id)
+        if error:
+            self.alert.pop(error, 'warning')
+            return
+        self.done(0)
+        self.plugin.novel_translation_window(ebook, cache_id)
+
+    def selected_ids(self):
+        rows = sorted(self.cache_list.selectionModel().selectedRows(),
+                      key=lambda row: row.row())
+        return [os.path.splitext(row.data(Qt.UserRole))[0] for row in rows]
+
+    def update_compare(self, rows=None):
+        """Compare is for two or more translations of one book, made
+        from the same file of it; the tooltip says why not otherwise."""
+        infos = []
+        for cache_id in self.selected_ids():
+            cache = TranslationCache(cache_id)
+            try:
+                infos.append(cache.all_info())
+            finally:
+                cache.close()
+        problem = comparison_problem(infos)
+        self.compare_button.setEnabled(problem is None)
+        self.compare_button.setToolTip(problem or _(
+            'Show the translations selected side by side with the '
+            'original, to read, correct and copy paragraphs between '
+            'them.'))
+
+    def compare_caches(self):
+        self.update_compare()
+        if not self.compare_button.isEnabled():
+            return
+        cache_ids = self.selected_ids()
+        self.done(0)
+        self.plugin.compare_window(cache_ids)
+
+    def in_use(self, filenames):
+        """Whether a window shows one of these caches: a comparison can
+        be open while this dialog is."""
+        in_use = getattr(self.plugin, 'cache_in_use', None)
+        return callable(in_use) and any(
+            in_use(os.path.splitext(name)[0]) for name in filenames)
 
     def recount(self):
         return self.cache_size.setText(
@@ -171,6 +244,11 @@ class CacheTableView(QTableView):
         self.verticalHeader().setVisible(False)
         self.horizontalHeader().setStretchLastSection(True)
         self.horizontalHeader().sortIndicatorChanged.connect(self.sortByColumn)
+        # Sorting moves the caches under the selection, which stays on
+        # the same row numbers: what was selected is no longer what the
+        # buttons would act on.
+        self.horizontalHeader().sortIndicatorChanged.connect(
+            lambda *args: self.clearSelection())
 
     def selectionChanged(self, selected, deselected):
         QTableView.selectionChanged(self, selected, deselected)
@@ -178,12 +256,22 @@ class CacheTableView(QTableView):
 
     def contextMenuEvent(self, event):
         menu = QMenu()
+        if self.parent is not None \
+                and len(self.selectionModel().selectedRows()) == 1:
+            menu.addAction(_('Open'), self.parent.open_cache)
         menu.addAction(_('Delete'), self.delete_cache)
         menu.setMinimumSize(menu.sizeHint())
         menu.setMaximumSize(menu.sizeHint())
         menu.exec_(QCursor.pos())
 
     def delete_cache(self):
+        if self.parent is not None and self.parent.in_use(
+                row.data(Qt.UserRole)
+                for row in self.selectionModel().selectedRows()):
+            self.alert.pop(_(
+                'A comparison window shows a translation selected: close '
+                'it first.'), 'warning')
+            return
         action = self.alert.ask(
             _('Are you sure you want to delete the selected cache(s)?'))
         if action != 'yes':
@@ -207,7 +295,7 @@ def update_cache(func):
 
 class CacheTableModel(QAbstractTableModel):
     headers = [
-        _('Title'), _('Engine'), _('Language'),
+        _('Title'), _('Engine'), _('Model'), _('Language'),
         _('Size (MB)'), _('Last Modification Time'), _('Filename'),
     ]
 

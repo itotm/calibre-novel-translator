@@ -8,6 +8,7 @@ dynamic glossary, the author brief and the log.
 """
 import time
 import traceback
+from html import escape
 from types import MethodType
 
 from qt.core import (  # type: ignore
@@ -17,9 +18,9 @@ from qt.core import (  # type: ignore
     QProgressBar, pyqtSignal, pyqtSlot, QPixmap, QListWidget,
     QListWidgetItem, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QSpacerItem, QStackedWidget, QComboBox, QMessageBox,
-    QSizePolicy, QColor, QBrush, QAbstractItemView)
+    QSizePolicy, QColor, QBrush, QAbstractItemView, QCompleter)
 from calibre.constants import __version__  # type: ignore
-from calibre.gui2 import I  # type: ignore
+from calibre.gui2 import I, error_dialog  # type: ignore
 from calibre.utils.localization import _  # type: ignore
 from calibre.ebooks.conversion.plumber import (  # type: ignore
     Plumber, CompositeProgressReporter)
@@ -36,12 +37,20 @@ from .lib.translation import get_engine_class, get_translator
 from .lib.exception import TranslationCanceled, TranslationFailed
 from .lib.novel import (
     Chapter, ChapterBuilder, ContextManager, NovelTranslator,
-    novel_cache_id, INFO_NOVEL_CHAPTERS, INFO_NOVEL_LOG, INFO_NOVEL_STYLE,
+    INFO_NOVEL_CHAPTERS, INFO_NOVEL_LOG, INFO_NOVEL_STYLE,
     INFO_NOVEL_STYLE_NOTE, INFO_NOVEL_REPORT)
 from .lib.conversion import get_novel_config
+from .lib.book_translations import (
+    INFO_MODEL, INFO_PROVIDER, INFO_SERVICE_TIER, configure_translator,
+    edited_texts, engine_class_for, engine_provider,
+    create_translation, delete_translation, edited_paragraphs,
+    find_translations, forget_edits, model_limits, comparison_problem,
+    stamp_book)
 from .engines.genai import GenAI
 from .components import (
-    Footer, AlertMessage, SourceLang, TargetLang, InputFormat, OutputFormat)
+    Footer, AlertMessage, SourceLang, TargetLang, InputFormat, OutputFormat,
+    ModelWorker)
+from .text_view import EnterFilter, TranslationText
 
 
 load_translations()  # type: ignore
@@ -65,10 +74,17 @@ class NovelPreparationWorker(QObject):
     finished = pyqtSignal(str, object)   # cache_id, list[dict chapters meta]
     failed = pyqtSignal(str)
 
-    def __init__(self, engine_class, ebook):
+    def __init__(self, engine_class, ebook, cache_id, library_id=None):
+        """
+        :cache_id: the translation to prepare, created by the dialog
+            that lists the translations of the book (see
+            ``lib.book_translations``).
+        """
         QObject.__init__(self)
         self.engine_class = engine_class
         self.ebook = ebook
+        self.cache_id = cache_id
+        self.library_id = library_id
         self.canceled = False
         self.start.connect(self.run)
 
@@ -85,21 +101,19 @@ class NovelPreparationWorker(QObject):
 
     def _do_run(self):
         input_path = self.ebook.get_input_path()
-        translator_name = self.engine_class.name
-        encoding = ''
-        if self.ebook.encoding.lower() != 'utf-8':
-            encoding = self.ebook.encoding.lower()
-        cache_id = novel_cache_id(
-            input_path, translator_name, self.ebook.target_lang, encoding)
+        cache_id = self.cache_id
 
         cache = get_cache(cache_id)
-        cache.set_info('title', self.ebook.title)
-        # The author is asked about once per book. Written here so a
-        # translation started from the background job -- which only
-        # receives the title -- can still find it.
-        cache.set_info('author', self.ebook.get_author())
-        cache.set_info('engine_name', translator_name)
-        cache.set_info('target_lang', self.ebook.target_lang)
+        # Again on every opening: calibre moves the files of a book whose
+        # title or author changed, and a cache written before 1.3 learns
+        # here which book it belongs to.
+        stamp_book(cache, self.ebook, self.library_id)
+        if not cache.get_info('engine_name'):
+            cache.set_info('engine_name', self.engine_class.name)
+        if not cache.get_info('target_lang'):
+            cache.set_info('target_lang', self.ebook.target_lang)
+        if not cache.get_info('source_lang'):
+            cache.set_info('source_lang', self.ebook.source_lang or '')
         cache.set_info('plugin_version', NovelTranslatorPlugin.__version__)
         cache.set_info('calibre_version', __version__)
 
@@ -332,6 +346,26 @@ class NovelTranslationWorker(QObject):
         translator = get_translator(self.engine_class)
         translator.set_source_lang(self.ebook.source_lang)
         translator.set_target_lang(self.ebook.target_lang)
+        # The model and the tier are the translation's, not the
+        # settings': a book can be translated by several models.
+        info = cache.all_info()
+        configure_translator(translator, info)
+        model = getattr(translator, 'model', None)
+        # Written before 1.3, which did not record them: from now on the
+        # list of translations can say what this one runs on, and it
+        # keeps running on it whatever the settings say.
+        if model and not info.get(INFO_MODEL):
+            cache.set_info(INFO_MODEL, model)
+        tier = getattr(translator, 'service_tier', None)
+        if tier and not info.get(INFO_SERVICE_TIER):
+            cache.set_info(INFO_SERVICE_TIER, tier)
+        provider = engine_provider(self.engine_class)
+        if provider and not info.get(INFO_PROVIDER):
+            cache.set_info(INFO_PROVIDER, provider)
+        # The corrections a new translation of every paragraph replaces
+        # are forgotten when it is over, and only those it did replace:
+        # a run that stops half way leaves the others marked.
+        corrected = edited_texts(cache) if self.retranslate else None
         self.translator = translator
 
         # Rebuild the chapters the preparation worker had already built.
@@ -348,6 +382,17 @@ class NovelTranslationWorker(QObject):
                 'Chapter metadata was written by an older version: '
                 'reading the ebook again to rebuild the chapters.'), False)
             rebuilt = self._chapters_from_ebook(cache)
+            # Written down the way preparation writes it now, so the
+            # next start does not convert the book again and the Text
+            # tab can tell the chapters apart.
+            cache.set_info(INFO_NOVEL_CHAPTERS, _json.dumps([{
+                'index': ch.index,
+                'title': ch.title,
+                'char_count': ch.char_count,
+                'paragraphs': len(ch.paragraphs),
+                'page_ids': list(ch.page_ids),
+                'paragraph_ids': [p.id for p in ch.paragraphs],
+            } for ch in rebuilt[0]]))
         chapters, aux_paragraphs = rebuilt
 
         ctx = ContextManager(
@@ -391,6 +436,10 @@ class NovelTranslationWorker(QObject):
         def chapter_done(chapter, summary, delta):
             self.chapter_done.emit(chapter.index, summary, delta or [])
             store_log()
+        logging(_('Engine: {engine}, model: {model}{tier}.').format(
+            engine=translator.name, model=model or _('(none)'),
+            tier=_(', service tier: {}').format(tier)
+            if tier and tier != 'default' else ''))
         translator_novel.set_logging(logging)
         translator_novel.set_progress(
             lambda frac, msg: self.progress.emit(frac, msg))
@@ -404,68 +453,356 @@ class NovelTranslationWorker(QObject):
             translator_novel.run()
         finally:
             store_log()
+            if corrected:
+                forget_edits(cache, corrected)
             cache.close()
 
 
 # ---------------------------------------------------------------------------
-# CreateNovelProject: the setup dialog before the window opens
+# BookTranslations: the translations of a book, and a new one
 # ---------------------------------------------------------------------------
 
 
-class CreateNovelProject(QDialog):
-    start_translation = pyqtSignal(object)
+def apply_translation(ebook, translation, source_lang=None):
+    """Set ``ebook`` up as ``translation`` was made: the input format,
+    the languages, the encoding. Returns a message saying why it cannot
+    be opened, or None.
 
-    def __init__(self, parent, ebook):
+    :source_lang: for a translation written before 1.3, which did not
+        record it; the engine's setting, or auto-detection, otherwise.
+    """
+    fmt = translation.input_format
+    if fmt not in ebook.files:
+        return _(
+            'This translation was made from the {} file of the book, '
+            'which is no longer in the library.').format(
+                (fmt or '?').upper())
+    engine_class = get_engine_class(translation.engine_name)
+    ebook.set_input_format(fmt)
+    ebook.set_source_lang(
+        translation.source_lang or source_lang
+        or engine_class.config.get('source_lang') or _('Auto detect'))
+    if translation.encoding:
+        ebook.set_encoding(translation.encoding)
+    ebook.set_target_lang(translation.target_lang)
+    try:
+        ebook.set_lang_code(
+            engine_class.get_iso639_target_code(translation.target_lang))
+    except Exception:
+        ebook.set_lang_code(None)
+    return None
+
+
+class BookTranslations(QDialog):
+    """The translations of one book: open one to continue it, read it or
+    correct it; delete one; or start another, with a model of its own.
+
+    A book can be translated several times -- by another model, into
+    another language, at another service tier -- and each translation
+    is a cache of its own. Everything else about a new translation is
+    what the settings say: the model is the one thing worth choosing
+    per translation, and the tier goes with it.
+    """
+
+    open_translation = pyqtSignal(object, str)   # ebook, cache id
+    compare_translations = pyqtSignal(list)      # cache ids
+
+    COLUMNS = ('model', 'tier', 'engine', 'language', 'progress', 'edited',
+               'modified')
+
+    def __init__(self, parent, ebook, library_id=None, is_open=None):
+        """
+        :is_open: callable(cache_id) -> bool, whether a window runs that
+            translation now: it cannot be deleted while it does.
+        """
         QDialog.__init__(self, parent)
         self.ebook = ebook
+        self.library_id = library_id
+        self.is_open = is_open or (lambda cache_id: False)
         self.alert = AlertMessage(self)
+        self.engine_class = get_engine_class()
+        self.configured_model = self._configured_model()
+        self.translations = []
+
+        self.model_thread = QThread()
+        self.model_worker = ModelWorker()
+        self.model_worker.moveToThread(self.model_thread)
+        self.model_thread.finished.connect(self.model_worker.deleteLater)
+        self.model_thread.start()
+        self.model_worker.finished.connect(self._fill_models)
+        self.model_worker.success.connect(self._models_fetched)
 
         layout = QVBoxLayout(self)
-        self.choose_format = self.layout_format()
-        self.start_button = QPushButton(_('&Start'))
-        self.start_button.clicked.connect(self.show_novel)
+        layout.addWidget(self._layout_list(), 1)
+        layout.addWidget(self._layout_new())
+        self.refresh()
+        self._fill_models()
+        if not self.engine_class.models and self._has_api_key():
+            self._fetch_models()
 
-        layout.addWidget(self.choose_format)
-        layout.addWidget(self.start_button)
+    def _configured_model(self):
+        try:
+            return getattr(get_translator(self.engine_class), 'model', '') \
+                or ''
+        except Exception:
+            return self.engine_class.config.get('model') \
+                or getattr(self.engine_class, 'model', '') or ''
 
-    def layout_format(self):
-        engine_class = get_engine_class()
-        widget = QWidget()
-        layout = QGridLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
+    def _has_api_key(self):
+        needs = getattr(self.engine_class, 'needs_api_key', None)
+        needs_key = needs() if callable(needs) \
+            else getattr(self.engine_class, 'need_api_key', True)
+        return bool(self.engine_class.config.get('api_keys')) \
+            or not needs_key
 
-        input_group = QGroupBox(_('Input Format'))
-        input_layout = QGridLayout(input_group)
+    # -- the list ----------------------------------------------------------
+
+    def _layout_list(self):
+        group = QGroupBox(_('Translations of this book'))
+        layout = QVBoxLayout(group)
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels([
+            _('Model'), _('Service tier'), _('Engine'), _('Language'),
+            _('Chapters'), _('Corrected'), _('Last change')])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        # Several rows at once: two or more are compared.
+        self.table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.doubleClicked.connect(lambda index: self._open_selected())
+        self.table.itemSelectionChanged.connect(self._selection_changed)
+        layout.addWidget(self.table, 1)
+
+        self.empty_label = QLabel(_(
+            'This book has not been translated yet: start the first '
+            'translation below.'))
+        self.empty_label.setWordWrap(True)
+        layout.addWidget(self.empty_label)
+
+        buttons = QHBoxLayout()
+        self.delete_button = QPushButton(_('Delete'))
+        self.delete_button.setToolTip(_(
+            'Delete this translation from the cache: its text, summaries, '
+            'glossary, log and report. Books already built are not '
+            'touched.'))
+        self.delete_button.clicked.connect(self._delete_selected)
+        self.open_button = QPushButton(_('&Open'))
+        self.open_button.setToolTip(_(
+            'Open the translation to continue it, read and correct its '
+            'text, or build the book from it.'))
+        self.open_button.clicked.connect(self._open_selected)
+        self.compare_button = QPushButton(_('&Compare'))
+        self.compare_button.clicked.connect(self._compare_selected)
+        buttons.addWidget(self.delete_button)
+        buttons.addStretch(1)
+        buttons.addWidget(self.compare_button)
+        buttons.addWidget(self.open_button)
+        layout.addLayout(buttons)
+        return group
+
+    def refresh(self):
+        self.translations = find_translations(self.ebook, self.library_id)
+        self.table.setRowCount(len(self.translations))
+        for row, translation in enumerate(self.translations):
+            values = (
+                translation.model_label(), translation.tier_label(),
+                translation.engine_label(), translation.target_lang,
+                translation.progress_label(),
+                str(translation.edited) if translation.edited else '',
+                translation.modified)
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                    item.setToolTip(_(
+                        'Created {created} from the {fmt} file.').format(
+                            created=translation.created or '?',
+                            fmt=(translation.input_format or '?').upper()))
+                self.table.setItem(row, column, item)
+        self.table.setVisible(bool(self.translations))
+        self.empty_label.setVisible(not self.translations)
+        if self.translations:
+            self.table.selectRow(0)
+        self._selection_changed()
+
+    def _selected_all(self):
+        rows = self.table.selectionModel().selectedRows() \
+            if self.table.selectionModel() else []
+        return [self.translations[row.row()] for row in sorted(
+            rows, key=lambda row: row.row())
+            if 0 <= row.row() < len(self.translations)]
+
+    def _selected(self):
+        """The translation selected, when it is only one."""
+        selected = self._selected_all()
+        return selected[0] if len(selected) == 1 else None
+
+    def _selection_changed(self):
+        selected = self._selected() is not None
+        self.open_button.setEnabled(selected)
+        self.delete_button.setEnabled(selected)
+        self.open_button.setDefault(selected)
+        several = self._selected_all()
+        problem = comparison_problem(self._compare_infos(several))
+        self.compare_button.setEnabled(problem is None)
+        self.compare_button.setToolTip(problem or _(
+            'Show the translations selected side by side with the '
+            'original, to read, correct and copy paragraphs between '
+            'them.'))
+
+    @staticmethod
+    def _compare_infos(translations):
+        """The info tables, with the file each translation was made from
+        filled in: one written before 1.3 does not record it, and here,
+        with the book at hand, it is known."""
+        return [dict(item.info, input_format=item.input_format)
+                for item in translations]
+
+    def _compare_selected(self):
+        several = self._selected_all()
+        if comparison_problem(self._compare_infos(several)):
+            return
+        self.done(0)
+        self.compare_translations.emit([item.cache_id for item in several])
+
+    def _open_selected(self):
+        translation = self._selected()
+        if translation is None:
+            return
+        error = apply_translation(
+            self.ebook, translation, self.source_lang.currentText())
+        if error:
+            self.alert.pop(error, 'warning')
+            return
+        self.done(0)
+        self.open_translation.emit(self.ebook, translation.cache_id)
+
+    def _delete_selected(self):
+        translation = self._selected()
+        if translation is None:
+            return
+        if self.is_open(translation.cache_id):
+            self.alert.pop(_(
+                'This translation is open in a window: close it first.'),
+                'warning')
+            return
+        action = self.alert.ask(_(
+            'Delete the translation by {model} into {lang}? Its text, '
+            'summaries, glossary, log and report are removed from the '
+            'cache.').format(
+                model=translation.model_label(),
+                lang=translation.target_lang))
+        if action != 'yes':
+            return
+        delete_translation(translation.cache_id)
+        self.refresh()
+
+    # -- a new translation -------------------------------------------------
+
+    def _layout_new(self):
+        group = QGroupBox(_('New translation'))
+        layout = QGridLayout(group)
+        engine_class = self.engine_class
+
         input_format = InputFormat(self.ebook.files.keys())
-        input_layout.addWidget(input_format)
-        layout.addWidget(input_group, 1, 0, 1, 3)
-
-        output_group = QGroupBox(_('Output Format'))
-        output_layout = QGridLayout(output_group)
         output_format = OutputFormat()
-        output_layout.addWidget(output_format)
-        layout.addWidget(output_group, 1, 3, 1, 3)
-
-        source_group = QGroupBox(_('Source Language'))
-        source_layout = QVBoxLayout(source_group)
         source_lang = SourceLang()
-        source_lang.setFixedWidth(150)
-        source_layout.addWidget(source_lang)
-        layout.addWidget(source_group, 2, 0, 1, 2)
-
-        target_group = QGroupBox(_('Target Language'))
-        target_layout = QVBoxLayout(target_group)
         target_lang = TargetLang()
-        target_lang.setFixedWidth(150)
-        target_layout.addWidget(target_lang)
-        layout.addWidget(target_group, 2, 2, 1, 2)
-
+        self.source_lang = source_lang
         source_lang.refresh.emit(
             engine_class.lang_codes.get('source'),
             engine_class.config.get('source_lang'), True)
         target_lang.refresh.emit(
             engine_class.lang_codes.get('target'),
             engine_class.config.get('target_lang'))
+
+        layout.addWidget(QLabel(_('Input Format')), 0, 0)
+        layout.addWidget(input_format, 0, 1)
+        layout.addWidget(QLabel(_('Output Format')), 0, 2)
+        layout.addWidget(output_format, 0, 3)
+        layout.addWidget(QLabel(_('Source Language')), 1, 0)
+        layout.addWidget(source_lang, 1, 1)
+        layout.addWidget(QLabel(_('Target Language')), 1, 2)
+        layout.addWidget(target_lang, 1, 3)
+
+        # The model: the listing the settings fetched, searchable, and
+        # open to a model it does not carry.
+        self.model_box = QComboBox()
+        self.model_box.setEditable(True)
+        self.model_box.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.model_box.setMinimumWidth(320)
+        self.model_box.wheelEvent = lambda event: None
+        # Enter in the field does not press Open, the default button:
+        # the dialog would open the translation selected above.
+        self.model_box.lineEdit().installEventFilter(
+            EnterFilter(None, self))
+        completer = QCompleter(self.model_box.model(), self.model_box)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.model_box.setCompleter(completer)
+        self.model_box.setToolTip(_(
+            'The model that translates this book, summaries, glossary and '
+            'author brief included. Everything else comes from the '
+            'settings of the engine, as they stand when the translation '
+            'runs. The model chosen there is preselected; type to search '
+            'the listing, or type a model it does not carry.'))
+        self.model_box.currentTextChanged.connect(self._show_limits)
+        self.model_fetch = QPushButton(_('Fetch models'))
+        self.model_fetch.clicked.connect(self._fetch_models)
+        model_row = QHBoxLayout()
+        model_row.addWidget(self.model_box, 1)
+        model_row.addWidget(self.model_fetch)
+        layout.addWidget(QLabel(_('Model')), 2, 0)
+        layout.addLayout(model_row, 2, 1, 1, 3)
+
+        self.model_limits = QLabel()
+        self.model_limits.setStyleSheet('color:gray;')
+        layout.addWidget(self.model_limits, 3, 1, 1, 3)
+
+        # The tier, where the engine has one.
+        self.tier_box = QComboBox()
+        self.tier_box.wheelEvent = lambda event: None
+        tiers = getattr(engine_class, 'service_tiers', None) or []
+        for tier in tiers:
+            self.tier_box.addItem(
+                _('Default') if tier == 'default' else tier, tier)
+        if tiers:
+            current = engine_class.config.get(
+                'service_tier', getattr(engine_class, 'service_tier', ''))
+            self.tier_box.setCurrentIndex(
+                max(self.tier_box.findData(current), 0))
+        self.tier_box.setToolTip(_(
+            'The price and speed the requests are served at. flex is '
+            'discounted and slower, and only some providers offer it '
+            '(OpenAI, Google): with no flex capacity a request fails '
+            'rather than fall back to the standard tier. priority costs '
+            'more. The reply says which tier served it, and the log and '
+            'the report say it too. Preselected from the engine '
+            'settings.'))
+        tier_label = QLabel(_('Service tier'))
+        layout.addWidget(tier_label, 4, 0)
+        layout.addWidget(self.tier_box, 4, 1)
+        tier_label.setVisible(bool(tiers))
+        self.tier_box.setVisible(bool(tiers))
+
+        engine_label = QLabel(_(
+            'Engine: {} (the one chosen in the settings)').format(
+                engine_class.alias or engine_class.name))
+        engine_label.setStyleSheet('color:gray;')
+        layout.addWidget(engine_label, 5, 0, 1, 3)
+        self.start_button = QPushButton(_('&Start new translation'))
+        self.start_button.clicked.connect(self._start_new)
+        layout.addWidget(self.start_button, 5, 3)
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(3, 1)
 
         def change_input_format(fmt):
             self.ebook.set_input_format(fmt)
@@ -489,12 +826,86 @@ class CreateNovelProject(QDialog):
         change_target_lang(target_lang.currentText())
         target_lang.currentTextChanged.connect(change_target_lang)
 
-        return widget
+        return group
 
-    @pyqtSlot()
-    def show_novel(self):
+    def _fill_models(self):
+        current = self.model_box.currentText().strip() \
+            or self.configured_model
+        models = list(self.engine_class.models or [])
+        self.model_box.blockSignals(True)
+        self.model_box.clear()
+        self.model_box.addItems(models)
+        if current and current not in models:
+            self.model_box.insertItem(0, current)
+        self.model_box.setCurrentText(current)
+        self.model_box.blockSignals(False)
+        self.model_box.setEnabled(True)
+        self.model_fetch.setEnabled(True)
+        self.model_fetch.setText(_('Fetch models'))
+        self.model_fetch.setVisible(not models)
+        self._show_limits(current)
+
+    def _fetch_models(self):
+        if not self._has_api_key():
+            self.alert.pop(_('You need to provide an API key to proceed.'))
+            return
+        self.model_fetch.setEnabled(False)
+        self.model_fetch.setText(_('Fetching...'))
+        self.model_worker.start.emit(self.engine_class)
+
+    def _show_limits(self, model):
+        limits = model_limits(
+            self.engine_class, (model or '').strip(), self.configured_model)
+        if not limits:
+            self.model_limits.setText('')
+            self.model_limits.setVisible(False)
+            return
+        output = limits.get('max_output_tokens')
+        self.model_limits.setText(_('Longest reply: {} tokens').format(
+            '{:,}'.format(int(output)).replace(',', ' ')
+            if output else _('not stated')))
+        self.model_limits.setVisible(True)
+
+    def _start_new(self):
+        model = self.model_box.currentText().strip()
+        if not model:
+            self.alert.pop(_('Choose a model.'), 'warning')
+            return
+        tier = self.tier_box.currentData() \
+            if self.tier_box.count() else None
+        cache_id = create_translation(
+            self.ebook, self.engine_class.name, model, tier,
+            model_limits(self.engine_class, model, self.configured_model),
+            self.library_id, engine_provider(self.engine_class))
         self.done(0)
-        self.start_translation.emit(self.ebook)
+        self.open_translation.emit(self.ebook, cache_id)
+
+    def _models_fetched(self, success, message):
+        if not success:
+            error_dialog(self, _("Can't fetch model list"), _(
+                "Can't fetch model list, please check and try again."),
+                message, show=True)
+
+    # Threads still fetching a listing when their dialog closed, kept
+    # here until they end: waiting for them froze calibre for as long
+    # as the request took, and a QThread let go while it runs aborts.
+    _lingering = []
+
+    def done(self, result):
+        try:
+            self.model_worker.finished.disconnect(self._fill_models)
+            self.model_worker.success.disconnect(self._models_fetched)
+        except (TypeError, RuntimeError):
+            pass
+        thread = self.model_thread
+        thread.quit()
+        if not thread.wait(200):
+            lingering = type(self)._lingering
+            pair = (thread, self.model_worker)
+            lingering.append(pair)
+            thread.finished.connect(lambda: pair in lingering
+                                    and lingering.remove(pair))
+        QDialog.done(self, result)
 
 
 # ---------------------------------------------------------------------------
@@ -503,13 +914,16 @@ class CreateNovelProject(QDialog):
 
 
 class NovelTranslation(QDialog):
-    """The main window.
+    """The window of one translation of a book.
 
     Layout:
-      * Left column: cover thumbnail, book title, chapter list with
-        per-chapter status icons.
-      * Right column: progress bar + tabs (Summaries / Glossary / Log).
-      * Bottom: Start / Pause / Cancel / Close buttons.
+      * Left column: the chapter list with per-chapter status marks,
+        preceded by what is translated apart from the chapters (the
+        metadata, the table of contents, the front matter).
+      * Right column: the engine, model and tier of the translation, the
+        progress bar and the tabs: the text, to read and correct; the
+        author brief, the summaries, the glossary, the log, the report.
+      * Bottom: Start / Cancel, the output format, Build, Close.
     """
 
     STATUS_PENDING = 0
@@ -517,7 +931,12 @@ class NovelTranslation(QDialog):
     STATUS_DONE = 2
     STATUS_ERROR = 3
 
-    def __init__(self, plugin, parent, worker, ebook):
+    # The entry of the chapter list that stands for what no chapter
+    # holds: metadata, table of contents, front matter.
+    AUX_SECTION = TranslationText.AUX_SECTION
+
+    def __init__(self, plugin, parent, worker, ebook, cache_id,
+                 library_id=None):
         QDialog.__init__(self, parent)
         self.ui_settings = plugin.ui_settings
         self.api = parent.current_db.new_api
@@ -527,9 +946,13 @@ class NovelTranslation(QDialog):
         self.footer = Footer()
 
         self.config = get_config()
-        self.current_engine = get_engine_class()
+        self.cache_id = cache_id
+        self.info = self._read_info()
+        # The engine the translation was made with, whatever the
+        # settings name now: its model is that engine's.
+        self.current_engine = engine_class_for(
+            get_engine_class(self.info.get('engine_name')), self.info)
 
-        self.cache_id = None
         self.chapters_meta = []
         self.chapter_items = {}   # index -> QListWidgetItem
         self.status_by_chapter = {}
@@ -548,7 +971,7 @@ class NovelTranslation(QDialog):
         self.trans_thread = QThread()
 
         self.prep_worker = NovelPreparationWorker(
-            self.current_engine, self.ebook)
+            self.current_engine, self.ebook, cache_id, library_id)
         self.prep_worker.moveToThread(self.prep_thread)
         self.prep_thread.finished.connect(self.prep_worker.deleteLater)
         self.prep_thread.start()
@@ -568,6 +991,49 @@ class NovelTranslation(QDialog):
         self.prep_worker.finished.connect(self._on_prep_finished)
         self.prep_worker.failed.connect(self._on_prep_failed)
         self.prep_worker.start.emit()
+
+    def _read_info(self):
+        cache = get_cache(self.cache_id)
+        try:
+            return cache.all_info()
+        finally:
+            cache.close()
+
+    def _model_label(self):
+        """The model of this translation; for one written before 1.3,
+        which did not record it, the model the settings name, which is
+        the one a run would use."""
+        model = self.info.get(INFO_MODEL)
+        if model:
+            return model
+        try:
+            model = getattr(get_translator(self.current_engine), 'model', '')
+        except Exception:
+            model = ''
+        return _('{} (from the settings)').format(model) if model \
+            else _('(not recorded)')
+
+    def _tier_label(self):
+        tier = self.info.get(INFO_SERVICE_TIER)
+        if not tier:
+            tier = self.current_engine.config.get(
+                'service_tier', getattr(self.current_engine,
+                                        'service_tier', ''))
+        return '' if tier in (None, '', 'default') else tier
+
+    def _refresh_info_line(self):
+        self.info = self._read_info()
+        provider = engine_provider(self.current_engine)
+        engine = self.current_engine.name + (
+            ' (%s)' % provider if provider else '')
+        parts = ['%s: %s' % (_('Engine'), escape(engine)),
+                 '%s: <b>%s</b>' % (_('Model'), escape(self._model_label()))]
+        tier = self._tier_label()
+        if tier:
+            parts.append('%s: %s' % (_('Service tier'), escape(tier)))
+        parts.append('%s: %s' % (_('Target'), escape(
+            self.ebook.target_lang or '')))
+        self.info_label.setText(' \u00b7 '.join(parts))
 
     # -- layout: preparation view -----------------------------------------
 
@@ -654,6 +1120,10 @@ class NovelTranslation(QDialog):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(QLabel(_('Chapters')))
         self.chapter_list = QListWidget()
+        aux = QListWidgetItem(_('Metadata, contents and front matter'))
+        aux.setData(Qt.UserRole, self.AUX_SECTION)
+        aux.setForeground(QColor('gray'))
+        self.chapter_list.addItem(aux)
         for ch in self.chapters_meta:
             item = QListWidgetItem(self._chapter_label(ch, self.STATUS_PENDING))
             item.setData(Qt.UserRole, ch['index'])
@@ -667,14 +1137,13 @@ class NovelTranslation(QDialog):
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Info line.
-        info_row = QHBoxLayout()
-        info_row.addWidget(QLabel('%s: %s' % (_('Engine'),
-                                              self.current_engine.name)))
-        info_row.addWidget(QLabel('%s: %s' % (_('Target'),
-                                              self.ebook.target_lang)))
-        info_row.addStretch(1)
-        right_layout.addLayout(info_row)
+        # Info line: which translation of the book this is.
+        self.info_label = QLabel()
+        self.info_label.setTextFormat(Qt.TextFormat.RichText)
+        self.info_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        right_layout.addWidget(self.info_label)
+        self._refresh_info_line()
 
         # Progress bar + status label.
         self.progress_bar = QProgressBar()
@@ -686,6 +1155,13 @@ class NovelTranslation(QDialog):
 
         # Tabs.
         self.tabs = QTabWidget()
+
+        # Text tab, first: the book itself, to read and correct before
+        # it is built.
+        self.text_view = TranslationText(
+            [(self.cache_id, self._model_label())], self.chapters_meta,
+            self.alert)
+        self.tabs.addTab(self.text_view, _('Text'))
 
         # Author brief tab, first: it is what the book is translated
         # by. Read-only like the glossary: the worker writes it once,
@@ -771,11 +1247,19 @@ class NovelTranslation(QDialog):
         self.output_button = QPushButton(_('Build translated ebook'))
         self.output_button.setEnabled(False)
         self.output_button.clicked.connect(self._on_build_output)
+        output_format = OutputFormat()
+        if self.ebook.output_format:
+            output_format.setCurrentText(self.ebook.output_format)
+        self.ebook.set_output_format(output_format.currentText())
+        output_format.currentTextChanged.connect(
+            self.ebook.set_output_format)
         self.close_button = QPushButton(_('Close'))
         self.close_button.clicked.connect(lambda: self.done(0))
         btn_row.addWidget(self.start_button)
         btn_row.addWidget(self.cancel_button)
         btn_row.addStretch(1)
+        btn_row.addWidget(QLabel(_('Output Format')))
+        btn_row.addWidget(output_format)
         btn_row.addWidget(self.output_button)
         btn_row.addWidget(self.close_button)
         outer.addLayout(btn_row)
@@ -784,6 +1268,8 @@ class NovelTranslation(QDialog):
         # chapter_done signal so the UI never needs to read back from SQLite
         # (which can miss in-flight transactions from the worker thread).
         self._ui_glossary = {}
+
+        self.text_view.bind_chapter_list(self.chapter_list)
 
         return widget
 
@@ -833,6 +1319,10 @@ class NovelTranslation(QDialog):
             if meta['index'] <= progress:
                 self._set_chapter_status(meta['index'], self.STATUS_DONE)
         self._refresh_context_views(cache)
+        # The first chapter, not the front matter: it is what a reader
+        # looks at first.
+        self.chapter_list.setCurrentRow(
+            1 if self.chapter_list.count() > 1 else 0)
         stored_log = cache.get_info(INFO_NOVEL_LOG)
         if stored_log:
             self.log_view.setPlainText(stored_log)
@@ -949,16 +1439,32 @@ class NovelTranslation(QDialog):
             for m in self.chapters_meta)
 
     def _on_start(self):
-        # The engine may have been changed in the settings meanwhile.
-        self.current_engine = get_engine_class()
+        # The engine preferences may have been changed in the settings
+        # meanwhile; the engine is still the translation's.
+        self.current_engine = engine_class_for(
+            get_engine_class(self.info.get('engine_name')), self.info)
+        if not self.text_view.confirm_discard():
+            return
         retranslate = False
         if self._all_chapters_done():
             # "Re-run all". The button used to just start the worker,
             # which found every chapter done and stopped at once.
-            action = self.alert.ask(_(
+            question = _(
                 'Every chapter is done. Translate the whole book again?\n\n'
                 'The summaries, the glossary and the author brief are '
-                'kept; every paragraph is sent to the model again.'))
+                'kept; every paragraph is sent to the model again.')
+            cache = get_cache(self.cache_id)
+            try:
+                edited = len(edited_paragraphs(cache))
+            finally:
+                cache.close()
+            if edited:
+                question += '\n\n' + _(
+                    '{} paragraph(s) corrected by hand are translated '
+                    'again too, and the corrections lost. To keep them '
+                    'and compare, start a new translation of the book '
+                    'instead.').format(edited)
+            action = self.alert.ask(question)
             if action != 'yes':
                 return
             cache = get_cache(self.cache_id)
@@ -1006,6 +1512,7 @@ class NovelTranslation(QDialog):
         self.cancel_button.setEnabled(True)
         self.output_button.setEnabled(False)
         self.translating = True
+        self.text_view.set_locked(True)
         self.trans_worker.start.emit()
 
     def _on_cancel(self):
@@ -1060,6 +1567,9 @@ class NovelTranslation(QDialog):
                     'notes': (item.get('notes') or '').strip(),
                 }
         self._refresh_context_views()
+        # The chapter on show is read again when it is the one just
+        # translated; any other view is left as the reader has it.
+        self.text_view.chapter_changed(index)
 
     def _on_worker_finished(self, success, message):
         self.translating = False
@@ -1067,6 +1577,9 @@ class NovelTranslation(QDialog):
             self.done(0)
             return
         self._refresh_report_from_cache()
+        self._refresh_info_line()
+        self.text_view.set_locked(False)
+        self.text_view.reload()
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.progress_label.setText(message)
@@ -1100,6 +1613,9 @@ class NovelTranslation(QDialog):
             self.alert.pop(_(
                 'The book is still being prepared. Please wait a moment.'),
                 'warning')
+            return
+        if hasattr(self, 'text_view') and not self.translating \
+                and not self.text_view.confirm_discard():
             return
         if self.translating:
             if not self.closing:
@@ -1159,9 +1675,13 @@ class NovelTranslation(QDialog):
         # pipeline, so the job only puts the translations back into the
         # DOM and lets Plumber write the ebook.
         try:
+            if not self.text_view.confirm_discard():
+                return
             self.ebook.set_output_format(
                 self.ebook.output_format or 'epub')
-            self.worker.translate_ebook(self.ebook, cache_only=True)
+            self.worker.translate_ebook(
+                self.ebook, self.cache_id, cache_only=True,
+                label=self._model_label())
             self.alert.pop(_(
                 'Building translated ebook in background. Watch the '
                 'jobs panel for progress.'))

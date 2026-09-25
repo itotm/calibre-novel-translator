@@ -4009,6 +4009,55 @@ class TestUsageReport(unittest.TestCase):
         self.assertIn('100 in + 40 out tokens', logged)
         self.assertIn('$0.001', logged)
 
+    def test_the_service_tier_that_served_is_noted_and_counted(self):
+        translator, cache = self._translator()
+        engine = translator.translator
+        engine.service_tier = 'flex'
+        engine.last_service_tier = 'flex'
+        translator._request_kind = 'translation'
+        translator._translate_with_retry('system', 'text', label='chunk')
+        engine.last_service_tier = 'default'
+        translator._translate_with_retry('system', 'text', label='chunk')
+        self.assertEqual({'flex': 1, 'default': 1}, translator.tier_stats)
+        logged = str(translator.log.call_args[0][0])
+        # Asked for flex, served at the default price: worth a word.
+        self.assertIn('default tier', logged)
+        self.assertIn('Service tier that served the replies',
+                      translator.build_report())
+        self.assertIn('flex 1', translator.build_report_html())
+
+    def test_the_default_tier_is_not_mentioned_when_nothing_else_was_asked(
+            self):
+        translator, cache = self._translator()
+        engine = translator.translator
+        engine.last_service_tier = 'default'
+        translator._request_kind = 'translation'
+        translator._translate_with_retry('system', 'text', label='chunk')
+        self.assertNotIn('tier', str(translator.log.call_args[0][0]))
+        self.assertNotIn('Service tier', translator.build_report())
+
+    def test_a_provider_s_own_name_for_the_standard_tier_is_not_noted(
+            self):
+        translator, cache = self._translator()
+        engine = translator.translator
+        engine.last_service_tier = 'on_demand'   # Groq
+        translator._request_kind = 'translation'
+        translator._translate_with_retry('system', 'text', label='chunk')
+        self.assertNotIn('tier', str(translator.log.call_args[0][0]))
+        self.assertNotIn('Service tier', translator.build_report())
+
+    def test_a_flex_run_that_gives_up_says_flex_does_not_fall_back(self):
+        translator, cache = self._translator()
+        translator.translator.service_tier = 'flex'
+        translator.translator.translate = Mock(
+            side_effect=Exception('no flex capacity'))
+        translator._wait = Mock()
+        with self.assertRaises(TranslationFailed) as caught:
+            translator._translate_with_retry(
+                'system', 'text', attempts=1, label='chunk')
+        self.assertIn('flex', str(caught.exception))
+        self.assertIn('default tier', str(caught.exception))
+
     def test_tokens_are_estimated_when_not_reported(self):
         translator, cache = self._translator()
         translator._request_kind = 'translation'
