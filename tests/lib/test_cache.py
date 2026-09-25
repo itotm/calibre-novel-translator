@@ -1,6 +1,7 @@
 import unittest
 
 from ...lib.cache import Paragraph
+from .test_book_translations import TempCache
 
 
 class TestParagraph(unittest.TestCase):
@@ -75,3 +76,16 @@ class TestParagraph(unittest.TestCase):
         self.paragraph.translation = 'A\n\nB\nC'
         self.paragraph.do_aligment('\n\n')
         self.assertEqual('A\n\nB\n\nC', self.paragraph.translation)
+
+
+class TestHasTranslation(TempCache):
+    def test_whether_any_paragraph_is_translated(self):
+        cache = self.cache('book')
+        cache.add(1, 'md5-1', 'a', 'a')
+        cache.add(2, 'md5-2', 'b', 'b')
+        cache.connection.commit()
+        self.assertFalse(cache.has_translation())
+        cache.update(2, translation='')
+        self.assertFalse(cache.has_translation())
+        cache.update(2, translation='B')
+        self.assertTrue(cache.has_translation())

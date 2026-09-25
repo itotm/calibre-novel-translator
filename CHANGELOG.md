@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.3.1
+
+**The author brief and the glossary, in your hands; flex when there is flex**
+
+* The *Author* and *Glossary* tabs of the translation window can be
+  edited before the translation starts, while it is stopped, and when a
+  translation is opened again; during a run they are read-only, as the
+  run holds its own copy. Both are saved as you type.
+* A brief written in the *Author* tab is used as it is and the model is
+  not asked for one, even with "How the author writes" set to *Do not
+  ask*. Left empty, the model is asked when the translation starts, as
+  before. When the last run found no brief, the reason is shown above
+  the field instead of in it.
+* The *Glossary* tab has *Add entry* and *Remove*, and every cell can be
+  edited. An entry written or corrected by hand is marked as yours: the
+  model never changes its translation, and the glossary size limit never
+  drops it.
+* Editing either once some of the book is translated brings up a warning
+  that what is already translated followed the previous version, so the
+  book may not read consistently. It stays until the translation starts
+  again.
+* Enter in the glossary table edits the entry selected instead of
+  starting the translation, and *Reset context* is disabled while a run
+  is going.
+* With OpenRouter, a new translation preselects the flex tier when its
+  model has a flex endpoint, read off the model's endpoint listing, and
+  says next to the tier whether it has one. A model without flex is
+  never preselected on flex, even when the settings name it, since every
+  request would fail. A tier picked by hand in the dialog stays. The
+  engine setting *flex when the model has it*, on by default, turns the
+  preselection off.
+
 ## v1.3.0
 
 **Several translations of a book, to read, correct and compare**

@@ -18,7 +18,7 @@ from qt.core import (  # type: ignore
     QProgressBar, pyqtSignal, pyqtSlot, QPixmap, QListWidget,
     QListWidgetItem, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QSpacerItem, QStackedWidget, QComboBox, QMessageBox,
-    QSizePolicy, QColor, QBrush, QAbstractItemView, QCompleter)
+    QSizePolicy, QColor, QBrush, QAbstractItemView, QCompleter, QTimer)
 from calibre.constants import __version__  # type: ignore
 from calibre.gui2 import I, error_dialog  # type: ignore
 from calibre.utils.localization import _  # type: ignore
@@ -49,7 +49,7 @@ from .lib.book_translations import (
 from .engines.genai import GenAI
 from .components import (
     Footer, AlertMessage, SourceLang, TargetLang, InputFormat, OutputFormat,
-    ModelWorker)
+    ModelWorker, FlexWorker)
 from .text_view import EnterFilter, TranslationText
 
 
@@ -531,6 +531,19 @@ class BookTranslations(QDialog):
         self.model_thread.start()
         self.model_worker.finished.connect(self._fill_models)
         self.model_worker.success.connect(self._models_fetched)
+        # Whether the model chosen has flex, asked on the same thread a
+        # moment after the choice settles: the field changes with every
+        # key typed into it.
+        self.flex_worker = FlexWorker()
+        self.flex_worker.moveToThread(self.model_thread)
+        self.model_thread.finished.connect(self.flex_worker.deleteLater)
+        self.flex_worker.checked.connect(self._flex_checked)
+        self.flex_timer = QTimer(self)
+        self.flex_timer.setSingleShot(True)
+        self.flex_timer.setInterval(400)
+        self.flex_timer.timeout.connect(self._check_flex)
+        # Once the user picks a tier, the model no longer picks it.
+        self.tier_touched = False
 
         layout = QVBoxLayout(self)
         layout.addWidget(self._layout_list(), 1)
@@ -754,7 +767,7 @@ class BookTranslations(QDialog):
             'settings of the engine, as they stand when the translation '
             'runs. The model chosen there is preselected; type to search '
             'the listing, or type a model it does not carry.'))
-        self.model_box.currentTextChanged.connect(self._show_limits)
+        self.model_box.currentTextChanged.connect(self._model_changed)
         self.model_fetch = QPushButton(_('Fetch models'))
         self.model_fetch.clicked.connect(self._fetch_models)
         model_row = QHBoxLayout()
@@ -775,10 +788,8 @@ class BookTranslations(QDialog):
             self.tier_box.addItem(
                 _('Default') if tier == 'default' else tier, tier)
         if tiers:
-            current = engine_class.config.get(
-                'service_tier', getattr(engine_class, 'service_tier', ''))
-            self.tier_box.setCurrentIndex(
-                max(self.tier_box.findData(current), 0))
+            self._set_tier(self._settings_tier())
+        self.tier_box.activated.connect(self._tier_chosen)
         self.tier_box.setToolTip(_(
             'The price and speed the requests are served at. flex is '
             'discounted and slower, and only some providers offer it '
@@ -786,12 +797,17 @@ class BookTranslations(QDialog):
             'rather than fall back to the standard tier. priority costs '
             'more. The reply says which tier served it, and the log and '
             'the report say it too. Preselected from the engine '
-            'settings.'))
+            'settings, and flex when the model has it (unless the '
+            'settings say otherwise).'))
         tier_label = QLabel(_('Service tier'))
         layout.addWidget(tier_label, 4, 0)
         layout.addWidget(self.tier_box, 4, 1)
+        self.flex_note = QLabel()
+        self.flex_note.setStyleSheet('color:gray;')
+        layout.addWidget(self.flex_note, 4, 2, 1, 2)
         tier_label.setVisible(bool(tiers))
         self.tier_box.setVisible(bool(tiers))
+        self.flex_note.setVisible(bool(tiers))
 
         engine_label = QLabel(_(
             'Engine: {} (the one chosen in the settings)').format(
@@ -843,7 +859,7 @@ class BookTranslations(QDialog):
         self.model_fetch.setEnabled(True)
         self.model_fetch.setText(_('Fetch models'))
         self.model_fetch.setVisible(not models)
-        self._show_limits(current)
+        self._model_changed(current)
 
     def _fetch_models(self):
         if not self._has_api_key():
@@ -852,6 +868,49 @@ class BookTranslations(QDialog):
         self.model_fetch.setEnabled(False)
         self.model_fetch.setText(_('Fetching...'))
         self.model_worker.start.emit(self.engine_class)
+
+    def _model_changed(self, model):
+        self._show_limits(model)
+        if 'flex' in (getattr(self.engine_class, 'service_tiers', None)
+                      or []):
+            self.flex_note.setText('')
+            self.flex_timer.start()
+
+    def _settings_tier(self):
+        return self.engine_class.config.get(
+            'service_tier', getattr(self.engine_class, 'service_tier', ''))
+
+    def _set_tier(self, tier):
+        self.tier_box.setCurrentIndex(max(self.tier_box.findData(tier), 0))
+
+    def _tier_chosen(self, index):
+        self.tier_touched = True
+
+    def _check_flex(self):
+        model = self.model_box.currentText().strip()
+        if model:
+            self.flex_worker.start.emit(self.engine_class, model)
+
+    def _flex_checked(self, model, found):
+        """Preselect flex for a model that has it, and never for one
+        that does not: flex would fail every request."""
+        if model != self.model_box.currentText().strip():
+            return  # the answer for a model since changed
+        self.flex_note.setText(
+            _('flex: available for this model') if found else
+            _('flex: not offered for this model') if found is False
+            else '')
+        if self.tier_touched:
+            return
+        tier = self._settings_tier()
+        flex_first = self.engine_class.config.get(
+            'flex_when_available',
+            getattr(self.engine_class, 'flex_when_available', False))
+        if found and flex_first:
+            tier = 'flex'
+        elif found is False and tier == 'flex':
+            tier = 'default'
+        self._set_tier(tier)
 
     def _show_limits(self, model):
         limits = model_limits(
@@ -892,16 +951,18 @@ class BookTranslations(QDialog):
     _lingering = []
 
     def done(self, result):
+        self.flex_timer.stop()
         try:
             self.model_worker.finished.disconnect(self._fill_models)
             self.model_worker.success.disconnect(self._models_fetched)
+            self.flex_worker.checked.disconnect(self._flex_checked)
         except (TypeError, RuntimeError):
             pass
         thread = self.model_thread
         thread.quit()
         if not thread.wait(200):
             lingering = type(self)._lingering
-            pair = (thread, self.model_worker)
+            pair = (thread, self.model_worker, self.flex_worker)
             lingering.append(pair)
             thread.finished.connect(lambda: pair in lingering
                                     and lingering.remove(pair))
@@ -962,6 +1023,14 @@ class NovelTranslation(QDialog):
         self.preparing = True
         self.translating = False
         self.closing = False
+        # The author brief and the glossary can be edited between runs.
+        # ``_loading_context`` is set while the window itself fills them,
+        # so that only the user's changes count as edits; whether any
+        # paragraph is translated yet decides whether an edit is worth a
+        # warning, and once it is, it stays so.
+        self._loading_context = False
+        self._stored_style = ''
+        self._started = False
 
         # One pair of threads per window. As class attributes they were
         # shared by every book open at once and never stopped, so the
@@ -1153,6 +1222,21 @@ class NovelTranslation(QDialog):
         self.progress_label = QLabel(_('Ready.'))
         right_layout.addWidget(self.progress_label)
 
+        # Shown when the brief or the glossary is edited once paragraphs
+        # are already translated, and until the translation starts again.
+        self.context_warning = QLabel(_(
+            'You changed the author brief or the glossary after the '
+            'translation had started. What is already translated followed '
+            'the previous version, so the book may not read consistently. '
+            'Once every chapter is done, "Re-run all" translates it again '
+            'with what you wrote.'))
+        self.context_warning.setWordWrap(True)
+        self.context_warning.setStyleSheet(
+            'background:#fff3cd;color:#664d03;border:1px solid #ffda6a;'
+            'border-radius:4px;padding:6px;')
+        self.context_warning.setVisible(False)
+        right_layout.addWidget(self.context_warning)
+
         # Tabs.
         self.tabs = QTabWidget()
 
@@ -1163,17 +1247,33 @@ class NovelTranslation(QDialog):
             self.alert)
         self.tabs.addTab(self.text_view, _('Text'))
 
-        # Author brief tab, first: it is what the book is translated
-        # by. Read-only like the glossary: the worker writes it once,
-        # before the first chapter, and reads it back on every request.
+        # Author brief tab: what the book is translated by. The worker
+        # reads it once, before the first chapter, and asks the model for
+        # one only when it is empty; so it can be written or corrected
+        # here before a run and between runs, never during one, when the
+        # worker holds its own copy. Saved as it is typed.
+        style_tab = QWidget()
+        style_layout = QVBoxLayout(style_tab)
+        style_layout.setContentsMargins(0, 0, 0, 0)
+        # Why there is no brief, when the last run found none.
+        self.style_note = QLabel()
+        self.style_note.setWordWrap(True)
+        self.style_note.setStyleSheet('color:gray;')
+        self.style_note.setVisible(False)
+        style_layout.addWidget(self.style_note)
         self.style_view = QPlainTextEdit()
-        self.style_view.setReadOnly(True)
         self.style_view.setPlaceholderText(_(
-            'The brief on how this book is written appears here once the '
-            'translation has started, or a note on why there is none. '
-            'How it is obtained is set in the plugin settings ("How the '
-            'author writes").'))
-        self.tabs.addTab(self.style_view, _('Author'))
+            'No brief yet. Write one here and every chapter is translated '
+            'by it. Leave it empty and the model is asked for one when '
+            'the translation starts, unless the plugin settings say "Do '
+            'not ask" ("How the author writes").'))
+        self.style_view.textChanged.connect(self._on_style_edited)
+        style_layout.addWidget(self.style_view, 1)
+        self.tabs.addTab(style_tab, _('Author'))
+        self._style_timer = QTimer(self)
+        self._style_timer.setSingleShot(True)
+        self._style_timer.setInterval(800)
+        self._style_timer.timeout.connect(self._save_style)
 
         # Summaries tab.
         self.summaries_view = QPlainTextEdit()
@@ -1187,17 +1287,38 @@ class NovelTranslation(QDialog):
             [_('Source'), _('Translation'), _('Type'), _('Notes')])
         self.glossary_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
-        # Read-only on purpose. The table is redrawn from scratch every
-        # time a chapter completes, and the worker thread keeps its own
-        # copy of the glossary that it writes back after each chapter:
-        # an edit typed here during a run was overwritten without a word.
-        self.glossary_table.setEditTriggers(
-            QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.glossary_table.verticalHeader().setVisible(False)
+        self.glossary_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        # Editable between runs only (see _set_context_locked). The table
+        # is redrawn from scratch every time a chapter completes, and the
+        # worker thread keeps its own copy of the glossary that it writes
+        # back after each chapter: an edit typed here during a run was
+        # overwritten without a word. An edit is saved when it is made.
+        self.glossary_table.itemChanged.connect(self._on_glossary_edited)
+        # Enter edits the entry selected; let through, it pressed the
+        # dialog's default button and started the translation.
+        self.glossary_table.installEventFilter(
+            EnterFilter(self._edit_glossary_entry, self))
         glossary_actions = QHBoxLayout()
-        reset_glossary_btn = QPushButton(_('Reset context'))
-        reset_glossary_btn.clicked.connect(self._reset_context)
-        glossary_actions.addWidget(reset_glossary_btn)
+        self.glossary_add_button = QPushButton(_('Add entry'))
+        self.glossary_add_button.setToolTip(_(
+            'Add a name and how to translate it. An entry written or '
+            'corrected here is used as it is: the model never changes it, '
+            'and the glossary size limit never drops it.'))
+        self.glossary_add_button.clicked.connect(self._add_glossary_entry)
+        self.glossary_remove_button = QPushButton(_('Remove'))
+        self.glossary_remove_button.setToolTip(_(
+            'Remove the entries selected. The model may list a name '
+            'again when a later chapter introduces it.'))
+        self.glossary_remove_button.clicked.connect(
+            self._remove_glossary_entries)
+        self.reset_context_button = QPushButton(_('Reset context'))
+        self.reset_context_button.clicked.connect(self._reset_context)
+        glossary_actions.addWidget(self.glossary_add_button)
+        glossary_actions.addWidget(self.glossary_remove_button)
         glossary_actions.addStretch(1)
+        glossary_actions.addWidget(self.reset_context_button)
         glossary_wrap = QWidget()
         glossary_wrap_layout = QVBoxLayout(glossary_wrap)
         glossary_wrap_layout.setContentsMargins(0, 0, 0, 0)
@@ -1270,6 +1391,7 @@ class NovelTranslation(QDialog):
         self._ui_glossary = {}
 
         self.text_view.bind_chapter_list(self.chapter_list)
+        self._set_context_locked(False)
 
         return widget
 
@@ -1393,13 +1515,20 @@ class NovelTranslation(QDialog):
                 self.summaries_view.appendPlainText('')
 
             # --- Author brief: always from cache, written once per
-            # book before the first chapter.
+            # book before the first chapter or typed in the tab.
             style = cache.get_info(INFO_NOVEL_STYLE)
-            if not isinstance(style, str) or not style:
-                # No brief: say why, rather than show an empty tab.
-                style = cache.get_info(INFO_NOVEL_STYLE_NOTE)
-            self.style_view.setPlainText(
-                style if isinstance(style, str) else '')
+            style = style if isinstance(style, str) else ''
+            self._stored_style = style.strip()
+            if self.style_view.toPlainText() != style:
+                self._loading_context = True
+                try:
+                    self.style_view.setPlainText(style)
+                finally:
+                    self._loading_context = False
+            # No brief: say why, rather than show an empty tab.
+            note = cache.get_info(INFO_NOVEL_STYLE_NOTE)
+            self.style_note.setText(note if isinstance(note, str) else '')
+            self._show_style_note()
 
             # --- Glossary: prefer in-memory accumulator; seed from cache
             # on the initial load (when _ui_glossary is still empty).
@@ -1420,16 +1549,186 @@ class NovelTranslation(QDialog):
     def _redraw_glossary_table(self):
         """Repopulate the glossary QTableWidget from ``self._ui_glossary``."""
         glossary = self._ui_glossary
-        self.glossary_table.setRowCount(len(glossary))
-        for row, (source, entry) in enumerate(glossary.items()):
-            self.glossary_table.setItem(
-                row, 0, QTableWidgetItem(source))
-            self.glossary_table.setItem(
-                row, 1, QTableWidgetItem(entry.get('translation', '')))
-            self.glossary_table.setItem(
-                row, 2, QTableWidgetItem(entry.get('type', '')))
-            self.glossary_table.setItem(
-                row, 3, QTableWidgetItem(entry.get('notes', '')))
+        self._loading_context = True
+        try:
+            self.glossary_table.setRowCount(len(glossary))
+            for row, (source, entry) in enumerate(glossary.items()):
+                self.glossary_table.setItem(
+                    row, 0, QTableWidgetItem(source))
+                self.glossary_table.setItem(
+                    row, 1, QTableWidgetItem(entry.get('translation', '')))
+                self.glossary_table.setItem(
+                    row, 2, QTableWidgetItem(entry.get('type', '')))
+                self.glossary_table.setItem(
+                    row, 3, QTableWidgetItem(entry.get('notes', '')))
+                if entry.get('user'):
+                    self._mark_user_row(row)
+        finally:
+            self._loading_context = False
+
+    # -- editing the brief and the glossary ------------------------------
+
+    def _set_context_locked(self, locked):
+        """The brief and the glossary are the worker's while it runs,
+        and the user's the rest of the time."""
+        self.style_view.setReadOnly(locked)
+        triggers = QAbstractItemView.EditTrigger
+        self.glossary_table.setEditTriggers(
+            triggers.NoEditTriggers if locked else (
+                triggers.DoubleClicked | triggers.EditKeyPressed
+                | triggers.AnyKeyPressed))
+        for button in (self.glossary_add_button,
+                       self.glossary_remove_button,
+                       self.reset_context_button):
+            button.setEnabled(not locked)
+
+    def _translation_started(self):
+        """Whether anything was translated with the brief and the
+        glossary as they were."""
+        if not self._started:
+            if any(status == self.STATUS_DONE
+                   for status in self.status_by_chapter.values()):
+                self._started = True
+            else:
+                cache = get_cache(self.cache_id)
+                try:
+                    self._started = cache.has_translation()
+                finally:
+                    cache.close()
+        return self._started
+
+    def _context_edited(self):
+        """The user changed the brief or the glossary: say what it means
+        for a translation already under way. The warning stays until the
+        translation starts again."""
+        if not self.context_warning.isVisible() \
+                and self._translation_started():
+            self.context_warning.setVisible(True)
+
+    def _show_style_note(self):
+        self.style_note.setVisible(
+            bool(self.style_note.text())
+            and not self.style_view.toPlainText().strip())
+
+    def _on_style_edited(self):
+        if self._loading_context:
+            return
+        self._show_style_note()
+        self._style_timer.start()
+        if self.style_view.toPlainText().strip() != self._stored_style:
+            self._context_edited()
+
+    def _save_style(self):
+        self._style_timer.stop()
+        cache = get_cache(self.cache_id)
+        try:
+            self._stored_style = ContextManager(cache).load().set_style(
+                self.style_view.toPlainText())
+        finally:
+            cache.close()
+
+    def _flush_style(self):
+        """Save the brief now if it was typed and not saved yet."""
+        if self._style_timer.isActive():
+            self._save_style()
+
+    def _mark_user_row(self, row):
+        """Mark ``row`` as written by the user, whose entries the model
+        never changes."""
+        loading, self._loading_context = self._loading_context, True
+        try:
+            for column in range(self.glossary_table.columnCount()):
+                if self.glossary_table.item(row, column) is None:
+                    self.glossary_table.setItem(
+                        row, column, QTableWidgetItem(''))
+            head = self.glossary_table.item(row, 0)
+            head.setData(Qt.UserRole, True)
+            head.setToolTip(_(
+                'Written or corrected by you: the model never changes it.'))
+        finally:
+            self._loading_context = loading
+
+    @staticmethod
+    def _clean_glossary(glossary):
+        """``glossary`` as it is saved: no empty fields."""
+        return {source: {key: value for key, value in entry.items()
+                         if value}
+                for source, entry in glossary.items()}
+
+    def _table_glossary(self):
+        """The glossary the table shows. A row without a name or a
+        translation is left out until it has both; of two rows with the
+        same name, the lower one counts."""
+        glossary = {}
+        table = self.glossary_table
+        for row in range(table.rowCount()):
+            cells = [table.item(row, column) for column in range(4)]
+            source, translation, gtype, notes = [
+                item.text().strip() if item is not None else ''
+                for item in cells]
+            if not source or not translation:
+                continue
+            entry = {'translation': translation, 'type': gtype,
+                     'notes': notes}
+            if cells[0].data(Qt.UserRole):
+                entry['user'] = True
+            glossary.pop(source, None)
+            glossary[source] = entry
+        return self._clean_glossary(glossary)
+
+    def _save_glossary(self):
+        """Write the table into the cache; whether that changed it."""
+        glossary = self._table_glossary()
+        if glossary == self._clean_glossary(self._ui_glossary):
+            return False
+        cache = get_cache(self.cache_id)
+        try:
+            ContextManager(cache).load().replace_glossary(glossary)
+        finally:
+            cache.close()
+        self._ui_glossary = glossary
+        return True
+
+    def _on_glossary_edited(self, item):
+        if self._loading_context:
+            return
+        self._mark_user_row(item.row())
+        if self._save_glossary():
+            self._context_edited()
+
+    def _edit_glossary_entry(self):
+        item = self.glossary_table.currentItem()
+        if item is not None and not self.translating:
+            self.glossary_table.editItem(item)
+
+    def _add_glossary_entry(self):
+        table = self.glossary_table
+        row = table.rowCount()
+        self._loading_context = True
+        try:
+            table.insertRow(row)
+        finally:
+            self._loading_context = False
+        self._mark_user_row(row)
+        table.scrollToBottom()
+        table.setCurrentCell(row, 0)
+        table.editItem(table.item(row, 0))
+
+    def _remove_glossary_entries(self):
+        table = self.glossary_table
+        rows = sorted({index.row() for index in
+                       table.selectionModel().selectedRows()},
+                      reverse=True)
+        if not rows:
+            return
+        self._loading_context = True
+        try:
+            for row in rows:
+                table.removeRow(row)
+        finally:
+            self._loading_context = False
+        if self._save_glossary():
+            self._context_edited()
 
     # -- controls ----------------------------------------------------------
 
@@ -1508,6 +1807,10 @@ class NovelTranslation(QDialog):
         self.trans_worker.chapter_done.connect(self._on_chapter_done)
         self.trans_worker.report.connect(self.report_view.setHtml)
         self.trans_worker.finished.connect(self._on_worker_finished)
+        # What was typed in the Author tab goes into this run.
+        self._flush_style()
+        self._set_context_locked(True)
+        self.context_warning.setVisible(False)
         self.start_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.output_button.setEnabled(False)
@@ -1561,6 +1864,8 @@ class NovelTranslation(QDialog):
                 translation = (item.get('translation') or '').strip()
                 if not source or not translation:
                     continue
+                if self._ui_glossary.get(source, {}).get('user'):
+                    continue  # the worker keeps it too
                 self._ui_glossary[source] = {
                     'translation': translation,
                     'type': (item.get('type') or '').strip(),
@@ -1578,6 +1883,12 @@ class NovelTranslation(QDialog):
             return
         self._refresh_report_from_cache()
         self._refresh_info_line()
+        # The glossary as the worker left it, not as the signals rebuilt
+        # it: the cap may have dropped entries they never mentioned.
+        # Edits start from what is actually stored.
+        self._ui_glossary = {}
+        self._refresh_context_views()
+        self._set_context_locked(False)
         self.text_view.set_locked(False)
         self.text_view.reload()
         self.start_button.setEnabled(True)
@@ -1617,6 +1928,8 @@ class NovelTranslation(QDialog):
         if hasattr(self, 'text_view') and not self.translating \
                 and not self.text_view.confirm_discard():
             return
+        if hasattr(self, 'style_view') and not self.translating:
+            self._flush_style()
         if self.translating:
             if not self.closing:
                 action = self.alert.ask(_(
@@ -1656,6 +1969,8 @@ class NovelTranslation(QDialog):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if ret != QMessageBox.StandardButton.Yes:
             return
+        # A brief typed and not saved yet goes with the rest.
+        self._style_timer.stop()
         cache = get_cache(self.cache_id)
         try:
             ContextManager(cache).load().reset()

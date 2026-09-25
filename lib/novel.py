@@ -670,7 +670,9 @@ class ContextManager:
       * ``glossary``: a dict mapping the original name (source language) to
         a dict ``{"translation": str, "type": str, "notes": str}``. The type
         is a free-form label (character/place/object/other/...); the notes
-        are optional.
+        are optional. An entry written or corrected in the window also
+        carries ``"user": true``: the model never changes it and the cap
+        never drops it.
 
     Both are serialized as JSON in the SQLite ``info`` key/value table of the
     translation cache. No schema change is required.
@@ -845,6 +847,9 @@ class ContextManager:
             if not source or not translation:
                 continue
             entry = glossary.get(source, {})
+            if entry.get('user'):
+                # Written in the window: the user's word stands.
+                continue
             entry['translation'] = translation
             if item.get('type'):
                 entry['type'] = str(item['type']).strip()
@@ -855,15 +860,19 @@ class ContextManager:
 
     def _merge_glossary(self, updates):
         self.glossary = self._merged_glossary(updates)
-        # Enforce cap (FIFO on insertion order preserved by dict).
+        # Enforce cap (FIFO on insertion order preserved by dict). The
+        # entries the user wrote are not the model's to forget.
         if self.glossary_max_entries and \
                 len(self.glossary) > self.glossary_max_entries:
             overflow = len(self.glossary) - self.glossary_max_entries
-            for key in list(self.glossary.keys())[:overflow]:
+            learned = [key for key, entry in self.glossary.items()
+                       if not entry.get('user')]
+            for key in learned[:overflow]:
                 del self.glossary[key]
 
     def replace_glossary(self, new_glossary):
-        """Wholesale replacement (used by the UI editor)."""
+        """Wholesale replacement: what the Glossary tab of the window
+        saves, between runs."""
         self.glossary = {
             k: v for k, v in new_glossary.items()
             if isinstance(v, dict) and v.get('translation')}
@@ -3205,16 +3214,20 @@ class NovelTranslator:
         alternative, a brief the model made up, would misdirect every
         paragraph of the book.
         """
-        if self.author_style_setting == 'off':
-            return self._no_author_style(_(
-                'The author brief is turned off in the settings ("How '
-                'the author writes").'))
+        # A brief on file comes first, whatever the settings say: it is
+        # either one already paid for or one written in the window, and
+        # "Do not ask" is about asking the model, not about using it.
         existing = self.ctx.get_style()
         if existing:
             self._author_style = existing
-            self.log(_('Author brief: reusing the one on file '
+            self.log(_('Author brief: using the one on file '
                        '({} characters).').format(len(existing)))
             return existing
+        if self.author_style_setting == 'off':
+            return self._no_author_style(_(
+                'The author brief is turned off in the settings ("How '
+                'the author writes"). A brief written here is used '
+                'all the same.'))
         author = self.book_author
         if not author:
             self.log(_('Author brief: skipped, the book carries no author '

@@ -1353,3 +1353,47 @@ class TestAbortReachesClones(unittest.TestCase):
         clone.abort()
         clone.inflight.close.assert_called_once()
         engine.inflight.close.assert_not_called()
+
+
+class TestOpenRouterFlex(unittest.TestCase):
+    """Whether a model has flex is read off its endpoint listing, which
+    tags every endpoint with the tier it serves."""
+
+    def setUp(self):
+        OpenRouterTranslate._flex_models.clear()
+        self.addCleanup(OpenRouterTranslate._flex_models.clear)
+        OpenRouterTranslate.set_config({'api_keys': ['sk-or-v1-a']})
+        self.translator = OpenRouterTranslate()
+
+    @patch(module_name + '.openrouter.request')
+    def test_a_flex_endpoint_is_found_by_its_tag(self, mock_request):
+        mock_request.return_value = json.dumps({'data': {'endpoints': [
+            {'provider_name': 'OpenAI', 'tag': 'openai'},
+            {'provider_name': 'Google', 'tag': 'google-vertex/global/flex'},
+        ]}})
+        self.assertTrue(self.translator.model_has_flex('vendor/model'))
+        self.assertIn('/models/vendor/model/endpoints',
+                      mock_request.call_args[0][0])
+        # Asked once per model.
+        self.assertTrue(self.translator.model_has_flex('vendor/model'))
+        self.assertEqual(1, mock_request.call_count)
+
+    @patch(module_name + '.openrouter.request')
+    def test_no_flex_endpoint(self, mock_request):
+        mock_request.return_value = json.dumps({'data': {'endpoints': [
+            {'provider_name': 'DeepInfra', 'tag': 'deepinfra/fp8'},
+            {'provider_name': 'Flexcorp', 'tag': 'flexcorp'}]}})
+        self.assertIs(False, self.translator.model_has_flex('vendor/model'))
+
+    @patch(module_name + '.openrouter.request')
+    def test_unknown_when_the_listing_fails(self, mock_request):
+        mock_request.side_effect = Exception('offline')
+        self.assertIsNone(self.translator.model_has_flex('vendor/model'))
+        # Not remembered: the next choice of the model asks again.
+        self.assertNotIn('vendor/model', OpenRouterTranslate._flex_models)
+        self.assertIsNone(self.translator.model_has_flex(''))
+
+    def test_on_by_default_and_saved_with_the_engine(self):
+        self.assertTrue(OpenRouterTranslate.flex_when_available)
+        self.assertIn('flex_when_available',
+                      OpenRouterTranslate.preference_keys)

@@ -710,7 +710,18 @@ class TranslationSetting(QDialog):
                   'served it, that is the one billed, and the log and the '
                   'report say it too. Left at the default because it is '
                   'a choice about money and time: a new translation can '
-                  'ask for its own tier together with its model.')))
+                  'ask for its own tier together with its model.')),
+            openrouter_check(
+                'flex_when_available', _('flex when the model has it'),
+                _('Preselect flex for a new translation whenever its model '
+                  'has a flex endpoint, whatever the tier on the left '
+                  'says. On by default: a book is hundreds of requests '
+                  'with nobody waiting on each, which is what flex is '
+                  'priced for. A model without flex keeps the tier on '
+                  'the left, or Default when that is flex, since flex '
+                  'would fail every request. The tier can still be '
+                  'changed in the dialog before the translation '
+                  'starts.')))
 
         openrouter_advanced = QCheckBox(_('Show'))
         openrouter_advanced.setToolTip(_(
@@ -1567,7 +1578,12 @@ class TranslationSetting(QDialog):
             'The book needs an author in its calibre metadata. The brief '
             'is stored with the summaries, so it is paid for once and '
             'reused when you resume; "Reset context" in the translation '
-            'window discards it.'))
+            'window discards it.\n\n'
+            'The Author tab of the translation window can take a brief '
+            'of your own, or correct the model\'s, before the '
+            'translation starts or while it is stopped. A brief there is '
+            'always used, even with "Do not ask", and the model is then '
+            'not asked.'))
         novel_layout.addRow(
             _('How the author writes'), novel_author_style)
         self.disable_wheel_event(novel_author_style)

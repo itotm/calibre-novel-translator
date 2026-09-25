@@ -38,7 +38,7 @@ general, never about the book: the model is told to say nothing of its
 plot, setting or period, which the translation reads off the text. A
 model that knows nothing reliable about the author says so, and the
 Author tab of the window says so too, rather than carry a brief the
-model made up.
+model made up. You can write the brief yourself there instead.
 
 **Dialogue punctuated like the source.** The quotation marks of the source
 are read once, chapter by chapter, and the convention most chapters use is
@@ -105,7 +105,7 @@ It writes `../novel-translator_v<version>.zip`, checks that the archive is
 installable and prints the command that installs it:
 
 ```sh
-calibre-customize -a ../novel-translator_v1.3.0.zip
+calibre-customize -a ../novel-translator_v1.3.1.zip
 ```
 
 In the GUI the equivalent is *Preferences → Plugins → Load plugin from
@@ -123,7 +123,8 @@ under *Preferences → Toolbars & menus* whenever you want it back.
    the translations of that book already in the cache, with the model
    that made each one.
 3. *Open* one to continue it, or start a new one: choose the formats, the
-   languages and the model (and, with OpenRouter, the service tier), then
+   languages and the model (and, with OpenRouter, the service tier,
+   preselected as flex when the model has it), then
    *Start new translation*. Everything else comes from the settings. A
    book can have as many translations as you like, by different models or
    into different languages, and two can be open side by side.
@@ -131,6 +132,14 @@ under *Preferences → Toolbars & menus* whenever you want it back.
    Resume* runs the translation; *Cancel* stops it at once, cutting short
    the request in flight, and everything done so far is kept. The log of
    a run is kept with the translation and shown again when it reopens.
+   Before the first start, or while the translation is stopped, the
+   *Author* tab takes a brief of your own (or a correction of the
+   model's), which is then used instead of asking the model, and the
+   *Glossary* tab takes names and how to translate them: *Add entry*,
+   edit any cell, *Remove*. An entry you wrote or corrected is never
+   changed by the model. Editing either once something is translated
+   brings up a warning that the book may not read consistently, until
+   the translation starts again.
 5. The *Text* tab shows the chapter chosen on the left, original and
    translation side by side; *Search* looks through that chapter or the
    whole book, in both.

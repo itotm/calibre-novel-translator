@@ -172,6 +172,12 @@ class OpenRouterTranslate(ChatgptTranslate):
     # https://openrouter.ai/docs/guides/features/service-tiers
     service_tiers = ['default', 'flex', 'priority']
     service_tier = 'default'
+    # Whether a new translation starts on flex when its model has a flex
+    # endpoint (see model_has_flex), whatever the tier above says. A book
+    # is hundreds of requests with nobody waiting on each, which is what
+    # flex is priced for; a model without flex keeps the tier above, or
+    # the default when that is flex, since flex would fail every request.
+    flex_when_available = True
     # A flex request may wait in the provider's queue before its first
     # token: OpenAI asks for a timeout of fifteen minutes on that tier.
     flex_request_timeout = 900.0
@@ -201,7 +207,7 @@ class OpenRouterTranslate(ChatgptTranslate):
         'provider_quantizations', 'provider_sort',
         'provider_allow_fallbacks', 'provider_require_parameters',
         'provider_data_collection', 'provider_zdr', 'service_tier',
-        'usage_accounting', 'app_referer', 'app_title', 'extra_headers',
+        'flex_when_available', 'usage_accounting', 'app_referer', 'app_title', 'extra_headers',
         'extra_body')
 
     def __init__(self):
@@ -531,6 +537,37 @@ class OpenRouterTranslate(ChatgptTranslate):
         slug = slug or str(name or '').strip().lower().replace(' ', '-')
         self._provider_slugs[key] = slug
         return slug
+
+    # Model -> whether it has a flex endpoint, for the life of calibre:
+    # the dialog asks again every time the model is chosen.
+    _flex_models: dict[str, bool] = {}
+
+    def model_has_flex(self, model) -> bool | None:
+        """Whether ``model`` has an endpoint that serves the flex tier;
+        None when the listing could not be read.
+
+        The model listing does not say; the endpoint listing of the
+        model does, in the tag of each endpoint ("openai/flex",
+        "google-vertex/global/flex").
+        """
+        model = str(model or '').strip()
+        if not model:
+            return None
+        if model in self._flex_models:
+            return self._flex_models[model]
+        try:
+            response = request(
+                'https://openrouter.ai/api/v1/models/%s/endpoints' % model,
+                headers=self.get_headers(), proxy_uri=self.proxy_uri)
+            endpoints = (json.loads(response).get('data') or {}).get(
+                'endpoints') or []
+        except Exception:
+            return None
+        found = any(
+            str(endpoint.get('tag') or '').rsplit('/', 1)[-1] == 'flex'
+            for endpoint in endpoints if isinstance(endpoint, dict))
+        self._flex_models[model] = found
+        return found
 
     def get_body(self, text):
         return json.dumps(self.extend_body(json.loads(super().get_body(text))))

@@ -643,6 +643,30 @@ class TestContextManager(unittest.TestCase):
         self.assertNotIn('A', keys)  # Oldest dropped.
         self.assertIn('D', keys)
 
+    def test_an_entry_written_by_the_user_is_never_changed(self):
+        ctx = ContextManager(self.cache).load()
+        ctx.replace_glossary({
+            'Sir Kay': {'translation': 'Ser Caio', 'user': True}})
+        ctx.append_chapter(1, 't', 's', [
+            {'source': 'Sir Kay', 'translation': 'Sir Kay',
+             'type': 'character'},
+            {'source': 'Merlin', 'translation': 'Merlino'},
+        ])
+        self.assertEqual(
+            {'translation': 'Ser Caio', 'user': True},
+            ctx.get_glossary()['Sir Kay'])
+        self.assertEqual('Merlino', ctx.get_glossary()['Merlin'][
+            'translation'])
+
+    def test_the_cap_never_drops_an_entry_written_by_the_user(self):
+        ctx = ContextManager(self.cache, glossary_max_entries=2).load()
+        ctx.replace_glossary({'A': {'translation': 'A', 'user': True}})
+        ctx.append_chapter(1, 't', 's', [
+            {'source': 'B', 'translation': 'B'},
+            {'source': 'C', 'translation': 'C'},
+        ])
+        self.assertEqual(['A', 'C'], list(ctx.get_glossary()))
+
     def test_progress_never_decreases(self):
         ctx = ContextManager(self.cache).load()
         ctx.append_chapter(3, 't', 's')
@@ -3231,6 +3255,14 @@ class TestAuthorBrief(unittest.TestCase):
         translator = self._translator({'novel_author_style': 'off'})
         self.assertEqual('', translator._ensure_author_style())
         self.assertEqual([], translator.translator.bodies)
+
+    def test_a_brief_on_file_is_used_even_when_asking_is_off(self):
+        # Written in the Author tab: "Do not ask" is about the model.
+        translator = self._translator(
+            {'novel_author_style': 'off'}, style=BRIEF)
+        self.assertEqual(BRIEF, translator._ensure_author_style())
+        self.assertEqual([], translator.translator.bodies)
+        self.assertIn(BRIEF, translator._translation_system_prompt('CONTEXT'))
 
     def test_a_book_without_an_author_asks_nothing(self):
         translator = self._translator({'novel_book_author': ''})

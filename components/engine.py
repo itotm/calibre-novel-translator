@@ -62,6 +62,30 @@ class ModelWorker(QObject):
         self.finished.emit()
 
 
+class FlexWorker(QObject):
+    """Find out off the main thread whether a model has a flex
+    endpoint (see ``OpenRouterTranslate.model_has_flex``)."""
+    start = pyqtSignal(object, str)
+    checked = pyqtSignal(str, object)   # model, True/False/None
+
+    def __init__(self):
+        QObject.__init__(self)
+        self.start.connect(self.check)
+
+    @pyqtSlot(object, str)
+    def check(self, engine_class, model):
+        found = None
+        try:
+            has_flex = getattr(get_translator(engine_class),
+                               'model_has_flex', None)
+            if callable(has_flex):
+                found = has_flex(model)
+        except Exception:
+            log.error('Failed to look for a flex endpoint: %s'
+                      % traceback_error())
+        self.checked.emit(model, found)
+
+
 class EngineWorker(QObject):
     clear = pyqtSignal()
     translate = pyqtSignal(str)

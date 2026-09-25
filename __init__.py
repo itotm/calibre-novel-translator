@@ -31,7 +31,7 @@ class NovelTranslatorPlugin(InterfaceActionBase):
     supported_platforms = ['windows', 'osx', 'linux']
     identifier = 'novel-translator'
     author = 'itotm'
-    version = (1, 3, 0)
+    version = (1, 3, 1)
     __version__ = 'v' + '.'.join(map(str, version))
     description = _(
         'Translate a novel with a language model, chapter by chapter, '

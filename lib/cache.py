@@ -320,6 +320,13 @@ class TranslationCache:
             for id, md5, original, translation, engine_name, target_lang
             in resource.fetchall()]
 
+    def has_translation(self):
+        """Whether any paragraph is translated yet."""
+        resource = self.cursor.execute(
+            "SELECT 1 FROM cache WHERE translation IS NOT NULL "
+            "AND translation != '' LIMIT 1")
+        return resource.fetchone() is not None
+
     def get_paragraphs(self, ids):
         return [Paragraph(*item) for item in self.get(ids)]
 
