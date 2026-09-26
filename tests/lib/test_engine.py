@@ -1360,8 +1360,8 @@ class TestOpenRouterFlex(unittest.TestCase):
     tags every endpoint with the tier it serves."""
 
     def setUp(self):
-        OpenRouterTranslate._flex_models.clear()
-        self.addCleanup(OpenRouterTranslate._flex_models.clear)
+        OpenRouterTranslate._model_endpoints.clear()
+        self.addCleanup(OpenRouterTranslate._model_endpoints.clear)
         OpenRouterTranslate.set_config({'api_keys': ['sk-or-v1-a']})
         self.translator = OpenRouterTranslate()
 
@@ -1390,8 +1390,25 @@ class TestOpenRouterFlex(unittest.TestCase):
         mock_request.side_effect = Exception('offline')
         self.assertIsNone(self.translator.model_has_flex('vendor/model'))
         # Not remembered: the next choice of the model asks again.
-        self.assertNotIn('vendor/model', OpenRouterTranslate._flex_models)
+        self.assertNotIn('vendor/model', OpenRouterTranslate._model_endpoints)
         self.assertIsNone(self.translator.model_has_flex(''))
+
+    @patch(module_name + '.openrouter.request')
+    def test_a_flex_endpoint_the_routing_excludes_does_not_count(
+            self, mock_request):
+        mock_request.return_value = json.dumps({'data': {'endpoints': [
+            {'provider_name': 'OpenAI', 'tag': 'openai'},
+            {'provider_name': 'Google Vertex',
+             'tag': 'google-vertex/global/flex'}]}})
+        translator = self.translator
+        translator.provider_only = 'openai'
+        self.assertIs(False, translator.model_has_flex('vendor/model'))
+        translator.provider_only = 'openai, google-vertex'
+        self.assertIs(True, translator.model_has_flex('vendor/model'))
+        translator.provider_ignore = 'Google Vertex'
+        self.assertIs(False, translator.model_has_flex('vendor/model'))
+        # The listing is read once; the routing is applied each time.
+        self.assertEqual(1, mock_request.call_count)
 
     def test_on_by_default_and_saved_with_the_engine(self):
         self.assertTrue(OpenRouterTranslate.flex_when_available)

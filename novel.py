@@ -12,13 +12,14 @@ from html import escape
 from types import MethodType
 
 from qt.core import (  # type: ignore
-    Qt, QObject, QDialog, QGroupBox, QWidget, QVBoxLayout, QHBoxLayout,
+    Qt, QObject, QDialog, QWidget, QVBoxLayout, QHBoxLayout,
     QPlainTextEdit, QPushButton, QSplitter, QLabel, QThread, QGridLayout,
     QTextBrowser,
     QProgressBar, pyqtSignal, pyqtSlot, QPixmap, QListWidget,
     QListWidgetItem, QTabWidget, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSpacerItem, QStackedWidget, QComboBox, QMessageBox,
-    QSizePolicy, QColor, QBrush, QAbstractItemView, QCompleter, QTimer)
+    QHeaderView, QStackedWidget, QComboBox, QMessageBox,
+    QSizePolicy, QColor, QBrush, QAbstractItemView, QCompleter, QTimer,
+    QApplication, QPalette)
 from calibre.constants import __version__  # type: ignore
 from calibre.gui2 import I, error_dialog  # type: ignore
 from calibre.utils.localization import _  # type: ignore
@@ -49,7 +50,8 @@ from .lib.book_translations import (
 from .engines.genai import GenAI
 from .components import (
     Footer, AlertMessage, SourceLang, TargetLang, InputFormat, OutputFormat,
-    ModelWorker, FlexWorker)
+    ModelWorker, FlexWorker, Section, MessageBanner, heading, secondary,
+    with_icon, icon, tidy, POSITIVE, NEGATIVE, ACTIVE)
 from .text_view import EnterFilter, TranslationText
 
 
@@ -548,6 +550,7 @@ class BookTranslations(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(self._layout_list(), 1)
         layout.addWidget(self._layout_new())
+        tidy(self)
         self.refresh()
         self._fill_models()
         if not self.engine_class.models and self._has_api_key():
@@ -571,7 +574,7 @@ class BookTranslations(QDialog):
     # -- the list ----------------------------------------------------------
 
     def _layout_list(self):
-        group = QGroupBox(_('Translations of this book'))
+        group = Section(_('Translations of this book'))
         layout = QVBoxLayout(group)
         self.table = QTableWidget(0, len(self.COLUMNS))
         self.table.setHorizontalHeaderLabels([
@@ -592,25 +595,25 @@ class BookTranslations(QDialog):
         self.table.itemSelectionChanged.connect(self._selection_changed)
         layout.addWidget(self.table, 1)
 
-        self.empty_label = QLabel(_(
+        self.empty_label = secondary(QLabel(_(
             'This book has not been translated yet: start the first '
-            'translation below.'))
+            'translation below.')))
         self.empty_label.setWordWrap(True)
         layout.addWidget(self.empty_label)
 
         buttons = QHBoxLayout()
-        self.delete_button = QPushButton(_('Delete'))
+        self.delete_button = with_icon(QPushButton(_('Delete')), 'trash')
         self.delete_button.setToolTip(_(
             'Delete this translation from the cache: its text, summaries, '
             'glossary, log and report. Books already built are not '
             'touched.'))
         self.delete_button.clicked.connect(self._delete_selected)
-        self.open_button = QPushButton(_('&Open'))
+        self.open_button = with_icon(QPushButton(_('&Open')), 'document_open')
         self.open_button.setToolTip(_(
             'Open the translation to continue it, read and correct its '
             'text, or build the book from it.'))
         self.open_button.clicked.connect(self._open_selected)
-        self.compare_button = QPushButton(_('&Compare'))
+        self.compare_button = with_icon(QPushButton(_('&Compare')), 'diff')
         self.compare_button.clicked.connect(self._compare_selected)
         buttons.addWidget(self.delete_button)
         buttons.addStretch(1)
@@ -721,7 +724,7 @@ class BookTranslations(QDialog):
     # -- a new translation -------------------------------------------------
 
     def _layout_new(self):
-        group = QGroupBox(_('New translation'))
+        group = Section(_('New translation'))
         layout = QGridLayout(group)
         engine_class = self.engine_class
 
@@ -737,13 +740,20 @@ class BookTranslations(QDialog):
             engine_class.lang_codes.get('target'),
             engine_class.config.get('target_lang'))
 
-        layout.addWidget(QLabel(_('Input Format')), 0, 0)
+        def label(text):
+            # Right-aligned against its field, as a form lays them out.
+            widget = QLabel(text)
+            widget.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            return widget
+
+        layout.addWidget(label(_('Input Format')), 0, 0)
         layout.addWidget(input_format, 0, 1)
-        layout.addWidget(QLabel(_('Output Format')), 0, 2)
+        layout.addWidget(label(_('Output Format')), 0, 2)
         layout.addWidget(output_format, 0, 3)
-        layout.addWidget(QLabel(_('Source Language')), 1, 0)
+        layout.addWidget(label(_('Source Language')), 1, 0)
         layout.addWidget(source_lang, 1, 1)
-        layout.addWidget(QLabel(_('Target Language')), 1, 2)
+        layout.addWidget(label(_('Target Language')), 1, 2)
         layout.addWidget(target_lang, 1, 3)
 
         # The model: the listing the settings fetched, searchable, and
@@ -768,16 +778,16 @@ class BookTranslations(QDialog):
             'runs. The model chosen there is preselected; type to search '
             'the listing, or type a model it does not carry.'))
         self.model_box.currentTextChanged.connect(self._model_changed)
-        self.model_fetch = QPushButton(_('Fetch models'))
+        self.model_fetch = with_icon(
+            QPushButton(_('Fetch models')), 'view-refresh')
         self.model_fetch.clicked.connect(self._fetch_models)
         model_row = QHBoxLayout()
         model_row.addWidget(self.model_box, 1)
         model_row.addWidget(self.model_fetch)
-        layout.addWidget(QLabel(_('Model')), 2, 0)
+        layout.addWidget(label(_('Model')), 2, 0)
         layout.addLayout(model_row, 2, 1, 1, 3)
 
-        self.model_limits = QLabel()
-        self.model_limits.setStyleSheet('color:gray;')
+        self.model_limits = secondary(QLabel())
         layout.addWidget(self.model_limits, 3, 1, 1, 3)
 
         # The tier, where the engine has one.
@@ -799,24 +809,25 @@ class BookTranslations(QDialog):
             'the report say it too. Preselected from the engine '
             'settings, and flex when the model has it (unless the '
             'settings say otherwise).'))
-        tier_label = QLabel(_('Service tier'))
+        tier_label = label(_('Service tier'))
         layout.addWidget(tier_label, 4, 0)
         layout.addWidget(self.tier_box, 4, 1)
-        self.flex_note = QLabel()
-        self.flex_note.setStyleSheet('color:gray;')
+        self.flex_note = secondary(QLabel())
         layout.addWidget(self.flex_note, 4, 2, 1, 2)
         tier_label.setVisible(bool(tiers))
         self.tier_box.setVisible(bool(tiers))
         self.flex_note.setVisible(bool(tiers))
 
-        engine_label = QLabel(_(
+        engine_label = secondary(QLabel(_(
             'Engine: {} (the one chosen in the settings)').format(
-                engine_class.alias or engine_class.name))
-        engine_label.setStyleSheet('color:gray;')
-        layout.addWidget(engine_label, 5, 0, 1, 3)
-        self.start_button = QPushButton(_('&Start new translation'))
+                engine_class.alias or engine_class.name)))
+        self.start_button = with_icon(
+            QPushButton(_('&Start new translation')), 'forward')
         self.start_button.clicked.connect(self._start_new)
-        layout.addWidget(self.start_button, 5, 3)
+        start_row = QHBoxLayout()
+        start_row.addWidget(engine_label, 1)
+        start_row.addWidget(self.start_button)
+        layout.addLayout(start_row, 5, 0, 1, 4)
         layout.setColumnStretch(1, 1)
         layout.setColumnStretch(3, 1)
 
@@ -873,7 +884,10 @@ class BookTranslations(QDialog):
         self._show_limits(model)
         if 'flex' in (getattr(self.engine_class, 'service_tiers', None)
                       or []):
-            self.flex_note.setText('')
+            # The tier may still change: say so, and wait for the answer
+            # before starting, until it comes.
+            self.flex_note.setText(_('flex: checking this model...'))
+            self._set_flex_pending(True)
             self.flex_timer.start()
 
     def _settings_tier(self):
@@ -886,21 +900,36 @@ class BookTranslations(QDialog):
     def _tier_chosen(self, index):
         self.tier_touched = True
 
+    def _set_flex_pending(self, pending):
+        """A new translation waits for the answer on flex: started before
+        it, a translation took the tier of the settings, which is flex
+        for every model when the settings name it, and failed every
+        request on a model without flex."""
+        self.start_button.setEnabled(not pending)
+
     def _check_flex(self):
         model = self.model_box.currentText().strip()
         if model:
             self.flex_worker.start.emit(self.engine_class, model)
+        else:
+            self.flex_note.setText('')
+            self._set_flex_pending(False)
 
     def _flex_checked(self, model, found):
         """Preselect flex for a model that has it, and never for one
         that does not: flex would fail every request."""
         if model != self.model_box.currentText().strip():
             return  # the answer for a model since changed
+        self._set_flex_pending(False)
         self.flex_note.setText(
             _('flex: available for this model') if found else
             _('flex: not offered for this model') if found is False
             else '')
         if self.tier_touched:
+            # A tier picked by hand stays, except flex picked for another
+            # model: on this one every request would fail.
+            if found is False and self.tier_box.currentData() == 'flex':
+                self._set_tier('default')
             return
         tier = self._settings_tier()
         flex_first = self.engine_class.config.get(
@@ -1027,10 +1056,10 @@ class NovelTranslation(QDialog):
         # ``_loading_context`` is set while the window itself fills them,
         # so that only the user's changes count as edits; whether any
         # paragraph is translated yet decides whether an edit is worth a
-        # warning, and once it is, it stays so.
+        # warning. It is looked up once, and again after a run.
         self._loading_context = False
         self._stored_style = ''
-        self._started = False
+        self._started = None   # not looked up yet
 
         # One pair of threads per window. As class attributes they were
         # shared by every book open at once and never stopped, so the
@@ -1053,6 +1082,7 @@ class NovelTranslation(QDialog):
         self.stack.addWidget(self.waiting)
         layout.addWidget(self.stack)
         layout.addWidget(self.footer)
+        tidy(self)
 
         self.prep_worker.progress_message.connect(self._prep_label.setText)
         self.prep_worker.progress_detail.connect(
@@ -1108,7 +1138,7 @@ class NovelTranslation(QDialog):
 
     def _layout_progress(self):
         widget = QWidget()
-        layout = QGridLayout(widget)
+        layout = QHBoxLayout(widget)
 
         try:
             cover_image = self.api.cover(self.ebook.id, as_pixmap=True)
@@ -1117,36 +1147,47 @@ class NovelTranslation(QDialog):
                 self.api.cover(self.ebook.id, as_image=True))
         if cover_image is None or cover_image.isNull():
             cover_image = QPixmap(I('default_cover.png'))
-        cover_image = cover_image.scaledToHeight(
-            400, Qt.TransformationMode.SmoothTransformation)
+        # Fitted into one box, so that a wide or a very narrow cover
+        # does not make the column beside the log as wide or as narrow.
+        cover_box = 240
+        cover_image = cover_image.scaled(
+            cover_box, cover_box * 4 // 3,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation)
 
         cover = QLabel()
         cover.setAlignment(Qt.AlignCenter)
         cover.setPixmap(cover_image)
 
-        title = QLabel(self.ebook.title)
+        title = heading(self.ebook.title)
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet('font-weight:bold;font-size:16px;')
+        title.setWordWrap(True)
 
         progress_bar = QProgressBar()
         progress_bar.setRange(0, 0)  # indeterminate
         progress_bar.setValue(0)
+        progress_bar.setTextVisible(False)
 
-        self._prep_label = QLabel(_('Loading ebook data, please wait...'))
+        self._prep_label = secondary(
+            QLabel(_('Loading ebook data, please wait...')))
         self._prep_label.setAlignment(Qt.AlignCenter)
+        self._prep_label.setWordWrap(True)
 
         self._prep_detail = QPlainTextEdit()
         self._prep_detail.setReadOnly(True)
 
-        layout.addWidget(cover, 0, 0)
-        layout.addWidget(title, 1, 0)
-        layout.addItem(QSpacerItem(0, 20), 2, 0)
-        layout.addWidget(progress_bar, 3, 0)
-        layout.addWidget(self._prep_label, 4, 0)
-        layout.addItem(QSpacerItem(10, 0), 0, 1, 6, 1)
-        layout.addWidget(self._prep_detail, 0, 2, 6, 1)
-        layout.setRowStretch(2, 1)
-        layout.setColumnStretch(2, 1)
+        # The book on the left, what preparing it does on the right.
+        book = QWidget()
+        book.setFixedWidth(cover_box)
+        book_layout = QVBoxLayout(book)
+        book_layout.addWidget(cover)
+        book_layout.addWidget(title)
+        book_layout.addStretch(1)
+        book_layout.addWidget(progress_bar)
+        book_layout.addWidget(self._prep_label)
+
+        layout.addWidget(book)
+        layout.addWidget(self._prep_detail, 1)
 
         return widget
 
@@ -1166,6 +1207,7 @@ class NovelTranslation(QDialog):
         self.main_panel = self._layout_main()
         self.stack.addWidget(self.main_panel)
         self.stack.setCurrentWidget(self.main_panel)
+        tidy(self)
         self._refresh_chapter_list_from_cache()
 
     @pyqtSlot(str)
@@ -1186,16 +1228,22 @@ class NovelTranslation(QDialog):
         # Left side: chapter list.
         left = QWidget()
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(QLabel(_('Chapters')))
+        left_layout.addWidget(heading(_('Chapters')))
         self.chapter_list = QListWidget()
+        # Long titles are cut short, not scrolled to.
+        self.chapter_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.chapter_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         aux = QListWidgetItem(_('Metadata, contents and front matter'))
         aux.setData(Qt.UserRole, self.AUX_SECTION)
-        aux.setForeground(QColor('gray'))
+        aux.setForeground(self.chapter_list.palette().brush(
+            QPalette.ColorRole.PlaceholderText))
+        aux.setToolTip(aux.text())
         self.chapter_list.addItem(aux)
         for ch in self.chapters_meta:
             item = QListWidgetItem(self._chapter_label(ch, self.STATUS_PENDING))
             item.setData(Qt.UserRole, ch['index'])
+            item.setToolTip(ch['title'] or '')
             self.chapter_list.addItem(item)
             self.chapter_items[ch['index']] = item
             self.status_by_chapter[ch['index']] = self.STATUS_PENDING
@@ -1204,7 +1252,6 @@ class NovelTranslation(QDialog):
         # Right side: progress + tabs.
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
 
         # Info line: which translation of the book this is.
         self.info_label = QLabel()
@@ -1219,26 +1266,23 @@ class NovelTranslation(QDialog):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         right_layout.addWidget(self.progress_bar)
-        self.progress_label = QLabel(_('Ready.'))
+        self.progress_label = secondary(QLabel(_('Ready.')))
         right_layout.addWidget(self.progress_label)
 
         # Shown when the brief or the glossary is edited once paragraphs
         # are already translated, and until the translation starts again.
-        self.context_warning = QLabel(_(
+        self.context_warning = MessageBanner(_(
             'You changed the author brief or the glossary after the '
             'translation had started. What is already translated followed '
             'the previous version, so the book may not read consistently. '
             'Once every chapter is done, "Re-run all" translates it again '
-            'with what you wrote.'))
-        self.context_warning.setWordWrap(True)
-        self.context_warning.setStyleSheet(
-            'background:#fff3cd;color:#664d03;border:1px solid #ffda6a;'
-            'border-radius:4px;padding:6px;')
+            'with what you wrote.'), 'warning')
         self.context_warning.setVisible(False)
         right_layout.addWidget(self.context_warning)
 
-        # Tabs.
+        # Tabs, flat on the window: the pages have frames of their own.
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
 
         # Text tab, first: the book itself, to read and correct before
         # it is built.
@@ -1254,11 +1298,8 @@ class NovelTranslation(QDialog):
         # worker holds its own copy. Saved as it is typed.
         style_tab = QWidget()
         style_layout = QVBoxLayout(style_tab)
-        style_layout.setContentsMargins(0, 0, 0, 0)
         # Why there is no brief, when the last run found none.
-        self.style_note = QLabel()
-        self.style_note.setWordWrap(True)
-        self.style_note.setStyleSheet('color:gray;')
+        self.style_note = MessageBanner(kind='information')
         self.style_note.setVisible(False)
         style_layout.addWidget(self.style_note)
         self.style_view = QPlainTextEdit()
@@ -1287,7 +1328,6 @@ class NovelTranslation(QDialog):
             [_('Source'), _('Translation'), _('Type'), _('Notes')])
         self.glossary_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
-        self.glossary_table.verticalHeader().setVisible(False)
         self.glossary_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         # Editable between runs only (see _set_context_locked). The table
@@ -1301,19 +1341,22 @@ class NovelTranslation(QDialog):
         self.glossary_table.installEventFilter(
             EnterFilter(self._edit_glossary_entry, self))
         glossary_actions = QHBoxLayout()
-        self.glossary_add_button = QPushButton(_('Add entry'))
+        self.glossary_add_button = with_icon(
+            QPushButton(_('Add entry')), 'plus')
         self.glossary_add_button.setToolTip(_(
             'Add a name and how to translate it. An entry written or '
             'corrected here is used as it is: the model never changes it, '
             'and the glossary size limit never drops it.'))
         self.glossary_add_button.clicked.connect(self._add_glossary_entry)
-        self.glossary_remove_button = QPushButton(_('Remove'))
+        self.glossary_remove_button = with_icon(
+            QPushButton(_('Remove')), 'minus')
         self.glossary_remove_button.setToolTip(_(
             'Remove the entries selected. The model may list a name '
             'again when a later chapter introduces it.'))
         self.glossary_remove_button.clicked.connect(
             self._remove_glossary_entries)
-        self.reset_context_button = QPushButton(_('Reset context'))
+        self.reset_context_button = with_icon(
+            QPushButton(_('Reset context')), 'edit-clear')
         self.reset_context_button.clicked.connect(self._reset_context)
         glossary_actions.addWidget(self.glossary_add_button)
         glossary_actions.addWidget(self.glossary_remove_button)
@@ -1321,7 +1364,6 @@ class NovelTranslation(QDialog):
         glossary_actions.addWidget(self.reset_context_button)
         glossary_wrap = QWidget()
         glossary_wrap_layout = QVBoxLayout(glossary_wrap)
-        glossary_wrap_layout.setContentsMargins(0, 0, 0, 0)
         glossary_wrap_layout.addWidget(self.glossary_table, 1)
         glossary_wrap_layout.addLayout(glossary_actions)
         # The table is added to the wrapper and only the wrapper becomes a
@@ -1353,19 +1395,23 @@ class NovelTranslation(QDialog):
 
         splitter.addWidget(left)
         splitter.addWidget(right)
+        splitter.setChildrenCollapsible(False)
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(1, 4)
+        splitter.setSizes([220, 780])
 
         outer.addWidget(splitter, 1)
 
         # Buttons row.
         btn_row = QHBoxLayout()
-        self.start_button = QPushButton(_('Start / Resume'))
+        self.start_button = with_icon(
+            QPushButton(_('Start / Resume')), 'forward')
         self.start_button.clicked.connect(self._on_start)
-        self.cancel_button = QPushButton(_('Cancel'))
+        self.cancel_button = with_icon(QPushButton(_('Cancel')), 'list_remove')
         self.cancel_button.clicked.connect(self._on_cancel)
         self.cancel_button.setEnabled(False)
-        self.output_button = QPushButton(_('Build translated ebook'))
+        self.output_button = with_icon(
+            QPushButton(_('Build translated ebook')), 'convert')
         self.output_button.setEnabled(False)
         self.output_button.clicked.connect(self._on_build_output)
         output_format = OutputFormat()
@@ -1374,7 +1420,7 @@ class NovelTranslation(QDialog):
         self.ebook.set_output_format(output_format.currentText())
         output_format.currentTextChanged.connect(
             self.ebook.set_output_format)
-        self.close_button = QPushButton(_('Close'))
+        self.close_button = with_icon(QPushButton(_('Close')), 'window-close')
         self.close_button.clicked.connect(lambda: self.done(0))
         btn_row.addWidget(self.start_button)
         btn_row.addWidget(self.cancel_button)
@@ -1405,9 +1451,9 @@ class NovelTranslation(QDialog):
     }
     _STATUS_COLOR = {
         STATUS_PENDING: None,
-        STATUS_RUNNING: '#4169e1',   # royalblue
-        STATUS_DONE: '#2e8b57',      # seagreen
-        STATUS_ERROR: '#dc143c',     # crimson
+        STATUS_RUNNING: ACTIVE,
+        STATUS_DONE: POSITIVE,
+        STATUS_ERROR: NEGATIVE,
     }
 
     def _chapter_label(self, chapter_meta, status):
@@ -1470,7 +1516,7 @@ class NovelTranslation(QDialog):
                 done=completed, total=total, pct=pct))
         if completed >= total > 0:
             self.output_button.setEnabled(True)
-            self.start_button.setText(_('Re-run all'))
+            self._set_start_button(rerun=True)
 
     def _refresh_context_views(self, cache=None):
         """Refresh the Summaries, Author and Glossary tabs.
@@ -1584,8 +1630,10 @@ class NovelTranslation(QDialog):
 
     def _translation_started(self):
         """Whether anything was translated with the brief and the
-        glossary as they were."""
-        if not self._started:
+        glossary as they were. Remembered either way until a run ends:
+        with nothing translated, the lookup reads the whole cache, and
+        it came on every key typed into the brief."""
+        if self._started is None:
             if any(status == self.STATUS_DONE
                    for status in self.status_by_chapter.values()):
                 self._started = True
@@ -1611,7 +1659,7 @@ class NovelTranslation(QDialog):
             and not self.style_view.toPlainText().strip())
 
     def _on_style_edited(self):
-        if self._loading_context:
+        if self._loading_context or self.translating:
             return
         self._show_style_note()
         self._style_timer.start()
@@ -1631,6 +1679,18 @@ class NovelTranslation(QDialog):
         """Save the brief now if it was typed and not saved yet."""
         if self._style_timer.isActive():
             self._save_style()
+
+    def _commit_context_edits(self):
+        """Save what is being typed in the Author and Glossary tabs: a
+        brief not saved yet, and a glossary cell still open in its
+        editor. Locking the table stops new edits but leaves an open
+        editor open, and what it committed later was written to the
+        cache while the run held its own copy of the glossary."""
+        focus = QApplication.focusWidget()
+        if focus is not None and self.glossary_table.isAncestorOf(focus):
+            # The editor commits its cell when it loses the focus.
+            focus.clearFocus()
+        self._flush_style()
 
     def _mark_user_row(self, row):
         """Mark ``row`` as written by the user, whose entries the model
@@ -1690,7 +1750,7 @@ class NovelTranslation(QDialog):
         return True
 
     def _on_glossary_edited(self, item):
-        if self._loading_context:
+        if self._loading_context or self.translating:
             return
         self._mark_user_row(item.row())
         if self._save_glossary():
@@ -1731,6 +1791,11 @@ class NovelTranslation(QDialog):
             self._context_edited()
 
     # -- controls ----------------------------------------------------------
+
+    def _set_start_button(self, rerun):
+        self.start_button.setText(
+            _('Re-run all') if rerun else _('Start / Resume'))
+        self.start_button.setIcon(icon('restart' if rerun else 'forward'))
 
     def _all_chapters_done(self):
         return bool(self.chapters_meta) and all(
@@ -1774,7 +1839,7 @@ class NovelTranslation(QDialog):
             for index in list(self.status_by_chapter):
                 self._set_chapter_status(index, self.STATUS_PENDING)
             self.progress_bar.setValue(0)
-            self.start_button.setText(_('Start / Resume'))
+            self._set_start_button(rerun=False)
             retranslate = True
         self._start_translation_worker(retranslate)
 
@@ -1807,8 +1872,9 @@ class NovelTranslation(QDialog):
         self.trans_worker.chapter_done.connect(self._on_chapter_done)
         self.trans_worker.report.connect(self.report_view.setHtml)
         self.trans_worker.finished.connect(self._on_worker_finished)
-        # What was typed in the Author tab goes into this run.
-        self._flush_style()
+        # What is being typed in the Author and Glossary tabs goes into
+        # this run.
+        self._commit_context_edits()
         self._set_context_locked(True)
         self.context_warning.setVisible(False)
         self.start_button.setEnabled(False)
@@ -1887,6 +1953,7 @@ class NovelTranslation(QDialog):
         # it: the cap may have dropped entries they never mentioned.
         # Edits start from what is actually stored.
         self._ui_glossary = {}
+        self._started = None   # the run may have translated something
         self._refresh_context_views()
         self._set_context_locked(False)
         self.text_view.set_locked(False)
@@ -1894,7 +1961,15 @@ class NovelTranslation(QDialog):
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.progress_label.setText(message)
-        # Any chapter still marked "running" is now uncertain: leave as-is.
+        # A chapter still marked as running is not any more: the one a
+        # failure stopped on says so, one a cancel stopped on is pending.
+        # It used to keep the running mark while nothing ran.
+        canceled = getattr(self.trans_worker, 'canceled', False)
+        for index, status in list(self.status_by_chapter.items()):
+            if status == self.STATUS_RUNNING:
+                self._set_chapter_status(
+                    index, self.STATUS_PENDING if success or canceled
+                    else self.STATUS_ERROR)
         if success:
             # Enable output only if all chapters are done.
             done_count = sum(
@@ -1902,7 +1977,7 @@ class NovelTranslation(QDialog):
                 if s == self.STATUS_DONE)
             if done_count >= len(self.chapters_meta):
                 self.output_button.setEnabled(True)
-                self.start_button.setText(_('Re-run all'))
+                self._set_start_button(rerun=True)
                 self.alert.pop(_(
                     'All chapters translated. Click "Build translated '
                     'ebook" to produce the output.'))
@@ -1925,25 +2000,29 @@ class NovelTranslation(QDialog):
                 'The book is still being prepared. Please wait a moment.'),
                 'warning')
             return
-        if hasattr(self, 'text_view') and not self.translating \
-                and not self.text_view.confirm_discard():
-            return
-        if hasattr(self, 'style_view') and not self.translating:
-            self._flush_style()
         if self.translating:
-            if not self.closing:
-                action = self.alert.ask(_(
-                    'The translation is still running. Stop it and close '
-                    'the window? What is already translated stays in the '
-                    'cache and the next start resumes from there.'))
-                if action != 'yes':
-                    return
+            if self.closing:
+                return
+            action = self.alert.ask(_(
+                'The translation is still running. Stop it and close '
+                'the window? What is already translated stays in the '
+                'cache and the next start resumes from there.'))
+            if action != 'yes':
+                return
+            # The run may have ended while the question was open: then
+            # there is nothing to stop, and waiting for its end left the
+            # window open with Close disabled. It closes now, below.
+            if self.translating:
                 self.closing = True
                 self.trans_worker.set_canceled(True)
                 self.cancel_button.setEnabled(False)
                 self.close_button.setEnabled(False)
                 self.progress_label.setText(_('Stopping...'))
+                return
+        if hasattr(self, 'text_view') and not self.text_view.confirm_discard():
             return
+        if hasattr(self, 'style_view'):
+            self._commit_context_edits()
         for thread in (self.prep_thread, self.trans_thread):
             thread.quit()
             thread.wait()
@@ -1981,6 +2060,12 @@ class NovelTranslation(QDialog):
             self._set_chapter_status(idx, self.STATUS_PENDING)
         self.progress_bar.setValue(0)
         self.output_button.setEnabled(False)
+        # Nothing is done any more: the button said "Re-run all" and the
+        # label the progress from before.
+        self._set_start_button(rerun=False)
+        self.progress_label.setText(_(
+            '{done}/{total} chapters done, {pct}% of the text.').format(
+                done=0, total=len(self.chapters_meta), pct=0))
         self._refresh_context_views()
 
     # -- final ebook build -------------------------------------------------

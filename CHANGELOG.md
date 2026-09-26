@@ -1,5 +1,64 @@
 # Changelog
 
+## v1.3.2
+
+**A tidier, more compact interface**
+
+* Every window follows one set of measures, after the KDE guidelines and
+  kept compact: 8 pixels around the content of a window or a tab page, 6
+  between the widgets, nothing added by the containers in between.
+  Settings, the list of a book's translations, the translation window,
+  the comparison, the cache manager and About were each spaced their own
+  way.
+* Sections have bold headings instead of frames: the settings were
+  frames inside a scroll area inside a tab inside a window. The tabs of
+  the translation window lie flat on it. *Save* in the settings sits at
+  the bottom right, where a dialog's actions go, instead of across the
+  whole width.
+* Buttons carry icons, from calibre's own set, so they follow the icon
+  theme chosen in calibre.
+* Hints, figures and notes are in the colour the theme gives secondary
+  text, and every other colour works on a dark theme too: the warning
+  about an edited brief or glossary is a message box in the manner of
+  KDE's, as is the note on why there is no author brief; the chapter
+  marks and the untranslated paragraphs use the Breeze colours; the
+  translation position preview and the code blocks in About no longer
+  come out black on dark grey or light grey on black.
+* Tables read like KDE lists: alternate rows, no grid, compact rows. Long
+  chapter titles are cut short with an ellipsis, and shown whole on
+  hover, instead of scrolling the chapter list sideways.
+* The preparation view shows the cover fitted into a box of its own,
+  the title and the progress under it, and what preparing the book does
+  beside it: a very wide or very narrow cover no longer stretches or
+  squeezes that column.
+
+**Fixes**
+
+* A run that fails marks the chapter it stopped on as failed, and one
+  that is cancelled puts it back to pending: the chapter kept the
+  "running" mark while nothing ran.
+* *Reset context* on a finished book turns *Re-run all* back into *Start /
+  Resume* and the progress line back to nothing done.
+* Closing the window while a run goes on, and answering the question
+  after the run had ended by itself, left the window open with *Close*
+  disabled; it closes.
+* A glossary cell still being edited when the translation starts, or the
+  window closes, is saved first. It could otherwise be written into the
+  cache during the run, which keeps a glossary of its own.
+* Typing in the *Author* tab of a book with nothing translated yet read
+  the whole cache at every key.
+* A new translation cannot be started while the plugin is still finding
+  out whether its model has flex: started before the answer, with flex
+  in the settings, a model without flex failed every request. A model
+  without flex is never left on flex, not even when flex was picked by
+  hand for the model chosen before. A flex endpoint only counts when the
+  provider routing (*Provider: only*, *Provider: ignore*) lets requests
+  reach it.
+* The preview of the translation position keeps the colour of dimmed
+  text when the theme makes it translucent; a section heading is never
+  cut short in a narrow window; the About window's text is owned by the
+  window, and its title grows with a font set in pixels too.
+
 ## v1.3.1
 
 **The author brief and the glossary, in your hands; flex when there is flex**

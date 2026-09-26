@@ -12,7 +12,7 @@ from .lib.utils import open_path
 from .lib.cache import default_cache_path, TranslationCache
 from .lib.book_translations import comparison_problem
 from .lib.config import get_config
-from .components import Footer, AlertMessage
+from .components import Footer, AlertMessage, secondary, with_icon, tidy
 
 
 load_translations()  # type: ignore
@@ -30,7 +30,7 @@ class CacheManager(QDialog):
         self.footer = Footer()
         self.default_path = default_cache_path()
 
-        self.cache_size = QLabel()
+        self.cache_size = secondary(QLabel())
         self.footer.layout().insertWidget(0, self.cache_size)
 
         self.layout = QVBoxLayout(self)
@@ -38,6 +38,7 @@ class CacheManager(QDialog):
         self.layout.addWidget(self.table_widget())
         self.layout.addWidget(self.enable_widget())
         self.layout.addWidget(self.footer)
+        tidy(self)
 
         self.cache_list.selected_rows.connect(
             lambda rows: self.delete_button.setDisabled(len(rows) < 1))
@@ -78,9 +79,10 @@ class CacheManager(QDialog):
         self.cache_path.setReadOnly(True)
         self.cache_path.setPlaceholderText(
             _('Choose a path to store cache files.'))
-        self.cache_move = QPushButton(_('Move'))
-        self.cache_reset = QPushButton(_('Reset'))
-        self.cache_reveal = QPushButton(_('Reveal'))
+        self.cache_move = with_icon(QPushButton(_('Move')), 'tb_folder')
+        self.cache_reset = with_icon(QPushButton(_('Reset')), 'restart')
+        self.cache_reveal = with_icon(
+            QPushButton(_('Reveal')), 'document_open')
 
         layout.addWidget(QLabel(_('Cache Path')))
         layout.addWidget(self.cache_path, 1)
@@ -95,16 +97,18 @@ class CacheManager(QDialog):
         layout = QHBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.clear_button = QPushButton(_('Clear All'))
+        self.clear_button = with_icon(
+            QPushButton(_('Clear All')), 'edit-clear')
         self.clear_button.setDisabled(True)
-        self.delete_button = QPushButton(_('Delete'))
+        self.delete_button = with_icon(QPushButton(_('Delete')), 'trash')
         self.delete_button.setDisabled(True)
-        self.open_button = QPushButton(_('&Open'))
+        self.open_button = with_icon(
+            QPushButton(_('&Open')), 'document_open')
         self.open_button.setToolTip(_(
             'Open the translation, as from its book: to continue it, read '
             'and correct its text, or build the book from it.'))
         self.open_button.setDisabled(True)
-        self.compare_button = QPushButton(_('&Compare'))
+        self.compare_button = with_icon(QPushButton(_('&Compare')), 'diff')
         self.compare_button.setDisabled(True)
 
         layout.addWidget(self.clear_button)

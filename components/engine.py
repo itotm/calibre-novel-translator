@@ -11,6 +11,7 @@ from ..engines import builtin_engines
 from ..engines.genai import GenAI
 
 from .lang import SourceLang, TargetLang
+from .style import secondary, with_icon, tidy
 
 
 load_translations()  # type: ignore
@@ -178,12 +179,12 @@ class EngineTester(QDialog):
         change_target_lang(target_lang.currentText())
         target_lang.currentTextChanged.connect(change_target_lang)
 
-        translate = QPushButton(_('Translate'))
+        translate = with_icon(QPushButton(_('Translate')), 'forward')
         layout.addWidget(translate, 2, 2)
         layout.setColumnStretch(0, 1)
         layout.setColumnStretch(1, 1)
 
-        usage = QLabel(_('Usage: checking...'))
+        usage = secondary(QLabel(_('Usage: checking...')))
         usage.setVisible(False)
         layout.addWidget(usage, 3, 0, 1, 3)
 
@@ -214,6 +215,7 @@ class EngineTester(QDialog):
         def test_translate():
             self.translate_worker.translate.emit(source.toPlainText())
         translate.clicked.connect(test_translate)
+        tidy(self)
 
     def done(self, result):
         QDialog.done(self, result)

@@ -18,14 +18,15 @@ from qt.core import (  # type: ignore
     QPlainTextEdit, QPushButton, QSplitter, QLabel, QLineEdit, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QListWidget, QListWidgetItem, QColor, QBrush, QMenu, QToolButton,
-    QApplication, QEvent, QObject, QFont, QTimer)
+    QApplication, QEvent, QObject, QTimer, QPalette)
 from calibre.utils.localization import _  # type: ignore
 
 from .lib.cache import get_cache
 from .lib.novel import INFO_NOVEL_CHAPTERS
 from .lib.book_translations import (
     alignment_keys, compare_labels, edited_paragraphs, save_translation)
-from .components import AlertMessage
+from .components import (
+    AlertMessage, NEGATIVE, heading, secondary, with_icon, tidy)
 
 
 load_translations()  # type: ignore
@@ -90,9 +91,9 @@ class TranslationText(QWidget):
         self._current = None      # the row in the editor
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(self._layout_search())
         splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setChildrenCollapsible(False)
         splitter.addWidget(self._layout_table())
         splitter.addWidget(self._layout_editor())
         splitter.setStretchFactor(0, 3)
@@ -118,10 +119,10 @@ class TranslationText(QWidget):
         self.search_scope = QComboBox()
         self.search_scope.addItem(_('This chapter'), 'chapter')
         self.search_scope.addItem(_('Whole book'), 'book')
-        search = QPushButton(_('Search'))
+        search = with_icon(QPushButton(_('Search')), 'search')
         search.setAutoDefault(False)
         search.clicked.connect(self.search)
-        self.count_label = QLabel()
+        self.count_label = secondary(QLabel())
         top.addWidget(self.search_field, 1)
         top.addWidget(self.search_scope)
         top.addWidget(search)
@@ -133,7 +134,6 @@ class TranslationText(QWidget):
             label for _cache_id, label in self.sources]
         self.table = QTableWidget(0, len(columns))
         self.table.setHorizontalHeaderLabels(columns)
-        self.table.verticalHeader().setVisible(False)
         self.table.setWordWrap(False)
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
@@ -157,13 +157,12 @@ class TranslationText(QWidget):
     def _layout_editor(self):
         editor = QWidget()
         layout = QGridLayout(editor)
-        layout.setContentsMargins(0, 0, 0, 0)
         panes = QSplitter(Qt.Orientation.Horizontal)
+        panes.setChildrenCollapsible(False)
 
         original = QWidget()
         original_layout = QVBoxLayout(original)
-        original_layout.setContentsMargins(0, 0, 0, 0)
-        original_layout.addWidget(QLabel(_('Original')))
+        original_layout.addWidget(heading(_('Original')))
         self.original_edit = QPlainTextEdit()
         self.original_edit.setReadOnly(True)
         original_layout.addWidget(self.original_edit, 1)
@@ -174,22 +173,20 @@ class TranslationText(QWidget):
         for index, (_cache_id, label) in enumerate(self.sources):
             pane = QWidget()
             pane_layout = QVBoxLayout(pane)
-            pane_layout.setContentsMargins(0, 0, 0, 0)
-            title = QLabel(label if len(self.sources) > 1
-                           else _('Translation'))
-            font = title.font()
-            font.setBold(len(self.sources) > 1)
-            title.setFont(font)
+            title = heading(label if len(self.sources) > 1
+                            else _('Translation'))
             pane_layout.addWidget(title)
             edit = QPlainTextEdit()
             edit.textChanged.connect(self._update_state)
             pane_layout.addWidget(edit, 1)
             buttons = QHBoxLayout()
-            copy = QToolButton()
+            copy = with_icon(QToolButton(), 'edit-copy')
             copy.setText(_('Copy'))
+            copy.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             copy.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
             copy.setMenu(self._copy_menu(index, copy))
-            revert = QPushButton(_('Revert'))
+            revert = with_icon(QPushButton(_('Revert')), 'edit-undo')
             revert.setAutoDefault(False)
             revert.clicked.connect(
                 lambda checked=False, index=index: self._revert(index))
@@ -205,11 +202,11 @@ class TranslationText(QWidget):
             'translation.')
         layout.addWidget(panes, 0, 0, 1, 2)
 
-        self.note = QLabel()
+        self.note = secondary(QLabel())
         self.note.setWordWrap(True)
-        self.save_button = QPushButton(
+        self.save_button = with_icon(QPushButton(
             _('Save corrections') if len(self.sources) > 1
-            else _('Save correction'))
+            else _('Save correction')), 'save')
         self.save_button.setAutoDefault(False)
         self.save_button.setToolTip(_(
             'Write what is changed into the cache of each translation. A '
@@ -466,10 +463,11 @@ class TranslationText(QWidget):
         for column, paragraph in enumerate(paragraphs, start=2):
             if paragraph is None:
                 item = QTableWidgetItem(_('(not in this translation)'))
-                item.setForeground(QBrush(QColor('gray')))
+                item.setForeground(self.table.palette().brush(
+                    QPalette.ColorRole.PlaceholderText))
             elif not (paragraph.translation or '').strip():
                 item = QTableWidgetItem(_('(not translated yet)'))
-                item.setForeground(QBrush(QColor('#dc143c')))
+                item.setForeground(QBrush(QColor(NEGATIVE)))
             else:
                 item = QTableWidgetItem(self._cell(paragraph.translation))
             self.table.setItem(row, column, item)
@@ -658,19 +656,25 @@ class CompareTranslations(QDialog):
 
         layout = QVBoxLayout(self)
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
         left = QWidget()
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(QLabel(_('Chapters')))
+        left_layout.addWidget(heading(_('Chapters')))
         self.chapter_list = QListWidget()
+        self.chapter_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.chapter_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         aux = QListWidgetItem(_('Metadata, contents and front matter'))
         aux.setData(Qt.UserRole, TranslationText.AUX_SECTION)
-        aux.setForeground(QColor('gray'))
+        aux.setForeground(self.chapter_list.palette().brush(
+            QPalette.ColorRole.PlaceholderText))
+        aux.setToolTip(aux.text())
         self.chapter_list.addItem(aux)
         for meta in chapters:
             item = QListWidgetItem('%d. %s' % (
                 meta['index'], meta.get('title') or '?'))
             item.setData(Qt.UserRole, meta['index'])
+            item.setToolTip(meta.get('title') or '')
             self.chapter_list.addItem(item)
         self.text.bind_chapter_list(self.chapter_list)
         left_layout.addWidget(self.chapter_list, 1)
@@ -678,27 +682,26 @@ class CompareTranslations(QDialog):
         splitter.addWidget(self.text)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 4)
+        splitter.setSizes([220, 780])
         layout.addWidget(splitter, 1)
 
         buttons = QHBoxLayout()
-        heading = QLabel(self.title)
-        font = QFont(heading.font())
-        font.setBold(True)
-        heading.setFont(font)
-        reload_button = QPushButton(_('Reload'))
+        title = secondary(QLabel(self.title))
+        reload_button = with_icon(QPushButton(_('Reload')), 'view-refresh')
         reload_button.setAutoDefault(False)
         reload_button.setToolTip(_(
             'Read the translations again from the cache: a run may have '
             'translated more of them since this window opened.'))
         reload_button.clicked.connect(self.text.reload)
-        close_button = QPushButton(_('Close'))
+        close_button = with_icon(QPushButton(_('Close')), 'window-close')
         close_button.setAutoDefault(False)
         close_button.clicked.connect(lambda: self.done(0))
-        buttons.addWidget(heading, 1)
+        buttons.addWidget(title, 1)
         buttons.addWidget(reload_button)
         buttons.addWidget(close_button)
         layout.addLayout(buttons)
 
+        tidy(self)
         self.chapter_list.setCurrentRow(
             1 if self.chapter_list.count() > 1 else 0)
 

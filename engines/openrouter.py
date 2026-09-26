@@ -207,8 +207,8 @@ class OpenRouterTranslate(ChatgptTranslate):
         'provider_quantizations', 'provider_sort',
         'provider_allow_fallbacks', 'provider_require_parameters',
         'provider_data_collection', 'provider_zdr', 'service_tier',
-        'flex_when_available', 'usage_accounting', 'app_referer', 'app_title', 'extra_headers',
-        'extra_body')
+        'flex_when_available', 'usage_accounting', 'app_referer',
+        'app_title', 'extra_headers', 'extra_body')
 
     def __init__(self):
         super().__init__()
@@ -538,36 +538,57 @@ class OpenRouterTranslate(ChatgptTranslate):
         self._provider_slugs[key] = slug
         return slug
 
-    # Model -> whether it has a flex endpoint, for the life of calibre:
-    # the dialog asks again every time the model is chosen.
-    _flex_models: dict[str, bool] = {}
+    # Model -> its endpoints, as (tag, provider name), for the life of
+    # calibre: the dialog asks every time the model is chosen, and the
+    # routing settings of the moment are applied to them on each answer.
+    _model_endpoints: dict[str, list] = {}
 
     def model_has_flex(self, model) -> bool | None:
-        """Whether ``model`` has an endpoint that serves the flex tier;
-        None when the listing could not be read.
+        """Whether ``model`` has an endpoint that serves the flex tier and
+        that the routing settings let a request reach; None when the
+        listing could not be read.
 
         The model listing does not say; the endpoint listing of the
         model does, in the tag of each endpoint ("openai/flex",
-        "google-vertex/global/flex").
+        "google-vertex/global/flex"), whose first part is the routing
+        slug of the provider. A flex endpoint of a provider that
+        ``provider_only`` leaves out or ``provider_ignore`` names is no
+        use: routed away from it, every flex request fails.
         """
         model = str(model or '').strip()
         if not model:
             return None
-        if model in self._flex_models:
-            return self._flex_models[model]
-        try:
-            response = request(
-                'https://openrouter.ai/api/v1/models/%s/endpoints' % model,
-                headers=self.get_headers(), proxy_uri=self.proxy_uri)
-            endpoints = (json.loads(response).get('data') or {}).get(
-                'endpoints') or []
-        except Exception:
-            return None
-        found = any(
-            str(endpoint.get('tag') or '').rsplit('/', 1)[-1] == 'flex'
-            for endpoint in endpoints if isinstance(endpoint, dict))
-        self._flex_models[model] = found
-        return found
+        endpoints = self._model_endpoints.get(model)
+        if endpoints is None:
+            try:
+                response = request(
+                    'https://openrouter.ai/api/v1/models/%s/endpoints'
+                    % model, headers=self.get_headers(),
+                    proxy_uri=self.proxy_uri)
+                listed = (json.loads(response).get('data') or {}).get(
+                    'endpoints') or []
+            except Exception:
+                return None
+            endpoints = [
+                (str(item.get('tag') or ''),
+                 str(item.get('provider_name') or ''))
+                for item in listed if isinstance(item, dict)]
+            self._model_endpoints[model] = endpoints
+        only = parse_list(self.provider_only)
+        ignore = parse_list(self.provider_ignore)
+        for tag, name in endpoints:
+            if tag.rsplit('/', 1)[-1] != 'flex':
+                continue
+            slug = tag.split('/')[0]
+            if only and not any(
+                    self._same_provider(entry, slug, name)
+                    for entry in only):
+                continue
+            if any(self._same_provider(entry, slug, name)
+                   for entry in ignore):
+                continue
+            return True
+        return False
 
     def get_body(self, text):
         return json.dumps(self.extend_body(json.loads(super().get_body(text))))

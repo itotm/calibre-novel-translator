@@ -5,9 +5,9 @@ import os.path
 
 from qt.core import (  # type: ignore
     Qt, QLabel, QDialog, QWidget, QLineEdit, QPushButton, QPlainTextEdit,
-    QTabWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QFileDialog, QColor,
+    QTabWidget, QHBoxLayout, QVBoxLayout, QFileDialog, QColor,
     QIntValidator, QScrollArea, QRadioButton, QGridLayout, QCheckBox, QObject,
-    QButtonGroup, QColorDialog, QSpinBox, QPalette, QApplication, QFrame,
+    QButtonGroup, QColorDialog, QSpinBox, QFrame, QPalette,
     QComboBox, QRegularExpression, pyqtSignal, QFormLayout, QDoubleSpinBox,
     QSpacerItem, QRegularExpressionValidator, QBoxLayout, QThread, pyqtSlot)
 from calibre.gui2 import error_dialog  # type: ignore
@@ -27,7 +27,8 @@ from .engines import (
 from .engines.genai import GenAI
 from .components import (
     Footer, AlertMessage, TargetLang, SourceLang, EngineList, EngineTester,
-    InputFormat, OutputFormat, ModelWorker, set_shortcut)
+    InputFormat, OutputFormat, ModelWorker, set_shortcut, Section,
+    with_icon, secondary, tidy, SPACING)
 
 
 load_translations()  # type: ignore
@@ -58,16 +59,23 @@ def layout_scroll_area(name):
             widget = QWidget()
             layout = QVBoxLayout(widget)
 
+            # No frame: the tab page is the frame, and the sections in
+            # it have headings instead of frames of their own.
             scroll_area = QScrollArea(widget)
             scroll_area.setWidgetResizable(True)
-            if not QApplication.instance().is_dark_theme:
-                scroll_area.setBackgroundRole(QPalette.Light)
+            scroll_area.setFrameShape(QFrame.Shape.NoFrame)
             scroll_area.setWidget(func(dialog))
+            # The page shows through, instead of a box of another grey.
+            scroll_area.viewport().setAutoFillBackground(False)
+            scroll_area.widget().setAutoFillBackground(False)
             layout.addWidget(scroll_area, 1)
 
-            save_button = QPushButton(_('&Save'))
+            save_button = with_icon(QPushButton(_('&Save')), 'save')
             save_button.setObjectName(name)
-            layout.addWidget(save_button)
+            buttons = QHBoxLayout()
+            buttons.addStretch(1)
+            buttons.addWidget(save_button)
+            layout.addLayout(buttons)
 
             def save_current_config():
                 dialog.save_config.emit(dialog.tabs.currentIndex())
@@ -120,10 +128,9 @@ class TranslationSetting(QDialog):
         general_index = self.tabs.addTab(self.layout_general(), _('General'))
         engine_index = self.tabs.addTab(self.layout_engine(), _('Engine'))
         content_index = self.tabs.addTab(self.layout_content(), _('Content'))
-        self.tabs.setStyleSheet('QTabBar::tab {min-width:120px;}')
-
         layout.addWidget(self.tabs)
         layout.addWidget(Footer())
+        tidy(self)
 
         def save_setting(index):
             actions = {
@@ -155,7 +162,7 @@ class TranslationSetting(QDialog):
         layout = QVBoxLayout(widget)
 
         # Output Path
-        radio_group = QGroupBox(_('Output Path'))
+        radio_group = Section(_('Output Path'))
         radio_layout = QHBoxLayout()
         library_radio = QRadioButton(_('Library'))
         self.path_radio = QRadioButton(_('Path'))
@@ -190,7 +197,7 @@ class TranslationSetting(QDialog):
         output_path_button.clicked.connect(choose_output_path)
 
         # preferred Format
-        format_group = QGroupBox(_('Preferred Format'))
+        format_group = Section(_('Preferred Format'))
         format_layout = QFormLayout(format_group)
         input_format = InputFormat()
         output_format = OutputFormat()
@@ -213,7 +220,7 @@ class TranslationSetting(QDialog):
             lambda format: self.config.update(output_format=format))
 
         # Network Proxy
-        proxy_group = QGroupBox(_('Network Proxy'))
+        proxy_group = Section(_('Network Proxy'))
         proxy_layout = QHBoxLayout()
 
         is_proxy_enabled = self.config.get('proxy_enabled', False)
@@ -287,27 +294,24 @@ class TranslationSetting(QDialog):
         misc_layout.setContentsMargins(0, 0, 0, 0)
 
         # Cache
-        cache_group = QGroupBox(_('Cache'))
+        cache_group = Section(_('Cache'))
         cache_layout = QHBoxLayout(cache_group)
         cache_enabled = QCheckBox(_('Enable'))
-        cache_manage = QLabel(_('Manage'))
+        cache_manage = QLabel('<a href="#">%s</a>' % _('Manage'))
         cache_layout.addWidget(cache_enabled)
         cache_layout.addStretch(1)
         cache_layout.addWidget(cache_manage)
         misc_layout.addWidget(cache_group, 1)
 
-        cache_manage.setStyleSheet('color:blue;text-decoration:underline;')
-        cursor = cache_manage.cursor()
-        cursor.setShape(Qt.PointingHandCursor)
-        cache_manage.setCursor(cursor)
-        cache_manage.mouseReleaseEvent = lambda event: self.plugin.show_cache()
+        cache_manage.linkActivated.connect(
+            lambda link: self.plugin.show_cache())
 
         cache_enabled.setChecked(self.config.get('cache_enabled'))
         cache_enabled.toggled.connect(
             lambda checked: self.config.update(cache_enabled=checked))
 
         # Job Log
-        log_group = QGroupBox(_('Job Log'))
+        log_group = Section(_('Job Log'))
         log_translation = QCheckBox(_('Show translation'))
         log_layout = QVBoxLayout(log_group)
         log_layout.addWidget(log_translation)
@@ -315,7 +319,7 @@ class TranslationSetting(QDialog):
         misc_layout.addWidget(log_group, 1)
 
         # Notification
-        notice_group = QGroupBox(_('Notification'))
+        notice_group = Section(_('Notification'))
         notice_layout = QHBoxLayout(notice_group)
         notice = QCheckBox(_('Enable'))
         notice_layout.addWidget(notice)
@@ -341,7 +345,7 @@ class TranslationSetting(QDialog):
         layout = QVBoxLayout(widget)
 
         # Translate Engine
-        engine_group = QGroupBox(_('Translation Engine'))
+        engine_group = Section(_('Translation Engine'))
         engine_layout = QHBoxLayout(engine_group)
         engine_list = EngineList(self.current_engine.name)
         engine_test = QPushButton(_('Test'))
@@ -355,7 +359,7 @@ class TranslationSetting(QDialog):
             lambda: engine_group.setDisabled(False))
 
         # Using Tip
-        self.tip_group = QGroupBox(_('Usage Tip'))
+        self.tip_group = Section(_('Usage Tip'))
         tip_layout = QVBoxLayout(self.tip_group)
         self.using_tip = QLabel()
         self.using_tip.setTextFormat(Qt.RichText)
@@ -365,7 +369,7 @@ class TranslationSetting(QDialog):
         layout.addWidget(self.tip_group)
 
         # API Keys
-        self.keys_group = QGroupBox(_('API Keys'))
+        self.keys_group = Section(_('API Keys'))
         keys_layout = QVBoxLayout(self.keys_group)
         self.api_keys = QPlainTextEdit()
         self.api_keys.setFixedHeight(100)
@@ -380,7 +384,7 @@ class TranslationSetting(QDialog):
             len(self.api_keys.toPlainText().strip().split('\n')) > 1))
 
         # preferred Language
-        language_group = QGroupBox(_('Preferred Language'))
+        language_group = Section(_('Preferred Language'))
         language_layout = QFormLayout(language_group)
         self.source_lang = SourceLang()
         self.target_lang = TargetLang()
@@ -391,7 +395,7 @@ class TranslationSetting(QDialog):
         self.apply_form_layout_policy(language_layout)
 
         # Network Request
-        request_group = QGroupBox(_('HTTP Request'))
+        request_group = Section(_('HTTP Request'))
         request_interval = QDoubleSpinBox()
         request_interval.setRange(0, 999999)
         request_interval.setDecimals(1)
@@ -407,7 +411,7 @@ class TranslationSetting(QDialog):
         layout.addWidget(request_group)
 
         # Abort Translation
-        abort_translation_group = QGroupBox(_('Abort Translation'))
+        abort_translation_group = Section(_('Abort Translation'))
         abort_translation_layout = QHBoxLayout(abort_translation_group)
         max_error_count = QSpinBox()
         max_error_count.setMinimum(0)
@@ -425,7 +429,7 @@ class TranslationSetting(QDialog):
         self.disable_wheel_event(request_timeout)
 
         # GenAI Setting
-        genai_group = QGroupBox(_('Fine-tuning'))
+        genai_group = Section(_('Fine-tuning'))
         genai_group.setVisible(False)
         genai_layout = QFormLayout(genai_group)
         self.apply_form_layout_policy(genai_layout)
@@ -460,7 +464,7 @@ class TranslationSetting(QDialog):
 
         genai_model_limits = QLabel()
         genai_model_limits.setWordWrap(True)
-        genai_model_limits.setStyleSheet('color:grey;')
+        secondary(genai_model_limits)
         genai_model_limits.setToolTip(_(
             'What the provider says about the selected model. The reply '
             'limit is the one that matters most here: a chunk '
@@ -494,11 +498,11 @@ class TranslationSetting(QDialog):
         sampling_layout.addWidget(temperature)
         sampling_layout.addWidget(temperature_label)
         sampling_layout.addWidget(temperature_value)
-        sampling_layout.addSpacing(20)
+        sampling_layout.addSpacing(2 * SPACING)
         sampling_layout.addWidget(top_p)
         sampling_layout.addWidget(top_p_label)
         sampling_layout.addWidget(top_p_value)
-        sampling_layout.addSpacing(20)
+        sampling_layout.addSpacing(2 * SPACING)
         sampling_layout.addWidget(top_k)
         sampling_layout.addWidget(top_k_value)
         sampling_layout.addStretch(1)
@@ -547,7 +551,7 @@ class TranslationSetting(QDialog):
         layout.addWidget(genai_group)
 
         # OpenRouter Setting (visible only for the OpenRouter engine).
-        openrouter_group = QGroupBox(_('OpenRouter'))
+        openrouter_group = Section(_('OpenRouter'))
         openrouter_group.setVisible(False)
         openrouter_layout = QFormLayout(openrouter_group)
         self.apply_form_layout_policy(openrouter_layout)
@@ -928,7 +932,7 @@ class TranslationSetting(QDialog):
                 openrouter_loading.clear()
 
         # The pipeline's own settings: chapters, chunks, context, prompts.
-        novel_group = QGroupBox(_('Chapters and context'))
+        novel_group = Section(_('Chapters and context'))
         novel_group.setVisible(False)
         novel_layout = QFormLayout(novel_group)
         self.apply_form_layout_policy(novel_layout)
@@ -2275,21 +2279,30 @@ class TranslationSetting(QDialog):
         position_samples = QWidget()
         position_samples_layout = QVBoxLayout(position_samples)
         position_samples_layout.setContentsMargins(0, 0, 0, 0)
-        position_samples_layout.setSpacing(10)
+        position_samples_layout.setSpacing(SPACING)
         original_sample = QLabel(_('Original'))
         original_sample.setAlignment(Qt.AlignCenter)
         original_sample.setWordWrap(True)
-        original_sample.setStyleSheet(
-            'border:1px solid rgba(127,127,127,.3);'
-            'background-color:rgba(127,127,127,.1);padding:10px;'
-            'color:rgba(0,0,0,.3);font-size:28px;')
+        # In the colours of the palette, so a dark theme shows them too:
+        # the original dimmed, the translation in the colour of text.
+        sample_style = (
+            'border:1px solid rgba(127,127,127,.3);border-radius:4px;'
+            'background-color:rgba(127,127,127,.1);padding:%dpx;'
+            'color:%s;font-size:%dpt;')
+        sample_size = 2 * max(self.font().pointSize(), 9)
+        palette = self.palette()
+
+        def css(role):
+            # With its alpha: a style may give the placeholder colour as
+            # the text colour made translucent, which name() drops.
+            return 'rgba(%d,%d,%d,%d)' % palette.color(role).getRgb()
+        original_sample.setStyleSheet(sample_style % (
+            SPACING, css(QPalette.ColorRole.PlaceholderText), sample_size))
         translation_sample = QLabel(_('Translation'))
         translation_sample.setAlignment(Qt.AlignCenter)
         translation_sample.setWordWrap(True)
-        translation_sample.setStyleSheet(
-            'border:1px solid rgba(127,127,127,.3);'
-            'background-color:rgba(127,127,127,.1);padding:10px;'
-            'color:black;font-size:28px;')
+        translation_sample.setStyleSheet(sample_style % (
+            SPACING, css(QPalette.ColorRole.WindowText), sample_size))
         position_samples_layout.addWidget(original_sample, 1)
         position_samples_layout.addWidget(translation_sample, 1)
 
@@ -2338,15 +2351,15 @@ class TranslationSetting(QDialog):
 
         position_preview = QWidget()
         position_preview_layout = QVBoxLayout(position_preview)
-        position_preview_layout.setSpacing(10)
+        position_preview_layout.setSpacing(SPACING)
         position_preview_layout.setContentsMargins(0, 0, 0, 0)
         position_preview_layout.addWidget(position_samples, 1)
         position_preview_layout.addWidget(position_setup)
 
-        position_group = QGroupBox(_('Translation Position'))
+        position_group = Section(_('Translation Position'))
         position_layout = QHBoxLayout(position_group)
         position_layout.addWidget(position_preview, 1)
-        position_layout.addSpacing(10)
+        position_layout.addSpacing(SPACING)
         position_layout.addWidget(position_radios)
 
         layout.addWidget(position_group)
@@ -2387,7 +2400,7 @@ class TranslationSetting(QDialog):
         color_group_layout.setContentsMargins(0, 0, 0, 0)
 
         # Original text color
-        original_color_group = QGroupBox(_('Original Text Color'))
+        original_color_group = Section(_('Original Text Color'))
         original_color_layout = QHBoxLayout(original_color_group)
         self.original_color = QLineEdit()
         self.original_color.setText(self.config.get('original_color'))
@@ -2406,7 +2419,7 @@ class TranslationSetting(QDialog):
         color_group_layout.addWidget(original_color_group)
 
         # Translation Color
-        translation_color_group = QGroupBox(_('Translation Text Color'))
+        translation_color_group = Section(_('Translation Text Color'))
         translation_color_layout = QHBoxLayout(translation_color_group)
         self.translation_color = QLineEdit()
         self.translation_color.setPlaceholderText(
@@ -2460,7 +2473,7 @@ class TranslationSetting(QDialog):
         translation_color_button.clicked.connect(translation_color_picker.open)
 
         # Priority element
-        priority_group = QGroupBox(_('Priority Element'))
+        priority_group = Section(_('Priority Element'))
         priority_layout = QVBoxLayout(priority_group)
         self.priority_rules = QPlainTextEdit()
         self.priority_rules.setPlaceholderText(
@@ -2477,7 +2490,7 @@ class TranslationSetting(QDialog):
         layout.addWidget(priority_group)
 
         # Ignore element
-        element_group = QGroupBox(_('Ignore Element'))
+        element_group = Section(_('Ignore Element'))
         element_layout = QVBoxLayout(element_group)
         self.ignore_rules = QPlainTextEdit()
         self.ignore_rules.setPlaceholderText(
@@ -2497,7 +2510,7 @@ class TranslationSetting(QDialog):
         layout.addWidget(element_group)
 
         # Filter Content
-        filter_group = QGroupBox(_('Ignore Paragraph'))
+        filter_group = Section(_('Ignore Paragraph'))
         filter_layout = QVBoxLayout(filter_group)
 
         scope_group = QWidget()
@@ -2580,7 +2593,7 @@ class TranslationSetting(QDialog):
         mode_btn_group.idClicked.connect(choose_filter_mode)
 
         # Reserve element
-        reserve_group = QGroupBox(_('Reserve Element'))
+        reserve_group = Section(_('Reserve Element'))
         reserve_layout = QVBoxLayout(reserve_group)
         self.reserve_rules = QPlainTextEdit()
         self.reserve_rules.setPlaceholderText(
@@ -2597,7 +2610,7 @@ class TranslationSetting(QDialog):
         layout.addWidget(reserve_group)
 
         # Ebook Metadata
-        metadata_group = QGroupBox(_('Ebook Metadata'))
+        metadata_group = Section(_('Ebook Metadata'))
         metadata_layout = QFormLayout(metadata_group)
         self.apply_form_layout_policy(metadata_layout)
         self.metadata_translation = QCheckBox(
