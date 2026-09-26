@@ -247,6 +247,11 @@ defaults: dict[str, Any] = {
     # model wrote a confident one; asked first whether it can name real
     # books by that name, the same model says no.
     'novel_author_check': True,
+    # Words of the book sent with the request for the brief, half from
+    # its opening and half from its middle; 0 sends none. Given only the
+    # title, models put a book in the wrong one of its author's series;
+    # given the names and the period of the text, they placed it right.
+    'novel_author_excerpt_words': 2000,
     # How direct speech is punctuated. 'auto' reads it off the source,
     # chapter by chapter, and states the answer in every request; a key
     # of lib.novel.DIALOGUE_CONVENTIONS prescribes that convention;

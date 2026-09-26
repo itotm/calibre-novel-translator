@@ -16,7 +16,7 @@ from ...lib.novel import (
     detect_dialogue_style, detect_book_dialogue_style,
     dialogue_convention_style, dialogue_instruction, collapse_blank_lines,
     DIALOGUE_CONVENTIONS,
-    NO_AUTHOR_INFORMATION,
+    NO_AUTHOR_INFORMATION, book_excerpt,
     INFO_NOVEL_SUMMARIES, INFO_NOVEL_GLOSSARY, INFO_NOVEL_PROGRESS,
     INFO_NOVEL_STYLE, INFO_NOVEL_STYLE_NOTE)
 
@@ -3233,18 +3233,78 @@ class TestAuthorBrief(unittest.TestCase):
                 self.assertEqual('', translator._ensure_author_style())
                 self.assertIn(expected, self._note(translator))
 
-    def test_the_prompt_is_about_the_author_not_the_book(self):
+    def test_the_prompt_asks_for_what_sets_the_author_apart(self):
         engine = FakeEngine(translate_side_effect=lambda text, prompt: BRIEF)
         translator = self._translator(engine=engine)
         self.assertEqual(BRIEF, translator._ensure_author_style())
         sent = engine.translate_calls[-1]['text']
         self.assertIn('Author: Italo Calvino', sent)
         self.assertIn('Book: Il barone rampante', sent)
-        self.assertIn('Do not search anything', sent)
-        self.assertIn('nothing about the plot, the setting', sent)
-        self.assertIn('this author and no other', sent)
+        self.assertIn('do not search anything', sent)
+        self.assertIn('Be specific', sent)
+        self.assertIn('from the title alone', sent)
+        self.assertIn('leave it out silently', sent)
         self.assertNotIn('{author}', sent)
-        self.assertNotIn('{sources}', sent)
+        self.assertNotIn('{excerpt}', sent)
+        # No chapters, no excerpt, and no dangling blank at the end.
+        self.assertNotIn('Excerpts from this book', sent)
+        self.assertTrue(sent.endswith('Translation language: Italian'),
+                        sent[-80:])
+
+    def _chapters(self):
+        story = ('Cosimo climbed the holm oak and said he would never come '
+                 'down again, and his father stood below it shouting. ')
+        opening = [
+            make_paragraph(0, 'Chapter One'),
+            make_paragraph(1, 'Copyright notice {{id_00000}} ' * 10),
+            make_paragraph(2, story * 3, ignored=True),
+            make_paragraph(3, story * 2)]
+        middle = [make_paragraph(10 + i, 'Middle %d. ' % i + story * 2)
+                  for i in range(6)]
+        return [Chapter(1, 'One', ['a'], opening),
+                Chapter(2, 'Two', ['b'], middle)]
+
+    def test_the_request_carries_an_excerpt_of_the_book(self):
+        engine = FakeEngine(translate_side_effect=lambda text, prompt: BRIEF)
+        translator = self._translator(
+            {'novel_author_excerpt_words': 60}, engine=engine)
+        translator.chapters = self._chapters()
+        self.assertEqual(BRIEF, translator._ensure_author_style())
+        sent = engine.translate_calls[-1]['text']
+        self.assertIn('Excerpts from this book', sent)
+        self.assertIn('[Opening]\nCopyright notice', sent)
+        self.assertIn('[From the middle]\nMiddle', sent)
+        self.assertNotIn('{{id_', sent)
+        self.assertNotIn('Chapter One', sent)
+        logged = ' '.join(
+            str(c.args[0]) for c in translator.log.call_args_list)
+        self.assertIn('words of the book', logged)
+
+    def test_the_excerpt_can_be_turned_off(self):
+        engine = FakeEngine(translate_side_effect=lambda text, prompt: BRIEF)
+        translator = self._translator(
+            {'novel_author_excerpt_words': 0}, engine=engine)
+        translator.chapters = self._chapters()
+        translator._ensure_author_style()
+        self.assertNotIn('Excerpts from this book',
+                         engine.translate_calls[-1]['text'])
+
+    def test_the_excerpt_takes_whole_prose_paragraphs_from_two_places(self):
+        chapters = self._chapters()
+        excerpt = book_excerpt(chapters, 60)
+        opening, middle = excerpt.split('\n\n[From the middle]\n')
+        # Headings and ignored paragraphs are not prose to show.
+        self.assertNotIn('Chapter One', excerpt)
+        # Paragraph 3 says it twice; the ignored one would add three.
+        self.assertEqual(2, opening.count('holm oak'))
+        # About 30 words each, in whole paragraphs; the second stretch
+        # starts halfway through the prose, not where the first stopped.
+        self.assertTrue(middle.startswith('Middle 2.'), middle)
+        self.assertNotIn('Middle 3.', middle)
+        # A book too short for two stretches gives one.
+        self.assertNotIn('[From the middle]', book_excerpt(chapters, 2000))
+        self.assertEqual('', book_excerpt(chapters, 0))
+        self.assertEqual('', book_excerpt([], 2000))
 
     def test_a_setting_stored_as_auto_asks_the_model(self):
         translator = self._translator({'novel_author_style': 'auto'})

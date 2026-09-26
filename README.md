@@ -31,14 +31,19 @@ the story at all: a copyright page, a list of the author's other books, a
 preface or a note is translated but leaves nothing in the running context.
 
 **The author is asked about once.** Before the first chapter one request
-asks how this author habitually writes, the register, the texture of the
-sentences, the use of irony, dialect or period language, and the answer is
-repeated in the prompt of every chapter. The brief is about the author in
-general, never about the book: the model is told to say nothing of its
-plot, setting or period, which the translation reads off the text. A
-model that knows nothing reliable about the author says so, and the
-Author tab of the window says so too, rather than carry a brief the
-model made up. You can write the brief yourself there instead.
+asks how this author writes, in the series the book belongs to: the
+narrator, the voices of the recurring characters, the humour, the oaths,
+titles and forms of address, and what they call for in the target
+language. The answer is repeated in the prompt of every chapter. The
+request carries about 2000 words of the book, from its opening and its
+middle, so the model tells the series from the names and the period in
+the text rather than guessing it from the title, and checks what it
+remembers against the prose. It is told to leave out the plot, and
+whatever it cannot state with confidence, rather than pad the brief with
+what fits any writer of the genre. A model that knows nothing reliable
+about the author says so, and the Author tab of the window says so too,
+rather than carry a brief the model made up. You can write the brief
+yourself there instead.
 
 **Dialogue punctuated like the source.** The quotation marks of the source
 are read once, chapter by chapter, and the convention most chapters use is
@@ -105,7 +110,7 @@ It writes `../novel-translator_v<version>.zip`, checks that the archive is
 installable and prints the command that installs it:
 
 ```sh
-calibre-customize -a ../novel-translator_v1.3.2.zip
+calibre-customize -a ../novel-translator_v1.3.3.zip
 ```
 
 In the GUI the equivalent is *Preferences → Plugins → Load plugin from
@@ -184,7 +189,8 @@ and the sampling, then a section for the engine's own options and the
   whether the last chapter skips them, and whether those calls may spend
   reasoning tokens;
 * what to do with paragraphs the model never returns;
-* whether the author brief is asked for, and how dialogue is punctuated;
+* whether the author brief is asked for, how much of the book goes with
+  the request, and how dialogue is punctuated;
 * the translation prompt, plain prose with no mandatory placeholder. The
   summary, glossary and author-brief prompts are the plugin's own: they
   ask for a shape the code parses, and are not settings.

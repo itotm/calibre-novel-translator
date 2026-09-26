@@ -1568,17 +1568,18 @@ class TranslationSetting(QDialog):
         novel_author_style.addItem(_('Do not ask'), 'off')
         novel_author_style.setToolTip(_(
             'Before the first chapter, ask the model once how this '
-            'author habitually writes: the register, the texture of the '
-            'sentences, the use of dialect or period language. The '
-            'answer is repeated in the prompt of every chapter so the '
-            'translation keeps the author\'s manner instead of drifting '
-            'into neutral prose.\n\n'
-            'It costs one small request per book. The brief is about the '
-            'author in general, never about this book: the model is told '
-            'to say nothing of its plot, setting or period, which the '
-            'translation reads off the text itself. An answer that '
-            'admits it knows nothing about the author is discarded '
-            'rather than used.\n\n'
+            'author writes, in the series this book belongs to: the '
+            'narrator, the voices of the recurring characters, the '
+            'humour, the oaths, titles and forms of address, and what '
+            'they call for in the target language. The answer is '
+            'repeated in the prompt of every chapter so the translation '
+            'keeps the author\'s manner instead of drifting into neutral '
+            'prose.\n\n'
+            'It costs one small request per book. The model is told to '
+            'leave out the plot, and whatever it cannot state with '
+            'confidence, rather than fill the brief with what fits any '
+            'writer of the genre. An answer that admits it knows nothing '
+            'about the author is discarded rather than used.\n\n'
             'The book needs an author in its calibre metadata. The brief '
             'is stored with the summaries, so it is paid for once and '
             'reused when you resume; "Reset context" in the translation '
@@ -1604,6 +1605,25 @@ class TranslationSetting(QDialog):
             'for the brief, which keeps it about this author and not '
             'another of the same name.'))
         novel_layout.addRow(_('The author'), novel_author_check)
+
+        novel_author_excerpt = QSpinBox()
+        novel_author_excerpt.setRange(0, 20000)
+        novel_author_excerpt.setSingleStep(500)
+        novel_author_excerpt.setSuffix(_(' words'))
+        novel_author_excerpt.setSpecialValueText(_('None'))
+        novel_author_excerpt.setToolTip(_(
+            'How much of the book goes with the request for the author '
+            'brief: half from its opening, where the historical note and '
+            'the list of characters usually are, half from its middle. '
+            '0 sends none.\n\n'
+            'The default of 2000 words is about 3000 tokens, once per '
+            'book. Asked with the title alone, models placed a book in '
+            'the wrong one of its author\'s series, or described another '
+            'writer\'s detective. With the text in front of them they '
+            'named the right series from its names and its period, and '
+            'based the brief on its actual prose.'))
+        novel_layout.addRow(_('Book text for the brief'), novel_author_excerpt)
+        self.disable_wheel_event(novel_author_excerpt)
 
         novel_dialogue = QComboBox()
         novel_dialogue.addItem(_('Follow the source'), 'auto')
@@ -1754,6 +1774,8 @@ class TranslationSetting(QDialog):
                 self.config.get('novel_translation_prompt') or '')
             novel_author_check.setChecked(bool(self.config.get(
                 'novel_author_check', True)))
+            novel_author_excerpt.setValue(int(self.config.get(
+                'novel_author_excerpt_words', 2000) or 0))
             author_style = self.config.get(
                 'novel_author_style', 'model') or 'model'
             if author_style != 'off':
@@ -1879,6 +1901,8 @@ class TranslationSetting(QDialog):
         novel_author_check.toggled.connect(
             lambda checked: self.config.update(
                 novel_author_check=bool(checked)))
+        novel_author_excerpt.valueChanged.connect(
+            _persist_novel('novel_author_excerpt_words', int))
         novel_dialogue.currentIndexChanged.connect(
             lambda _idx: self.config.update(
                 novel_dialogue_convention=novel_dialogue.currentData()))

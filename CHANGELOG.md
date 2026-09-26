@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.3.3
+
+**An author brief about this author, not about the genre**
+
+* The request for the brief carries about 2000 words of the book, half
+  from its opening and half from its middle, and asks for the manner of
+  the series the book belongs to: the narrator, the voices of the
+  recurring characters, the humour and whom it targets, the oaths,
+  titles and forms of address, and what they call for in the target
+  language, formal and familiar address included. Asked for the author's
+  manner in general, every model wrote much the same brief for every
+  writer of historical mysteries, and GPT-6 Luna Pro filled it with "it
+  varies" and "no reliable information on this". Asked with the title
+  alone, models put a Paul Doherty novel in the wrong one of his series
+  or credited it with another writer's detective; with the text in front
+  of them DeepSeek V4 Flash, V4.1 Flash and GPT-6 Luna Pro all named the
+  right series, and quoted the book's own titles and oaths.
+* The brief leaves out what the model cannot state with confidence
+  instead of saying so, leaves the names to the glossary, and is 200 to
+  350 words.
+* *Book text for the brief* in the settings sets how many words go with
+  the request; 0 sends none, which is how the brief was asked for
+  until now.
+
 ## v1.3.2
 
 **A tidier, more compact interface**

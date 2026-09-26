@@ -1278,47 +1278,125 @@ DEFAULT_NOVEL_AUTHOR_CHECK_PROMPT = (
     'Book in hand: {title}')
 
 
-# The brief is about the author's manner in general, not about the
-# book: a model asked about "this author and this book" declined every
-# time it did not know the book itself, and one given web results about
-# the author's other series placed the book in the wrong century. The
-# translator has the text for everything the book alone would tell.
+# The brief asks for what sets the author apart, series by series, and
+# says what it means in the target language. Asked for "the author's
+# manner in general, not this book", every model wrote the same brief
+# for every writer of historical mysteries ("clear prose, functional
+# dialogue"), and one hedged each point ("it varies", "no reliable
+# information on this") instead of leaving it out. What keeps the brief
+# on the right book is the excerpt the pipeline appends (see
+# ``book_excerpt``): from the names and the period in it every model
+# tested told which of the author's series the book belongs to, where
+# from the title alone they placed it in another series or credited it
+# to another writer's detective. The title is never evidence enough.
 DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT = (
-    'You are preparing a brief for the translator of a novel by '
-    '{author}. Describe how this author habitually writes, from what '
-    'you know of their published work and of what critics, reviewers '
-    'and translators have said about it, so that the manner can be '
-    'reproduced in <tlang>. Do not search anything.\n\n'
-    'The brief is about the author\'s manner in general, not about this '
-    'book: the translator has the text and will see for themselves what '
-    'it is about, where and when it is set and who is in it. Say '
-    'nothing about the plot, the setting, the period, the characters or '
-    'the series of this book, and do not guess any of them from the '
-    'title. Describe only what holds across the author\'s work.\n\n'
-    'Make sure you are describing this author and no other. If the '
-    'name belongs to several writers and you cannot tell which one '
-    'wrote this book, or if you know the name but not the prose, do not '
-    'describe someone else and do not fill the gaps with what novels of '
-    'that kind are usually like: give the reply below instead.\n\n'
-    'Cover, in this order and only what you can support: the genres the '
-    'author works in; the narrative voice and the point of view they '
-    'favour; the texture of the sentences (long or short, plain or '
-    'ornate, paratactic or heavily subordinated); the level of the '
-    'vocabulary; how dialogue is written and how much of a book is '
-    'dialogue; the use of humour, irony, dialect, slang or period '
-    'language; recurring stylistic habits worth preserving; and '
-    'anything translators of this author are known to get wrong.\n\n'
-    'Write 150 to 300 words of plain prose in <tlang>. Do not review or '
-    'praise, do not give advice that would apply to any novel, and '
-    'invent nothing. Only if you know nothing reliable about how this '
-    'author writes, reply with exactly: %s\n\n'
-    'Reply with the brief itself and nothing else: no preamble, no '
-    'headings, no lists, no citations, no closing remarks.\n\n'
+    'You are preparing a brief for the translator of "{title}" by '
+    '{author}, from <slang> into <tlang>. The translator works on the '
+    'book a few pages at a time. What they lack is what a reader who '
+    'knows this writer brings to it: how the prose sounds across the '
+    'book and the series, and which choices keep it sounding that way '
+    'in <tlang>. Answer from what you know; do not search anything.\n\n'
+    'Start from the most specific thing you know for certain. If you '
+    'can tell which of the author\'s series this book belongs to, '
+    'describe the manner of that series: who narrates and from how '
+    'close, the voice of the protagonist, how the recurring characters '
+    'speak and differ from one another. An author with several series '
+    'often writes each one differently, and the series is what the '
+    'translator needs. If you cannot tell, describe the author\'s manner '
+    'across the work you know: not knowing this particular book is no '
+    'reason to decline. Never work out a series, a period or a '
+    'protagonist from the title alone.\n\n'
+    'Be specific. What would fit any writer of the genre is of no use '
+    'to the translator: "clear prose", "functional dialogue", "a brisk '
+    'pace", "period vocabulary". Name what sets this author apart: the '
+    'narrator\'s habits, the shape of the sentences in description and '
+    'in action, the tone of the humour and whom it targets, the '
+    'recurring oaths, titles, forms of address and period or foreign '
+    'terms, the mannerisms of the main characters, and what a '
+    'translation would most easily flatten. Then say what that means in '
+    '<tlang>: the register of the narration, how formal and familiar '
+    'address should be rendered between the kinds of characters the '
+    'book has, how titles, oaths and period words are best carried '
+    'over, and what must not be modernised, smoothed or made more '
+    'literary. Leave the names of people and places as they are: the '
+    'glossary settles them.\n\n'
+    'Do not recount the plot or reveal how anything ends, do not review '
+    'or praise, and do not explain how you know what you say. Leave out '
+    'whatever you cannot state with confidence, and leave it out '
+    'silently: never write that something is unknown, that it varies, '
+    'or that no reliable information exists.\n\n'
+    'Only if you know nothing reliable about how this author writes, or '
+    'the name belongs to several writers and you cannot tell which one '
+    'wrote this book, reply with exactly: %s\n\n'
+    'Write 200 to 350 words of plain prose in <tlang>. Reply with the '
+    'brief itself and nothing else: no preamble, no headings, no lists, '
+    'no citations, no closing remarks.\n\n'
     'Author: {author}\n'
     'Known works of this author, for orientation: {works}\n'
     'Book: {title}\n'
     'Original language: <slang>\n'
-    'Translation language: <tlang>') % NO_AUTHOR_INFORMATION
+    'Translation language: <tlang>\n\n'
+    '{excerpt}') % NO_AUTHOR_INFORMATION
+
+# What the excerpt appended to the brief request is for. Without the
+# last sentence models wrote about "the opening pages" and "the passage
+# from the middle" instead of about the book.
+AUTHOR_EXCERPT_INTRO = (
+    'Excerpts from this book follow: its opening pages, which may be '
+    'front matter, a historical note or a prologue in another voice, '
+    'and a stretch from the middle. Use them to recognise the book or '
+    'its series from the names, the period and the setting they show, '
+    'and to check what you remember against the prose itself: where '
+    'the two disagree, the excerpts win. Quote a few words of them when '
+    'that makes a point, but write about the book and not about the '
+    'excerpts: do not summarise them or refer to them.')
+
+# The shortest paragraph the excerpt takes, in characters: anything
+# shorter is a heading, a line of the table of contents, a title page.
+AUTHOR_EXCERPT_MIN_CHARS = 150
+
+
+def book_excerpt(chapters, words):
+    """Two stretches of the book's prose, for the author brief.
+
+    The opening, which is where the front matter, the historical note
+    and the list of characters are, and a stretch from the middle, which
+    is the story itself with its dialogue: about ``words`` words in all,
+    half each, whole paragraphs only. Paragraphs shorter than
+    ``AUTHOR_EXCERPT_MIN_CHARS`` are skipped, and so are those the
+    translation ignores. '' when ``words`` is 0 or the book has no prose.
+    """
+    words = int(words or 0)
+    if words <= 0:
+        return ''
+    prose = []
+    for chapter in chapters or ():
+        for paragraph in chapter.paragraphs:
+            if getattr(paragraph, 'ignored', False):
+                continue
+            text = _PLACEHOLDER_RE.sub(' ', paragraph.original or '')
+            text = re.sub(r'\s+', ' ', text).strip()
+            if len(text) >= AUTHOR_EXCERPT_MIN_CHARS:
+                prose.append(text)
+    half = max(1, words // 2)
+
+    def take(texts):
+        taken, count = [], 0
+        for text in texts:
+            if count >= half:
+                break
+            taken.append(text)
+            count += len(text.split())
+        return taken
+    opening = take(prose)
+    if not opening:
+        return ''
+    middle = take(prose[max(len(opening), len(prose) // 2):])
+    parts = ['%s\n%s' % (model_text('[Opening]'), '\n\n'.join(opening))]
+    if middle:
+        parts.append('%s\n%s' % (
+            model_text('[From the middle]'), '\n\n'.join(middle)))
+    return '\n\n'.join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -2641,6 +2719,23 @@ class NovelTranslator:
         return bool(self._cfg('novel_author_check', True))
 
     @property
+    def author_excerpt_words(self):
+        """How many words of the book go with the request for the brief,
+        half from its opening and half from its middle (see
+        ``book_excerpt``); 0 sends none.
+
+        2000 by default, about 3000 tokens once per book. Without them
+        the brief rests on the title: asked about a Paul Doherty novel,
+        models placed it in the wrong one of his series, or described
+        another writer's detective. With them every model tested named
+        the right series and quoted the book's own oaths and titles.
+        """
+        try:
+            return max(0, int(self._cfg('novel_author_excerpt_words', 2000)))
+        except (TypeError, ValueError):
+            return 2000
+
+    @property
     def dialogue_convention(self):
         """How the system prompt states the punctuation of direct
         speech. ``'auto'`` (the default) reads it off the source text,
@@ -3266,14 +3361,23 @@ class NovelTranslator:
                         shared=(_('; it warns that more than one writer '
                                   'has this name') if known.get(
                                       'shared_name') else '')))
-        self.log(_('Author brief: asking the model how "{author}" '
-                   'writes.').format(author=author))
+        excerpt = book_excerpt(self.chapters, self.author_excerpt_words)
+        if excerpt:
+            self.log(_('Author brief: asking the model how "{author}" '
+                       'writes, with {words} words of the book.').format(
+                           author=author, words=len(excerpt.split())))
+            excerpt = '%s\n\n%s' % (
+                model_text(AUTHOR_EXCERPT_INTRO), excerpt)
+        else:
+            self.log(_('Author brief: asking the model how "{author}" '
+                       'writes.').format(author=author))
         user_prompt = self._compose_prompt(
             self.author_style_prompt,
             {'{author}': (model_text('Author:'), author),
              '{works}': (model_text('Known works:'), works),
-             '{title}': (model_text('Book:'), self.book_title)},
-            required=('{author}', '{title}'))
+             '{title}': (model_text('Book:'), self.book_title),
+             '{excerpt}': (None, excerpt)},
+            required=('{author}', '{title}', '{excerpt}')).rstrip()
         system_prompt = self._fill_placeholders(model_text(
             'You research how books are written and answer in plain '
             'prose, saying only what you can support.'))

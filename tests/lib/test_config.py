@@ -79,6 +79,7 @@ class TestFunction(unittest.TestCase):
             'novel_front_matter_min_chars': 100,
             'novel_author_style': 'model',
             'novel_author_check': True,
+            'novel_author_excerpt_words': 2000,
             'novel_dialogue_convention': 'auto',
             'novel_dialogue_rules': None,
             'novel_translation_prompt': None,
