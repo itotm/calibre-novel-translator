@@ -1289,6 +1289,13 @@ DEFAULT_NOVEL_AUTHOR_CHECK_PROMPT = (
 # tested told which of the author's series the book belongs to, where
 # from the title alone they placed it in another series or credited it
 # to another writer's detective. The title is never evidence enough.
+#
+# The last paragraph settles formal and familiar address pair by pair.
+# The chunks of a chapter are translated apart, several at once, and
+# none sees what the others chose: asked only to "keep the form stable
+# for each pair", GPT-6 Luna Pro had two friends switch from "tu" to
+# "voi" and back within a page. The brief reaches every chunk, so the
+# decision taken once there is the one every chunk follows.
 DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT = (
     'You are preparing a brief for the translator of "{title}" by '
     '{author}, from <slang> into <tlang>. The translator works on the '
@@ -1328,7 +1335,18 @@ DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT = (
     'Only if you know nothing reliable about how this author writes, or '
     'the name belongs to several writers and you cannot tell which one '
     'wrote this book, reply with exactly: %s\n\n'
-    'Write 200 to 350 words of plain prose in <tlang>. Reply with the '
+    'Write 200 to 350 words of plain prose in <tlang>. If <tlang> '
+    'distinguishes formal from familiar address, end with one more '
+    'paragraph, which is a decision for this translation rather than a '
+    'description: for each pair of main or recurring characters who '
+    'speak to each other, the form each uses with the other, one pair '
+    'per sentence, as in "A and B: familiar both ways." or "A to C: '
+    'formal; C to A: familiar.", naming each form by the pronoun '
+    '<tlang> uses for it. Decide from the relationship the series and '
+    'the excerpts show, rank, age, friendship; for a story set in the '
+    'past, take the formal form a historical novel in <tlang> would '
+    'use. Cover every such pair you can name, the protagonist and '
+    'their closest companions first. Reply with the '
     'brief itself and nothing else: no preamble, no headings, no lists, '
     'no citations, no closing remarks.\n\n'
     'Author: {author}\n'
@@ -3296,7 +3314,10 @@ class NovelTranslator:
             'How this book is written. The brief below describes the '
             'author and this novel. Reproduce the manner it describes, '
             'except where the text in front of you plainly contradicts '
-            'it: the text always wins.'), style)
+            'it: the text always wins. Where it settles how two '
+            'characters address each other, formal or familiar, follow '
+            'it in every line they exchange: the rest of the book is '
+            'translated by other requests that follow it too.'), style)
 
     def _ensure_author_style(self):
         """Research once, before the first chapter, how the book is written.

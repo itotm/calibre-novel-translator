@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.3.4
+
+**Formal and familiar address settled once, for the whole book**
+
+* When the target language has formal and familiar address, the author
+  brief ends with a paragraph that settles it for each pair of main
+  characters ("Bartholomew e Michael: tu reciproco."), and every
+  translation request is told to follow it in every line the two
+  exchange. The chunks of a chapter are translated apart, several at
+  once, and none sees what the others chose: in *A Deadly Brew* GPT-6
+  Luna Pro had Bartholomew give Michael "voi" and Michael answer with
+  "tu", switching back within a page. The paragraph can be corrected in
+  the Author tab like the rest of the brief.
+
 ## v1.3.3
 
 **An author brief about this author, not about the genre**

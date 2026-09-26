@@ -34,11 +34,14 @@ preface or a note is translated but leaves nothing in the running context.
 asks how this author writes, in the series the book belongs to: the
 narrator, the voices of the recurring characters, the humour, the oaths,
 titles and forms of address, and what they call for in the target
-language. The answer is repeated in the prompt of every chapter. The
-request carries about 2000 words of the book, from its opening and its
-middle, so the model tells the series from the names and the period in
-the text rather than guessing it from the title, and checks what it
-remembers against the prose. It is told to leave out the plot, and
+language. The answer is repeated in the prompt of every chapter. When
+the target language has formal and familiar address, the brief ends by
+settling it for each pair of main characters, "A and B: tu both ways",
+and every request follows it: chunks translated apart would otherwise
+each choose their own. The request carries about 2000 words of the
+book, from its opening and its middle, so the model tells the series
+from the names and the period in the text rather than guessing it from
+the title, and checks what it remembers against the prose. It is told to leave out the plot, and
 whatever it cannot state with confidence, rather than pad the brief with
 what fits any writer of the genre. A model that knows nothing reliable
 about the author says so, and the Author tab of the window says so too,
@@ -110,7 +113,7 @@ It writes `../novel-translator_v<version>.zip`, checks that the archive is
 installable and prints the command that installs it:
 
 ```sh
-calibre-customize -a ../novel-translator_v1.3.3.zip
+calibre-customize -a ../novel-translator_v1.3.4.zip
 ```
 
 In the GUI the equivalent is *Preferences → Plugins → Load plugin from

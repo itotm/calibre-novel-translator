@@ -3244,6 +3244,7 @@ class TestAuthorBrief(unittest.TestCase):
         self.assertIn('Be specific', sent)
         self.assertIn('from the title alone', sent)
         self.assertIn('leave it out silently', sent)
+        self.assertIn('formal from familiar address, end with', sent)
         self.assertNotIn('{author}', sent)
         self.assertNotIn('{excerpt}', sent)
         # No chapters, no excerpt, and no dangling blank at the end.
@@ -3355,7 +3356,10 @@ class TestAuthorBrief(unittest.TestCase):
         translator = self._translator()
         translator._ensure_author_style()
         translator.cache.set_info.assert_any_call(INFO_NOVEL_STYLE, BRIEF)
-        self.assertIn(BRIEF, translator._translation_system_prompt('CONTEXT'))
+        prompt = translator._translation_system_prompt('CONTEXT')
+        self.assertIn(BRIEF, prompt)
+        # Every chunk is told that the forms of address it settles bind.
+        self.assertIn('follow it in every line they exchange', prompt)
 
     def test_no_brief_leaves_no_hole_in_the_prompt(self):
         translator = self._translator({'novel_author_style': 'off'})
