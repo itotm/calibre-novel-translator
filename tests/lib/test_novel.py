@@ -6,8 +6,8 @@ from ...lib.cache import Paragraph
 from ...lib.exception import TranslationCanceled, TranslationFailed
 from ...lib.novel import (
     Chapter, ChapterBuilder, TokenBudget, ContextManager, NovelTranslator,
-    DEFAULT_NOVEL_TRANSLATION_PROMPT, DEFAULT_NOVEL_GLOSSARY_PROMPT,
-    DEFAULT_NOVEL_CONTEXT_PROMPT, _extract_json_string,
+    DEFAULT_NOVEL_TRANSLATION_PROMPT, DEFAULT_NOVEL_CONTEXT_SOURCE_PROMPT,
+    _extract_json_string,
     tag_paragraphs, parse_tagged_response, _extract_json_object,
     _extract_entities_fallback, suspicious_translations, _ranges,
     realign_shifted, title_matches, probe_engine, PROBE_PARAGRAPHS,
@@ -18,7 +18,7 @@ from ...lib.novel import (
     DIALOGUE_CONVENTIONS,
     NO_AUTHOR_INFORMATION, book_excerpt,
     INFO_NOVEL_SUMMARIES, INFO_NOVEL_GLOSSARY, INFO_NOVEL_PROGRESS,
-    INFO_NOVEL_STYLE, INFO_NOVEL_STYLE_NOTE)
+    INFO_NOVEL_STYLE, INFO_NOVEL_STYLE_NOTE, INFO_NOVEL_ADDRESS)
 
 
 module_name = 'calibre_plugins.novel_translator.lib.novel'
@@ -1053,8 +1053,8 @@ class TestPromptComposition(unittest.TestCase):
         # forced its JSON example to double every brace. It is filled by
         # literal substitution now, so the braces must reach the model
         # exactly as the model has to reproduce them.
-        self.assertNotIn('{{', DEFAULT_NOVEL_GLOSSARY_PROMPT)
-        self.assertIn('{"entities": []}', DEFAULT_NOVEL_GLOSSARY_PROMPT)
+        self.assertNotIn('{{', DEFAULT_NOVEL_CONTEXT_SOURCE_PROMPT)
+        self.assertIn('"entities": [', DEFAULT_NOVEL_CONTEXT_SOURCE_PROMPT)
         # The context block belongs last: everything before it is
         # identical from one chapter to the next, and so stays reusable
         # from the provider's prefix cache.
@@ -1250,8 +1250,7 @@ class TestNovelTranslator(unittest.TestCase):
             return 'Summary text.'
 
         engine = FakeEngine(translate_side_effect=side_effect)
-        translator = self._make_translator(
-            engine, {'novel_context_timing': 'after'})
+        translator = self._make_translator(engine)
         translator.run()
 
         # The model was asked for the second paragraph only.
@@ -1259,9 +1258,9 @@ class TestNovelTranslator(unittest.TestCase):
         self.assertIn('Alpha 2', translation_calls[0])
         # The stored translation was left alone.
         self.assertEqual('Alpha 1 (IT)', self.paragraphs[0].translation)
-        # And the summary still read the whole chapter, the paragraph
+        # And the report still read the whole chapter, the paragraph
         # that came from the cache included.
-        self.assertIn('Alpha 1 (IT)', context_calls[0])
+        self.assertIn('Alpha 1', context_calls[0])
 
     def test_reuse_translated_paragraphs_can_be_turned_off(self):
         self.paragraphs[0].translation = 'Alpha 1 (IT)'
@@ -1285,8 +1284,8 @@ class TestNovelTranslator(unittest.TestCase):
         self.assertIn('Alpha 1', translation_calls[0])
 
     def test_fully_translated_chapter_only_needs_its_context(self):
-        """A chapter cancelled between its last chunk and its summary
-        asks for the summary alone when it resumes."""
+        """A chapter cancelled between its last chunk and its end asks
+        for its report alone when it resumes."""
         for paragraph in self.paragraphs[:2]:
             paragraph.translation = '%s (IT)' % paragraph.original
             paragraph.engine_name = 'FakeEngine'
@@ -1307,11 +1306,11 @@ class TestNovelTranslator(unittest.TestCase):
         translator = self._make_translator(engine)
         translator.run()
 
-        # Chapter one asked for nothing but its context; chapter two,
+        # Chapter one asked for nothing but its report; chapter two,
         # which has no translation yet, was translated as usual.
         self.assertEqual(1, len(translation_calls))
         self.assertIn('Beta 1', translation_calls[0])
-        self.assertIn('Alpha 1 (IT)', context_calls[0])
+        self.assertIn('Alpha 1', context_calls[0])
 
     def test_a_chunk_writes_its_own_paragraphs_in_one_batch(self):
         """Each chunk commits once, and only what it produced."""
@@ -1607,25 +1606,6 @@ class TestNovelTranslator(unittest.TestCase):
         glossary = self.ctx.get_glossary()
         self.assertIn('Alpha', glossary)
         self.assertEqual('Alfa', glossary['Alpha']['translation'])
-
-    def test_summary_and_glossary_persisted_in_two_calls(self):
-        def side_effect(text, prompt):
-            if _is_translation_call(prompt):
-                return _echo_markers(text)
-            if _is_glossary_call(prompt):
-                return ('Here is JSON: {"entities": ['
-                        '{"source": "Alpha", "translation": "Alfa", '
-                        '"type": "character"}]}')
-            # Summary path.
-            return 'This chapter introduces Alpha.'
-        engine = FakeEngine(translate_side_effect=side_effect)
-        translator = self._make_translator(
-            engine, {'novel_combined_context_call': False})
-        translator.run()
-        summaries = self.ctx.get_summaries()
-        self.assertIn('Alpha', summaries[0]['summary'])
-        self.assertEqual('Alfa', self.ctx.get_glossary()['Alpha'][
-            'translation'])
 
     def test_no_translatable_content_skips_chapter(self):
         # Chapter 1 contains only an ignored paragraph.
@@ -2495,12 +2475,11 @@ class TestGlossaryStaysSmall(unittest.TestCase):
             {'source': 'Fidelma', 'translation': 'Fidelma'},
             {'source': 'Canterbury', 'translation': 'Canterbury'},
         ])
-        translator._extract_glossary_updates(
+        translator._generate_context(
             Chapter(2, 'Two', ['b'], []),
-            'Fidelma crossed the courtyard.',
-            'Fidelma attraverso il cortile.')
+            'Fidelma crossed the courtyard.')
 
-        sent = engine.translate_calls[-1]['text']
+        sent = engine.translate_calls[0]['text']
         self.assertIn('Fidelma', sent)
         self.assertNotIn('Canterbury', sent)
 
@@ -2512,10 +2491,10 @@ class TestGlossaryStaysSmall(unittest.TestCase):
                 {'source': 'Fidelma', 'translation': 'Fidelma'},
                 {'source': 'Canterbury', 'translation': 'Canterbury'},
             ])
-        translator._extract_glossary_updates(
-            Chapter(2, 'Two', ['b'], []), 'Fidelma walked.', 'Fidelma.')
+        translator._generate_context(
+            Chapter(2, 'Two', ['b'], []), 'Fidelma walked.')
 
-        self.assertIn('Canterbury', engine.translate_calls[-1]['text'])
+        self.assertIn('Canterbury', engine.translate_calls[0]['text'])
 
     def test_prompt_entry_cap_is_enforced(self):
         engine = FakeEngine(
@@ -2524,10 +2503,10 @@ class TestGlossaryStaysSmall(unittest.TestCase):
         translator = self._make_translator(
             engine, {'novel_glossary_prompt_max_entries': 3}, glossary=[
                 {'source': n, 'translation': n} for n in names])
-        translator._extract_glossary_updates(
-            Chapter(2, 'Two', ['b'], []), ' '.join(names), ' '.join(names))
+        translator._generate_context(
+            Chapter(2, 'Two', ['b'], []), ' '.join(names))
 
-        sent = engine.translate_calls[-1]['text']
+        sent = engine.translate_calls[0]['text']
         listed = [n for n in names if n in sent.split('Source:')[0]]
         self.assertEqual(names[-3:], listed)
 
@@ -2541,9 +2520,8 @@ class TestGlossaryStaysSmall(unittest.TestCase):
             translate_side_effect=lambda text, prompt: reply)
         translator = self._make_translator(engine, glossary=[
             {'source': 'Fidelma', 'translation': 'Fidelma'}])
-        updates = translator._extract_glossary_updates(
-            Chapter(2, 'Two', ['b'], []),
-            'Fidelma and Eadulf.', 'Fidelma ed Eadulf.')
+        _summary, updates, _address = translator._generate_context(
+            Chapter(2, 'Two', ['b'], []), 'Fidelma and Eadulf.')
 
         self.assertEqual(['Eadulf'], [u['source'] for u in updates])
 
@@ -2560,8 +2538,8 @@ class TestGlossaryStaysSmall(unittest.TestCase):
         engine = FakeEngine(
             translate_side_effect=lambda text, prompt: reply)
         translator = self._make_translator(engine)
-        updates = translator._extract_glossary_updates(
-            Chapter(2, 'Two', ['b'], []), 'Source.', 'Traduzione.')
+        _summary, updates, _address = translator._generate_context(
+            Chapter(2, 'Two', ['b'], []), 'Source.')
 
         self.assertEqual(
             ['Eadulf', 'Bieda'], [u['source'] for u in updates])
@@ -2668,18 +2646,38 @@ class TestGlossarySchema(unittest.TestCase):
         translator.set_progress(Mock())
         return translator
 
-    def test_the_entities_schema_is_sent_to_a_capable_engine(self):
+    def test_the_report_schema_is_sent_to_a_capable_engine(self):
         translator = self._make_translator(self.SchemaEngine())
         with patch.object(
                 translator, '_translate_with_retry_structured',
                 return_value='{"entities": []}') as structured:
-            translator._extract_glossary_updates(
-                Chapter(1, 'One', ['a'], []), 'Source.', 'Traduzione.')
+            translator._generate_context(
+                Chapter(1, 'One', ['a'], []), 'Source.')
 
         sent = structured.call_args.kwargs['schema']
-        # The class schema, with the per-chapter limit on the list.
-        self.assertEqual(50, sent['properties']['entities'].pop('maxItems'))
-        self.assertEqual(NovelTranslator._GLOSSARY_RESPONSE_SCHEMA, sent)
+        # The class schema, with the per-chapter limits on the lists and
+        # the forms of address before the names.
+        properties = sent['properties']
+        self.assertEqual(
+            ['narrative', 'summary', 'address', 'entities'],
+            list(properties))
+        self.assertEqual(
+            ['narrative', 'summary', 'address', 'entities'],
+            sent['required'])
+        self.assertEqual(50, properties['entities'].pop('maxItems'))
+        self.assertEqual(NovelTranslator._ENTITIES_SCHEMA,
+                         properties['entities'])
+        self.assertEqual(NovelTranslator.ADDRESS_MAX_ITEMS,
+                         properties['address'].pop('maxItems'))
+        self.assertEqual(NovelTranslator._ADDRESS_SCHEMA,
+                         properties['address'])
+
+    def test_no_forms_of_address_in_the_schema_when_off(self):
+        translator = self._make_translator(
+            self.SchemaEngine(), {'novel_address_forms': False})
+        schema = translator._context_schema()
+        self.assertNotIn('address', schema['properties'])
+        self.assertNotIn('address', schema['required'])
 
     def test_an_engine_without_structured_support_is_asked_in_prose(self):
         translator = self._make_translator(FakeEngine())
@@ -2688,8 +2686,8 @@ class TestGlossarySchema(unittest.TestCase):
             with patch.object(
                     translator, '_translate_with_retry',
                     return_value='{"entities": []}') as plain:
-                translator._extract_glossary_updates(
-                    Chapter(1, 'One', ['a'], []), 'Source.', 'Traduzione.')
+                translator._generate_context(
+                    Chapter(1, 'One', ['a'], []), 'Source.')
 
         structured.assert_not_called()
         plain.assert_called_once()
@@ -2750,14 +2748,13 @@ class TestCombinedContextCall(unittest.TestCase):
     def test_the_chapter_text_travels_once(self):
         engine = self._engine()
         translator = self._make_translator(engine)
-        translator._generate_context(
-            self.chapters[0], 'Alpha walked home.', 'Alpha cammina a casa.')
+        translator._generate_context(self.chapters[0], 'Alpha walked home.')
 
         sent = self._aux_calls(engine)[0]['text']
-        # Source and translation, one copy each -- where the two
-        # separate calls sent the translation twice.
+        # The source, once, and no translation: the report is asked
+        # before there is one.
         self.assertEqual(1, sent.count('Alpha walked home.'))
-        self.assertEqual(1, sent.count('Alpha cammina a casa.'))
+        self.assertNotIn('Translation:', sent)
 
     def test_the_structural_prompts_are_not_settings(self):
         # A prompt typed for the summary or the glossary used to be a
@@ -2777,9 +2774,10 @@ class TestCombinedContextCall(unittest.TestCase):
                       'Tutto insieme.'):
             self.assertNotIn(typed, sent)
 
-    def test_the_last_chapter_skips_the_call(self):
+    def test_the_last_chapter_can_skip_the_call(self):
         engine = self._engine()
-        translator = self._make_translator(engine)
+        translator = self._make_translator(
+            engine, {'novel_skip_context_last_chapter': True})
         translator._translate_chapter(self.chapters[-1])
 
         self.assertEqual([], self._aux_calls(engine))
@@ -2787,10 +2785,11 @@ class TestCombinedContextCall(unittest.TestCase):
             any('last one' in c.args[0]
                 for c in translator.log.call_args_list))
 
-    def test_the_last_chapter_can_keep_its_context(self):
+    def test_the_last_chapter_keeps_its_report(self):
+        # Asked before the chapter is translated, the report settles the
+        # names and the forms of address of its chunks too.
         engine = self._engine()
-        translator = self._make_translator(
-            engine, {'novel_skip_context_last_chapter': False})
+        translator = self._make_translator(engine)
         translator._translate_chapter(self.chapters[-1])
 
         self.assertEqual(1, len(self._aux_calls(engine)))
@@ -2809,16 +2808,16 @@ class TestCombinedContextCall(unittest.TestCase):
             return reply
         engine = FakeEngine(translate_side_effect=side_effect)
         translator = self._make_translator(engine)
-        summary, entities = translator._generate_context(
-            self.chapters[0], 'Alpha walked home.', 'Alpha cammina.')
+        summary, entities, _address = translator._generate_context(
+            self.chapters[0], 'Alpha walked home.')
 
         self.assertEqual('Alpha cammina fino a casa.', summary)
         self.assertEqual(['Alpha'], [e['source'] for e in entities])
 
     def test_shipped_combined_prompt_is_literal(self):
-        self.assertNotIn('{{', DEFAULT_NOVEL_CONTEXT_PROMPT)
-        self.assertIn('"summary"', DEFAULT_NOVEL_CONTEXT_PROMPT)
-        self.assertIn('"narrative"', DEFAULT_NOVEL_CONTEXT_PROMPT)
+        self.assertNotIn('{{', DEFAULT_NOVEL_CONTEXT_SOURCE_PROMPT)
+        self.assertIn('"summary"', DEFAULT_NOVEL_CONTEXT_SOURCE_PROMPT)
+        self.assertIn('"narrative"', DEFAULT_NOVEL_CONTEXT_SOURCE_PROMPT)
 
     def _engine_reporting(self, narrative):
         reply = json.dumps({
@@ -2891,27 +2890,246 @@ class TestCombinedContextCall(unittest.TestCase):
         self.assertIn('other books', self.ctx.get_summaries()[0]['summary'])
         self.assertIn('Hachette', self.ctx.get_glossary())
 
-    def test_the_separate_summary_call_answers_the_same_way(self):
-        calls = []
+
+class TestAddressForms(unittest.TestCase):
+    """How the characters address each other is settled once per pair,
+    before the chunks that use it, and kept unless the story changes it.
+
+    The case behind it: the chunks of a chapter, translated apart and
+    several at once, had two friends switch from "tu" to "voi" and back
+    within a page.
+    """
+
+    def setUp(self):
+        self.cache = Mock()
+        self.cache.get_info.return_value = None
+        self.ctx = ContextManager(self.cache).load()
+        self.cache.reset_mock()
+        self.paragraphs = [
+            make_paragraph(0, 'Bartholomew greeted Michael at the gate.',
+                           page='a'),
+            make_paragraph(1, '"You are late," said Michael.', page='a'),
+        ]
+        self.chapter = Chapter(3, 'Three', ['a'], self.paragraphs)
+
+    def _translator(self, reply=None, config=None, chapters=None):
+        reply = reply if reply is not None else {}
 
         def side_effect(text, prompt):
-            calls.append(prompt)
             if _is_translation_call(prompt):
                 return _echo_markers(text)
-            if _is_glossary_call(prompt):
-                return ('{"entities": [{"source": "Hachette", '
-                        '"translation": "Hachette"}]}')
-            return 'Not a story chapter.'
-        engine = FakeEngine(translate_side_effect=side_effect)
-        translator = self._make_translator(
-            engine, {'novel_combined_context_call': False,
-                     'novel_context_timing': 'after'})
-        translator._translate_chapter(self.chapters[0])
+            report = {'narrative': True, 'summary': 'Si incontrano.',
+                      'entities': []}
+            report.update(reply)
+            return json.dumps(report)
+        base = {'novel_min_chars_for_context': 0}
+        base.update(config or {})
+        translator = NovelTranslator(
+            FakeEngine(translate_side_effect=side_effect),
+            chapters or [self.chapter], self.ctx, self.cache, config=base)
+        translator.set_logging(Mock())
+        translator.set_progress(Mock())
+        return translator
 
-        self.assertEqual('', self.ctx.get_summaries()[0]['summary'])
-        # No glossary call was made for a chapter outside the story.
-        self.assertFalse(any(_is_glossary_call(p) for p in calls))
-        self.assertNotIn('Hachette', self.ctx.get_glossary())
+    def _logged(self, translator):
+        return [c.args[0] for c in translator.log.call_args_list if c.args]
+
+    @staticmethod
+    def _item(speaker, listener, form, change=False, notes=''):
+        return {'speaker': speaker, 'listener': listener, 'form': form,
+                'change': change, 'notes': notes}
+
+    def _settle(self, *entries):
+        self.ctx.address = [dict(entry) for entry in entries]
+
+    # -- storage ------------------------------------------------------------
+
+    def test_the_forms_are_stored_with_the_rest_of_the_context(self):
+        self.ctx.append_chapter(1, 'One', 'S', address_updates=[
+            {'speaker': 'A', 'listener': 'B', 'form': 'tu', 'since': 1}])
+        stored = {c.args[0]: c.args[1]
+                  for c in self.cache.set_info.call_args_list}
+        self.assertEqual(
+            [{'speaker': 'A', 'listener': 'B', 'form': 'tu', 'since': 1}],
+            json.loads(stored[INFO_NOVEL_ADDRESS]))
+
+        self.cache.get_info.side_effect = stored.get
+        loaded = ContextManager(self.cache).load()
+        self.assertEqual('tu', loaded.get_address()[0]['form'])
+        loaded.reset()
+        self.assertEqual([], loaded.get_address())
+
+    def test_a_chapter_reported_again_replaces_its_own_entry(self):
+        entry = {'speaker': 'A', 'listener': 'B', 'form': 'tu', 'since': 2}
+        self.ctx.append_chapter(2, 't', 's', address_updates=[entry])
+        self.ctx.append_chapter(2, 't', 's', address_updates=[
+            dict(entry, form='voi')])
+        self.assertEqual(['voi'], [e['form'] for e in self.ctx.address])
+
+    # -- which form is in force ---------------------------------------------
+
+    def test_the_form_in_force_follows_the_chapter(self):
+        self._settle(
+            {'speaker': 'A', 'listener': 'B', 'form': 'Lei', 'since': 2},
+            {'speaker': 'A', 'listener': 'B', 'form': 'tu', 'since': 7})
+
+        def form(chapter):
+            (entry, previous), = self.ctx.address_for(chapter)
+            return entry['form'], previous and previous['form']
+        # Before the pair met, the first form holds: a chapter
+        # translated again is not told about a change still to come.
+        self.assertEqual(('Lei', None), form(1))
+        self.assertEqual(('Lei', None), form(6))
+        # The chapter of the change knows the form it changes from.
+        self.assertEqual(('tu', 'Lei'), form(7))
+        self.assertEqual(('tu', None), form(8))
+
+    def test_only_the_pairs_the_text_names_are_given(self):
+        self._settle(
+            {'speaker': 'Michael', 'listener': 'Bartholomew',
+             'form': 'tu', 'since': 1},
+            {'speaker': 'Michael', 'listener': 'Tulyet',
+             'form': 'voi', 'since': 1})
+        pairs = self.ctx.address_for(
+            3, 'Michael and Bartholomew'.casefold())
+        self.assertEqual(['Bartholomew'],
+                         [entry['listener'] for entry, _ in pairs])
+
+    def test_the_running_context_carries_the_forms(self):
+        self._settle(
+            {'speaker': 'Michael', 'listener': 'Bartholomew',
+             'form': 'tu', 'since': 1},
+            {'speaker': 'Bartholomew', 'listener': 'Michael',
+             'form': 'Lei', 'since': 1},
+            {'speaker': 'Bartholomew', 'listener': 'Michael',
+             'form': 'tu', 'since': 3, 'notes': 'Michael offers the tu'})
+        text = self.ctx.context_text(
+            relevant_to='Michael and Bartholomew', chapter=3)
+        self.assertIn('Forms of address', text)
+        self.assertIn('- Michael -> Bartholomew: tu', text)
+        self.assertIn(
+            '- Bartholomew -> Michael: tu, from the moment this chapter '
+            'changes it; Lei before that (Michael offers the tu)', text)
+
+    def test_no_forms_no_section(self):
+        self.assertNotIn('Forms of address', self.ctx.context_text())
+
+    # -- what a report may change -------------------------------------------
+
+    def test_a_new_pair_is_settled_from_this_chapter(self):
+        translator = self._translator()
+        added = translator._new_address(
+            [self._item('A', 'B', 'tu', notes='old friends')], self.chapter)
+        self.assertEqual([{'speaker': 'A', 'listener': 'B', 'form': 'tu',
+                           'since': 3, 'notes': 'old friends'}], added)
+
+    def test_the_first_form_holds(self):
+        self._settle({'speaker': 'A', 'listener': 'B', 'form': 'tu',
+                      'since': 1})
+        translator = self._translator()
+        self.assertEqual([], translator._new_address(
+            [self._item('a', 'b', 'TU')], self.chapter))
+        self.assertEqual([], translator._new_address(
+            [self._item('A', 'B', 'voi')], self.chapter))
+        self.assertTrue(any('kept "tu", settled in chapter 1' in line
+                            for line in self._logged(translator)))
+
+    def test_the_story_may_change_it(self):
+        self._settle({'speaker': 'A', 'listener': 'B', 'form': 'Lei',
+                      'since': 1})
+        translator = self._translator()
+        added = translator._new_address(
+            [self._item('a', 'b', 'tu', change=True,
+                        notes='B offers the tu')], self.chapter)
+        # Under the names the pair was settled with.
+        self.assertEqual([{'speaker': 'A', 'listener': 'B', 'form': 'tu',
+                           'since': 3, 'notes': 'B offers the tu'}], added)
+        self.assertTrue(any('changes from "Lei" to "tu" in chapter 3'
+                            in line for line in self._logged(translator)))
+
+    def test_a_form_the_user_wrote_is_never_changed(self):
+        self._settle({'speaker': 'A', 'listener': 'B', 'form': 'voi',
+                      'since': 1, 'user': True})
+        translator = self._translator()
+        self.assertEqual([], translator._new_address(
+            [self._item('A', 'B', 'tu', change=True)], self.chapter))
+        self.assertTrue(any('which you set' in line
+                            for line in self._logged(translator)))
+
+    def test_the_reply_is_cleaned(self):
+        translator = self._translator()
+        parsed = translator._parse_address('', obj={'address': [
+            self._item('A', 'B', 'tu'),
+            self._item('a', 'b', 'voi'),       # the same direction again
+            self._item('A', 'A', 'tu'),        # oneself
+            self._item('A', 'C', ''),          # no form
+            'nonsense',
+        ]})
+        self.assertEqual([('A', 'B', 'tu')], [
+            (p['speaker'], p['listener'], p['form']) for p in parsed])
+
+    def test_a_reply_cut_short_keeps_the_complete_forms(self):
+        translator = self._translator()
+        parsed = translator._parse_address(
+            '{"summary": "S", "address": [{"speaker": "A", "listener": '
+            '"B", "form": "tu", "change": false, "notes": ""}, '
+            '{"speaker": "B", "listen')
+        self.assertEqual(['B'], [p['listener'] for p in parsed])
+
+    # -- the requests ---------------------------------------------------------
+
+    def test_the_report_asks_for_the_forms_with_the_settled_ones(self):
+        self._settle({'speaker': 'Michael', 'listener': 'Bartholomew',
+                      'form': 'tu', 'since': 1})
+        self.ctx.style = 'Il narratore è ironico.'
+        translator = self._translator()
+        translator._generate_context(
+            self.chapter, 'Bartholomew greeted Michael.')
+        sent = translator.translator.translate_calls[0]['text']
+        self.assertIn('"address"', sent)
+        self.assertIn('Hard limit: 30 items', sent)
+        self.assertIn('Forms of address already settled:\n'
+                      '- Michael -> Bartholomew: tu', sent)
+        self.assertIn('Il narratore è ironico.', sent)
+        self.assertNotIn('{address', sent)
+
+    def test_nothing_is_asked_when_off(self):
+        translator = self._translator(
+            reply={'address': [self._item('A', 'B', 'tu')]},
+            config={'novel_address_forms': False})
+        _summary, _entities, address = translator._generate_context(
+            self.chapter, 'Bartholomew greeted Michael.')
+        sent = translator.translator.translate_calls[0]['text']
+        self.assertNotIn('"address"', sent)
+        self.assertNotIn('Forms of address', sent)
+        self.assertNotIn('{address', sent)
+        self.assertEqual([], address)
+
+    def test_every_chunk_of_the_chapter_gets_the_forms_it_settles(self):
+        translator = self._translator(
+            reply={'address': [
+                self._item('Michael', 'Bartholomew', 'tu'),
+                self._item('Bartholomew', 'Michael', 'tu')]},
+            config={'novel_max_paragraphs_per_chunk': 1,
+                    'novel_parallel_chunks': 2})
+        translator._translate_chapter(self.chapter)
+
+        prompts = [c['prompt']
+                   for c in translator.translator.translate_calls
+                   if _is_translation_call(c['prompt'])]
+        self.assertEqual(2, len(prompts))
+        for prompt in prompts:
+            self.assertIn('- Michael -> Bartholomew: tu', prompt)
+            self.assertIn('- Bartholomew -> Michael: tu', prompt)
+        self.assertEqual(
+            [3, 3], [entry['since'] for entry in self.ctx.get_address()])
+
+    def test_a_chapter_outside_the_story_settles_nothing(self):
+        translator = self._translator(reply={
+            'narrative': False,
+            'address': [self._item('A', 'B', 'tu')]})
+        translator._translate_chapter(self.chapter)
+        self.assertEqual([], self.ctx.get_address())
 
 
 class TestExtractJsonString(unittest.TestCase):
@@ -3244,7 +3462,10 @@ class TestAuthorBrief(unittest.TestCase):
         self.assertIn('Be specific', sent)
         self.assertIn('from the title alone', sent)
         self.assertIn('leave it out silently', sent)
-        self.assertIn('formal from familiar address, end with', sent)
+        # The brief describes the forms of address; the pairs are the
+        # reports' to settle.
+        self.assertIn('forms of address', sent)
+        self.assertNotIn('one pair per sentence', sent)
         self.assertNotIn('{author}', sent)
         self.assertNotIn('{excerpt}', sent)
         # No chapters, no excerpt, and no dangling blank at the end.
@@ -3356,10 +3577,7 @@ class TestAuthorBrief(unittest.TestCase):
         translator = self._translator()
         translator._ensure_author_style()
         translator.cache.set_info.assert_any_call(INFO_NOVEL_STYLE, BRIEF)
-        prompt = translator._translation_system_prompt('CONTEXT')
-        self.assertIn(BRIEF, prompt)
-        # Every chunk is told that the forms of address it settles bind.
-        self.assertIn('follow it in every line they exchange', prompt)
+        self.assertIn(BRIEF, translator._translation_system_prompt('CONTEXT'))
 
     def test_no_brief_leaves_no_hole_in_the_prompt(self):
         translator = self._translator({'novel_author_style': 'off'})
@@ -3950,8 +4168,7 @@ class TestRetryBatches(unittest.TestCase):
         engine = StructuredEngine(translate_side_effect=side_effect)
         translator = NovelTranslator(
             engine, [chapter], ctx, cache,
-            config={'novel_min_chars_for_context': 0,
-                    'novel_context_timing': 'after'})
+            config={'novel_min_chars_for_context': 0})
         translator.set_logging(Mock())
         translator.set_progress(Mock())
         translator.run()
@@ -4793,5 +5010,5 @@ class TestGlossaryChapterLimit(unittest.TestCase):
         self._run(self._entities(3))
         self.assertNotIn('maxItems', NovelTranslator._CONTEXT_RESPONSE_SCHEMA[
             'properties']['entities'])
-        self.assertNotIn('maxItems', NovelTranslator._GLOSSARY_RESPONSE_SCHEMA[
-            'properties']['entities'])
+        self.assertNotIn('maxItems', NovelTranslator._ENTITIES_SCHEMA)
+        self.assertNotIn('maxItems', NovelTranslator._ADDRESS_SCHEMA)

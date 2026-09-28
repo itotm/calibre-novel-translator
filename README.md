@@ -21,28 +21,39 @@ whole novel, or one XHTML file per chapter). Chapters are translated one
 after the other, never in parallel, because each one is translated with
 what the previous ones taught.
 
-**A running summary and a dynamic glossary.** After every chapter one
-request asks for a summary of it and for the new names it introduced:
-characters, places, objects, how each is translated. Both are carried into
-the requests that follow, so names, pronouns, register and terminology stay
-consistent over the whole book. A prompt carries only the glossary entries
-the chapter mentions. The same request says whether the chapter is part of
-the story at all: a copyright page, a list of the author's other books, a
-preface or a note is translated but leaves nothing in the running context.
+**A running summary and a dynamic glossary.** Before every chapter is
+translated, one request reads its source and asks for a summary of it and
+for the new names it introduces: characters, places, objects, how each is
+to be translated. The names are in the prompt of every chunk of the
+chapter itself, and summary and names are carried into the chapters that
+follow, so names, register and terminology stay consistent over the whole
+book. A prompt carries only the glossary entries the chapter mentions. The
+same request says whether the chapter is part of the story at all: a
+copyright page, a list of the author's other books, a preface or a note is
+translated but leaves nothing in the running context.
+
+**Forms of address settled once.** Where the target language has more
+than one way to address someone (tu and Lei, du and Sie, tu and vous,
+levels of politeness), the same request settles the form each character
+uses with each other character who speaks in the chapter, one direction
+at a time, and every request that translates the two is told to follow
+it. Chunks translated apart, several at once, otherwise each choose their
+own. The first form settled for a pair holds for the whole book; the
+model may change it only when the story does, when one offers the other
+the familiar form or they marry, and the log says so. A language that
+addresses everyone alike gets nothing added.
 
 **The author is asked about once.** Before the first chapter one request
 asks how this author writes, in the series the book belongs to: the
 narrator, the voices of the recurring characters, the humour, the oaths,
 titles and forms of address, and what they call for in the target
-language. The answer is repeated in the prompt of every chapter. When
-the target language has formal and familiar address, the brief ends by
-settling it for each pair of main characters, "A and B: tu both ways",
-and every request follows it: chunks translated apart would otherwise
-each choose their own. The request carries about 2000 words of the
-book, from its opening and its middle, so the model tells the series
-from the names and the period in the text rather than guessing it from
-the title, and checks what it remembers against the prose. It is told to leave out the plot, and
-whatever it cannot state with confidence, rather than pad the brief with
+language. The answer is repeated in the prompt of every chapter, and
+read by the request that settles the forms of address. The request
+carries about 2000 words of the book, from its opening and its middle,
+so the model tells the series from the names and the period in the text
+rather than guessing it from the title, and checks what it remembers
+against the prose. It is told to leave out the plot, and whatever it
+cannot state with confidence, rather than pad the brief with
 what fits any writer of the genre. A model that knows nothing reliable
 about the author says so, and the Author tab of the window says so too,
 rather than carry a brief the model made up. You can write the brief
@@ -81,7 +92,7 @@ hand, and built from whichever you prefer.
 
 The window shows the chapter list with its status, a progress bar, and tabs
 for the text (to read and correct), the author brief, the summaries, the
-glossary, the log and the report.
+glossary, the forms of address, the log and the report.
 
 ---
 
@@ -113,7 +124,7 @@ It writes `../novel-translator_v<version>.zip`, checks that the archive is
 installable and prints the command that installs it:
 
 ```sh
-calibre-customize -a ../novel-translator_v1.3.4.zip
+calibre-customize -a ../novel-translator_v1.3.5.zip
 ```
 
 In the GUI the equivalent is *Preferences → Plugins → Load plugin from
@@ -144,9 +155,10 @@ under *Preferences → Toolbars & menus* whenever you want it back.
    *Author* tab takes a brief of your own (or a correction of the
    model's), which is then used instead of asking the model, and the
    *Glossary* tab takes names and how to translate them: *Add entry*,
-   edit any cell, *Remove*. An entry you wrote or corrected is never
-   changed by the model. Editing either once something is translated
-   brings up a warning that the book may not read consistently, until
+   edit any cell, *Remove*. The *Address* tab does the same for the forms
+   of address: who speaks, to whom, the form, and the chapter it holds
+   from. An entry you wrote or corrected is never changed by the model.
+   Editing any of them once something is translated brings up a warning that the book may not read consistently, until
    the translation starts again.
 5. The *Text* tab shows the chapter chosen on the left, original and
    translation side by side; *Search* looks through that chapter or the
@@ -157,7 +169,8 @@ under *Preferences → Toolbars & menus* whenever you want it back.
    translated book, in the output format chosen next to it, into the
    library (or to the folder set in the General tab); build again after a
    correction. *Re-run all* translates the whole book again while keeping
-   the summaries, the glossary and the author brief, and replaces the
+   the summaries, the glossary, the forms of address and the author
+   brief, and replaces the
    corrections, which it says first; *Reset context* discards those too.
 
 To compare translations of a book, select two or more of them, in the
@@ -188,9 +201,9 @@ and the sampling, then a section for the engine's own options and the
 * structured output: automatic, off, or forced;
 * the context budget, the summary size, the glossary caps and whether the
   prompt carries only the glossary entries the chapter uses;
-* whether the summary and the glossary are asked for in one request,
-  whether the last chapter skips them, and whether those calls may spend
-  reasoning tokens;
+* whether the forms of address are settled pair by pair, whether the
+  last chapter skips the request that reports on it, and whether that
+  request may spend reasoning tokens;
 * what to do with paragraphs the model never returns;
 * whether the author brief is asked for, how much of the book goes with
   the request, and how dialogue is punctuated;

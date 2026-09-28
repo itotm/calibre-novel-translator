@@ -1173,27 +1173,6 @@ class TranslationSetting(QDialog):
         novel_layout.addRow(
             _('Kept in the original language'), novel_untranslated_titles)
 
-        novel_context_timing = QComboBox()
-        novel_context_timing.addItem(
-            _('Before the chapter, from the source'), 'before')
-        novel_context_timing.addItem(
-            _('After the chapter, from source and translation'), 'after')
-        novel_context_timing.setToolTip(_(
-            'When the summary and the glossary of a chapter are asked '
-            'for.\n\n'
-            '"Before" is the default: the chapter is sent once, in the '
-            'source language, and the reply says how each new name is '
-            'to be rendered. Half the tokens of "after", which sends '
-            'source and translation together, and the names a chapter '
-            'introduces are rendered the same way in its first chunk '
-            'and in its last, because the glossary is already in the '
-            'prompt. "After" reads the names off the translation the '
-            'model actually wrote, which suits a model that renders '
-            'names better in context than when asked in advance.'))
-        novel_layout.addRow(
-            _('Summary and glossary'), novel_context_timing)
-        self.disable_wheel_event(novel_context_timing)
-
         novel_parallel = QSpinBox()
         novel_parallel.setRange(1, 16)
         novel_parallel.setToolTip(_(
@@ -1444,8 +1423,9 @@ class TranslationSetting(QDialog):
         novel_summary_input.setRange(0, 1000000)
         novel_summary_input.setSingleStep(5000)
         novel_summary_input.setToolTip(_(
-            'How much of the translated chapter the summary and glossary '
-            'requests read, in characters, counted from the top. The '
+            'How much of the chapter the report on it reads (summary, '
+            'glossary, forms of address), in characters, counted from '
+            'the top. The '
             'opening of a chapter is where its characters and setting '
             'are introduced; sending the whole chapter costs input tokens '
             'the answer does not need. 0 sends it whole.'))
@@ -1501,8 +1481,8 @@ class TranslationSetting(QDialog):
         novel_min_chars.setRange(0, 100000)
         novel_min_chars.setSingleStep(50)
         novel_min_chars.setToolTip(_(
-            'Chapters shorter than this many translated characters skip '
-            'the summary and glossary LLM calls. Useful to avoid wasting '
+            'Chapters shorter than this many characters skip the report '
+            'on them (summary, glossary, forms of address). Useful to avoid wasting '
             'time on Copyright, Table of Contents, About the Author, '
             'etc. Set to 0 to always run summary/glossary.'))
         novel_layout.addRow(
@@ -1523,19 +1503,25 @@ class TranslationSetting(QDialog):
         novel_layout.addRow(
             _('Reasoning on summary/glossary'), novel_context_reasoning)
 
-        novel_combined_context = QCheckBox(_('One request'))
-        novel_combined_context.setToolTip(_(
-            'Ask for the chapter summary and the new glossary entries in '
-            'a single request instead of two.\n\n'
-            'On by default. Both tasks read the chapter that was just '
-            'translated, so two calls send it twice: measured on a real '
-            'book the summary call carried 7000 to 8000 tokens of '
-            'chapter text that the glossary call was about to send '
-            'again.\n\n'
-            'A summary or glossary prompt of your own turns this off by '
-            'itself, so that prompt is not silently ignored.'))
-        novel_layout.addRow(
-            _('Summary and glossary'), novel_combined_context)
+        novel_address_forms = QCheckBox(_('Settle per pair of characters'))
+        novel_address_forms.setToolTip(_(
+            'Where the target language has more than one way to address '
+            'someone -- tu and Lei, du and Sie, tu and vous, levels of '
+            'politeness -- the report on each chapter, asked before it '
+            'is translated, settles the form each character uses with '
+            'each other character who speaks in it, and every request '
+            'is told to follow it.\n\n'
+            'On by default. The chunks of a chapter are translated '
+            'apart, several at once, and without it each chose its own: '
+            'two friends switched from "tu" to "voi" and back within a '
+            'page. The first form settled for a pair holds for the whole '
+            'book; the model may change it only when the story does -- '
+            'one offers the other the familiar form, they marry -- and '
+            'the log says so. A language that addresses everyone alike '
+            'gets nothing added.\n\n'
+            'The Address tab of the translation window shows the forms '
+            'settled and takes corrections, between runs.'))
+        novel_layout.addRow(_('Forms of address'), novel_address_forms)
 
         novel_narrative_only = QCheckBox(_('Story chapters only'))
         novel_narrative_only.setToolTip(_(
@@ -1553,13 +1539,13 @@ class TranslationSetting(QDialog):
 
         novel_skip_last = QCheckBox(_('Skip'))
         novel_skip_last.setToolTip(_(
-            'Do not ask for the summary and glossary of the last '
-            'chapter. The context of a chapter is built for the '
-            'chapters that follow it, and after the last one there are '
-            'none: that call sends a full copy of the chapter for an '
-            'answer nothing ever reads.\n\n'
-            'Turn it off if you keep the glossary as a document in its '
-            'own right.'))
+            'Do not ask for the report on the last chapter: its summary, '
+            'its new names, its forms of address.\n\n'
+            'Off by default. The report is asked before the chapter is '
+            'translated, and the names and forms of address it settles '
+            'keep the chunks of the chapter agreeing with one another; '
+            'only the summary is never read. Skipping it saves one '
+            'request per book.'))
         novel_layout.addRow(
             _('Context of the last chapter'), novel_skip_last)
 
@@ -1575,12 +1561,10 @@ class TranslationSetting(QDialog):
             'repeated in the prompt of every chapter so the translation '
             'keeps the author\'s manner instead of drifting into neutral '
             'prose.\n\n'
-            'When the target language has formal and familiar address, '
-            'the brief ends by settling it for each pair of main '
-            'characters, and every request is told to follow it: chunks '
-            'translated apart otherwise choose on their own, and two '
-            'friends switched from "tu" to "voi" within a page. Correct '
-            'that paragraph in the Author tab if a choice is wrong.\n\n'
+            'The brief says how the forms of address of the target '
+            'language fit the book; which form each pair of characters '
+            'uses is settled chapter by chapter, by the report that '
+            'reads it ("Forms of address").\n\n'
             'It costs one small request per book. The model is told to '
             'leave out the plot, and whatever it cannot state with '
             'confidence, rather than fill the brief with what fits any '
@@ -1723,10 +1707,6 @@ class TranslationSetting(QDialog):
                 self.config.get('novel_front_matter_titles') or '')
             novel_untranslated_titles.setText(
                 self.config.get('novel_untranslated_titles') or '')
-            timing = self.config.get('novel_context_timing') or 'before'
-            idx = novel_context_timing.findData(timing)
-            if idx >= 0:
-                novel_context_timing.setCurrentIndex(idx)
             novel_parallel.setValue(int(self.config.get(
                 'novel_parallel_chunks', 1) or 1))
             novel_balanced.setChecked(bool(self.config.get(
@@ -1768,12 +1748,12 @@ class TranslationSetting(QDialog):
                 novel_missing.setCurrentIndex(idx)
             novel_context_reasoning.setChecked(bool(self.config.get(
                 'novel_context_reasoning', False)))
-            novel_combined_context.setChecked(bool(self.config.get(
-                'novel_combined_context_call', True)))
+            novel_address_forms.setChecked(bool(self.config.get(
+                'novel_address_forms', True)))
             novel_narrative_only.setChecked(bool(self.config.get(
                 'novel_context_narrative_only', True)))
             novel_skip_last.setChecked(bool(self.config.get(
-                'novel_skip_context_last_chapter', True)))
+                'novel_skip_context_last_chapter', False)))
             novel_translation_prompt.setPlaceholderText(
                 DEFAULT_NOVEL_TRANSLATION_PROMPT)
             novel_translation_prompt.setPlainText(
@@ -1847,9 +1827,6 @@ class TranslationSetting(QDialog):
         novel_untranslated_titles.textChanged.connect(
             lambda text: self.config.update(
                 novel_untranslated_titles=text.strip() or None))
-        novel_context_timing.currentIndexChanged.connect(
-            lambda _idx: self.config.update(
-                novel_context_timing=novel_context_timing.currentData()))
         novel_parallel.valueChanged.connect(
             _persist_novel('novel_parallel_chunks', int))
         novel_balanced.toggled.connect(
@@ -1892,9 +1869,9 @@ class TranslationSetting(QDialog):
         novel_context_reasoning.toggled.connect(
             lambda checked: self.config.update(
                 novel_context_reasoning=bool(checked)))
-        novel_combined_context.toggled.connect(
+        novel_address_forms.toggled.connect(
             lambda checked: self.config.update(
-                novel_combined_context_call=bool(checked)))
+                novel_address_forms=bool(checked)))
         novel_narrative_only.toggled.connect(
             lambda checked: self.config.update(
                 novel_context_narrative_only=bool(checked)))

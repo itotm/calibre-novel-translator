@@ -1,5 +1,45 @@
 # Changelog
 
+## v1.3.5
+
+**Forms of address settled pair by pair, as the characters meet**
+
+* The report on each chapter, asked from its source before the chapter
+  is translated, now also settles how its characters address each other
+  where the target language has more than one way to: one form for each
+  speaker and listener ("Michael -> Bartholomew: tu"), named by the word
+  the language uses, so tu and Lei, du and Sie, tu and vous or the
+  speech levels of Japanese are asked for alike. Every chunk of the
+  chapter is given the forms of the characters it names, so chunks
+  translated apart, several at once, no longer choose their own. In 1.3.4
+  the author brief settled them once, before the first chapter, and only
+  for the characters the model already knew; a character who came in at
+  chapter 12 had nothing settled.
+* The first form settled for a pair holds for the whole book. The model
+  may change it only when the story changes it, one offering the other
+  the familiar form, a marriage, a rank revealed, and has to say so and
+  where; the chunks of that chapter are told the form it changes from,
+  and the log names the change. A different form given without it is
+  dropped and logged, and a chapter translated again uses the form in
+  force at that chapter.
+* The new *Address* tab of the translation window lists the forms
+  settled, and takes corrections between runs; a form written there is
+  never changed by the model. *Forms of address* in the settings turns
+  it all off.
+* The author brief no longer ends with a paragraph of pairs: it says how
+  the forms of address fit the book, and the report reads it.
+
+**One way of asking for the context**
+
+* The report on a chapter is always asked before the chapter, from its
+  source: the option to ask it afterwards, from source and translation,
+  is gone, and with it the option to ask for summary and glossary in two
+  requests. Asked afterwards it cost twice the tokens, and what a
+  chapter introduced reached only the chapters after it.
+* The last chapter gets its report by default: its summary is read by
+  nobody, but its names and forms of address keep its own chunks
+  consistent. *Context of the last chapter: Skip* saves the request.
+
 ## v1.3.4
 
 **Formal and familiar address settled once, for the whole book**

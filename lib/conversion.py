@@ -216,8 +216,6 @@ def get_novel_config():
             'novel_front_matter_titles', None),
         'novel_untranslated_titles': config.get(
             'novel_untranslated_titles', None),
-        'novel_context_timing': config.get(
-            'novel_context_timing', 'before'),
         'novel_parallel_chunks': config.get('novel_parallel_chunks', 1),
         'novel_balanced_chunks': config.get('novel_balanced_chunks', True),
         'novel_chunk_context': config.get(
@@ -237,12 +235,11 @@ def get_novel_config():
             'novel_summary_input_max_chars', 40000),
         'novel_summary_max_chars': config.get(
             'novel_summary_max_chars', 0),
-        'novel_combined_context_call': config.get(
-            'novel_combined_context_call', True),
+        'novel_address_forms': config.get('novel_address_forms', True),
         'novel_context_narrative_only': config.get(
             'novel_context_narrative_only', True),
         'novel_skip_context_last_chapter': config.get(
-            'novel_skip_context_last_chapter', True),
+            'novel_skip_context_last_chapter', False),
         'novel_translation_prompt': config.get(
             'novel_translation_prompt', None),
         'novel_author_style': config.get('novel_author_style', 'model'),

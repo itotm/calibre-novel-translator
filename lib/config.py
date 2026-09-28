@@ -97,22 +97,23 @@ defaults: dict[str, Any] = {
     # at 30000 tokens of input, every chapter; 40000 keeps the whole of
     # most chapters and a third off the rest.
     'novel_summary_input_max_chars': 40000,
-    # Ask for the summary and the glossary in a single request. Both
-    # read the chapter that was just translated, so two calls send it
-    # twice: measured on a real book, the summary call carried 7000 to
-    # 8000 tokens of chapter text the glossary call was about to send
-    # again. A summary or glossary prompt typed by the user turns this
-    # off by itself, so that prompt is not silently ignored.
-    'novel_combined_context_call': True,
+    # Settle, in the report on each chapter, how its characters address
+    # each other where the target language has more than one way to
+    # (tu and Lei, du and Sie, levels of politeness): one form per
+    # speaker and listener, kept for the whole book unless the story
+    # changes it, and stated in every request. Chunks translated apart
+    # otherwise each choose their own.
+    'novel_address_forms': True,
     # Keep the summary and the glossary only for chapters that belong
     # to the story. The model that summarises a chapter says whether it
     # is one; a copyright page, a list of the author's other books, a
     # preface or a note would otherwise be carried into every later
     # prompt as if it were plot.
     'novel_context_narrative_only': True,
-    # The last chapter's summary and glossary are read by nobody: the
-    # context of a chapter exists for the chapters that follow it.
-    'novel_skip_context_last_chapter': True,
+    # Skip the report on the last chapter. Its summary is read by
+    # nobody, but its names and forms of address keep its own chunks
+    # consistent: off by default, one request per book.
+    'novel_skip_context_last_chapter': False,
     # Whether the summary and glossary calls may spend reasoning tokens.
     # Off by default: neither task is a reasoning task, and on a measured
     # chapter the glossary call spent three quarters of its output on
@@ -166,13 +167,6 @@ defaults: dict[str, Any] = {
     # original language, such as the list of the author's other books.
     # None means the shipped list (see lib.novel.UNTRANSLATED_TITLES).
     'novel_untranslated_titles': None,
-    # When the summary and the glossary of a chapter are asked for:
-    #   'before' -> from the source, before the chapter is translated:
-    #               half the tokens, and the glossary already guides
-    #               every chunk of the chapter itself. Default.
-    #   'after'  -> from source and translation together, once the
-    #               chapter is done.
-    'novel_context_timing': 'before',
     # How many chunks of one chapter may be in flight at once. 1 is the
     # sequential pipeline. More sends the chunks of a chapter together,
     # each on its own copy of the engine, with the source text around

@@ -12,8 +12,11 @@ in parallel, it:
   * maintains a running summary of previously translated chapters, injected
     into each translation prompt so the model preserves narrative continuity;
   * maintains a dynamic glossary of characters, places and other named
-    entities extracted after each chapter, kept consistent across the book;
-  * persists progress, summaries and glossary in the existing SQLite cache
+    entities, and the forms of address between the characters, each
+    settled from a chapter's source before it is translated and kept
+    for the rest of the book;
+  * persists progress, summaries, glossary and forms of address in the
+    existing SQLite cache
     (via the ``info`` key/value table -- no schema change) so an interrupted
     translation can be resumed from the last completed chapter.
 
@@ -621,6 +624,9 @@ INFO_NOVEL_GLOSSARY = 'novel_glossary'
 INFO_NOVEL_PROGRESS = 'novel_progress'
 INFO_NOVEL_CHAPTERS = 'novel_chapters_meta'
 INFO_NOVEL_STYLE = 'novel_author_style'
+# How the characters address each other, settled pair by pair (see
+# ``ContextManager.address``).
+INFO_NOVEL_ADDRESS = 'novel_address'
 # Why there is no brief, when there is none: shown in the window where
 # the brief would be, instead of an empty tab.
 INFO_NOVEL_STYLE_NOTE = 'novel_author_style_note'
@@ -654,6 +660,20 @@ def _mentions(haystack, name):
     return len(words) > 1 and max(words, key=len) in haystack
 
 
+def address_key(speaker, listener):
+    """What identifies one direction of a pair in
+    :attr:`ContextManager.address`: the two names, whatever their case."""
+    return ((speaker or '').strip().casefold(),
+            (listener or '').strip().casefold())
+
+
+def _address_since(entry):
+    try:
+        return int(entry.get('since') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class ContextManager:
     """Persist and expose the running context for a novel translation.
 
@@ -673,8 +693,18 @@ class ContextManager:
         are optional. An entry written or corrected in the window also
         carries ``"user": true``: the model never changes it and the cap
         never drops it.
+      * ``address``: how the characters address each other where the
+        target language has more than one way to (tu and Lei, du and
+        Sie, levels of politeness), as a list of dicts ``{"speaker":
+        str, "listener": str, "form": str, "since": int, "notes": str}``,
+        one per direction: A may say "tu" to B and hear "Lei" back. The
+        names are the source-language names of the glossary. A pair has
+        a second entry, with a later ``since``, only when the story
+        changes the form (see ``NovelTranslator._new_address``). An
+        entry written in the window carries ``"user": true`` like a
+        glossary entry.
 
-    Both are serialized as JSON in the SQLite ``info`` key/value table of the
+    All are serialized as JSON in the SQLite ``info`` key/value table of the
     translation cache. No schema change is required.
     """
 
@@ -688,6 +718,7 @@ class ContextManager:
         self.glossary_max_entries = int(glossary_max_entries or 0)
         self.summaries = []
         self.glossary = {}
+        self.address = []
         self.style = ''
         self.progress = 0
 
@@ -710,6 +741,15 @@ class ContextManager:
         except (ValueError, TypeError):
             self.glossary = {}
 
+        raw = self.cache.get_info(INFO_NOVEL_ADDRESS)
+        try:
+            address = json.loads(raw) if raw else []
+        except (ValueError, TypeError):
+            address = []
+        self.address = [
+            entry for entry in address if isinstance(entry, dict)] \
+            if isinstance(address, list) else []
+
         raw = self.cache.get_info(INFO_NOVEL_STYLE)
         self.style = raw if isinstance(raw, str) else ''
 
@@ -728,6 +768,9 @@ class ContextManager:
         self.cache.set_info(
             INFO_NOVEL_GLOSSARY, json.dumps(
                 self.glossary, ensure_ascii=False))
+        self.cache.set_info(
+            INFO_NOVEL_ADDRESS, json.dumps(
+                self.address, ensure_ascii=False))
         self.cache.set_info(INFO_NOVEL_STYLE, self.style or '')
         self.cache.set_info(INFO_NOVEL_PROGRESS, str(self.progress))
 
@@ -741,6 +784,9 @@ class ContextManager:
 
     def get_glossary(self):
         return dict(self.glossary)
+
+    def get_address(self):
+        return [dict(entry) for entry in self.address]
 
     def get_style(self):
         return self.style or ''
@@ -802,16 +848,61 @@ class ContextManager:
                 key: entries[key] for key in list(entries)[-limit:]}
         return dict(entries)
 
+    def address_for(self, chapter_index, text=None, address=None):
+        """The form each speaker uses with each listener in chapter
+        ``chapter_index``, as ``[(entry, previous)]``.
+
+        ``entry`` is the one in force: the latest whose ``since`` is not
+        past the chapter, or the first one when all are, since a form
+        decided later still holds for a chapter translated again before
+        it. ``previous`` is the entry it replaced when the change falls
+        in this very chapter, ``None`` otherwise: the chunks before the
+        moment it happens still use the old form.
+
+        :text: when given, only the pairs whose two names it mentions
+            (see :meth:`glossary_for`).
+        """
+        entries = self.address if address is None else address
+        haystack = text.casefold() if text else None
+        pairs = {}
+        for entry in entries:
+            speaker = (entry.get('speaker') or '').strip()
+            listener = (entry.get('listener') or '').strip()
+            if not speaker or not listener or not entry.get('form'):
+                continue
+            if haystack is not None and not (
+                    _mentions(haystack, speaker)
+                    and _mentions(haystack, listener)):
+                continue
+            pairs.setdefault(address_key(speaker, listener), []).append(
+                entry)
+        chapter_index = int(chapter_index or 0)
+        result = []
+        for history in pairs.values():
+            history = sorted(history, key=_address_since)
+            reached = [e for e in history
+                       if _address_since(e) <= chapter_index]
+            entry = reached[-1] if reached else history[0]
+            previous = None
+            if reached and len(reached) > 1 \
+                    and _address_since(entry) == chapter_index:
+                previous = reached[-2]
+            result.append((entry, previous))
+        return result
+
     # -- mutation ----------------------------------------------------------
 
     def append_chapter(self, chapter_index, title, summary,
-                       glossary_updates=None):
+                       glossary_updates=None, address_updates=None):
         """Record that ``chapter_index`` was completed.
 
         :summary: the summary text (already in the target language).
         :glossary_updates: iterable of dicts with at least ``source`` and
             ``translation`` keys; ``type`` and ``notes`` are optional.
             Duplicates (by ``source``) update the existing entry.
+        :address_updates: entries of :attr:`address`, already judged
+            against the ones stored (see
+            ``NovelTranslator._new_address``).
         """
         summary = (summary or '').strip()
         if summary or title:
@@ -830,6 +921,8 @@ class ContextManager:
                 self.summaries.append(entry)
         if glossary_updates:
             self._merge_glossary(glossary_updates)
+        if address_updates:
+            self.address = self._merged_address(address_updates)
         # Progress advances only forward.
         if chapter_index > self.progress:
             self.progress = int(chapter_index)
@@ -858,6 +951,34 @@ class ContextManager:
             glossary[source] = entry
         return glossary
 
+    def _merged_address(self, updates):
+        """A copy of :attr:`address` with ``updates`` in it. An entry
+        for a pair and a chapter already there replaces it -- the same
+        chapter reported again -- unless the user wrote that one."""
+        address = [dict(entry) for entry in self.address]
+        for update in updates:
+            key = address_key(update['speaker'], update['listener'])
+            since = _address_since(update)
+            for i, entry in enumerate(address):
+                if address_key(entry.get('speaker'), entry.get(
+                        'listener')) == key \
+                        and _address_since(entry) == since:
+                    if not entry.get('user'):
+                        address[i] = dict(update)
+                    break
+            else:
+                address.append(dict(update))
+        return address
+
+    def replace_address(self, address):
+        """Wholesale replacement: what the Address tab of the window
+        saves, between runs."""
+        self.address = [
+            dict(entry) for entry in address
+            if isinstance(entry, dict) and entry.get('speaker')
+            and entry.get('listener') and entry.get('form')]
+        self._persist()
+
     def _merge_glossary(self, updates):
         self.glossary = self._merged_glossary(updates)
         # Enforce cap (FIFO on insertion order preserved by dict). The
@@ -881,6 +1002,7 @@ class ContextManager:
     def reset(self):
         self.summaries = []
         self.glossary = {}
+        self.address = []
         self.style = ''
         self.progress = 0
         self._persist()
@@ -929,49 +1051,100 @@ class ContextManager:
             lines.append('- %s -> %s%s' % (source, translation, suffix))
         return '\n'.join(lines)
 
+    def format_address(self, pairs):
+        lines = []
+        for entry, previous in pairs:
+            line = '- %s -> %s: %s' % (
+                entry['speaker'], entry['listener'], entry['form'])
+            notes = (entry.get('notes') or '').strip()
+            if previous is not None:
+                line += model_text(
+                    ', from the moment this chapter changes it; {old} '
+                    'before that').format(old=previous['form'])
+            if notes:
+                line += ' (%s)' % notes
+            lines.append(line)
+        return '\n'.join(lines)
+
     def context_text(self, budget_tokens=4000, ratio=4.0,
-                     relevant_to=None, glossary_limit=0, pending=None):
-        """Return a formatted string containing the recent summaries and the
-        glossary, truncated to fit ``budget_tokens`` (approximate).
+                     relevant_to=None, glossary_limit=0, pending=None,
+                     chapter=0):
+        """Return a formatted string containing the recent summaries, the
+        glossary and the forms of address, truncated to fit
+        ``budget_tokens`` (approximate).
 
         Priority when trimming (from most to least important, i.e. dropped
-        last): glossary > most recent summaries > older summaries.
+        last): forms of address > glossary > most recent summaries >
+        older summaries. The forms of address are a few short lines and
+        are never trimmed: a chunk without them picks its own.
 
-        :relevant_to: when given, only the glossary entries this text
-            mentions are included (see :meth:`glossary_for`). Trimming by
-            budget drops glossary lines from the end, so a book long
-            enough to fill the budget would otherwise lose exactly the
-            names it learned most recently.
+        :relevant_to: when given, only the glossary entries and the pairs
+            this text mentions are included (see :meth:`glossary_for`).
+            Trimming by budget drops glossary lines from the end, so a
+            book long enough to fill the budget would otherwise lose
+            exactly the names it learned most recently.
         :glossary_limit: hard cap on the number of glossary entries.
-        :pending: ``(summary_entry, glossary_updates)`` of the chapter
-            being translated, worked out from its source before its
-            translation started: shown with the rest but not stored
-            until the chapter is done.
+        :pending: ``(summary_entry, glossary_updates, address_updates)``
+            of the chapter being translated, worked out from its source
+            before its translation started: shown with the rest but not
+            stored until the chapter is done.
+        :chapter: the index of the chapter being translated, which says
+            which form of a pair is in force (see :meth:`address_for`).
         """
         max_chars = max(200, int(budget_tokens * ratio))
 
         summaries = list(self.summaries)
         glossary = None
+        address = None
         if pending:
-            entry, updates = pending
+            entry, updates, address_updates = (tuple(pending) + (None,))[:3]
             if entry and (entry.get('summary') or '').strip():
                 summaries.append(entry)
             if updates:
                 glossary = self._merged_glossary(updates)
+            if address_updates:
+                address = self._merged_address(address_updates)
 
         glossary_text = self._format_glossary(
             self.glossary_for(
                 relevant_to, limit=glossary_limit, glossary=glossary))
+        address_text = self.format_address(
+            self.address_for(chapter, relevant_to, address=address))
         summaries_text = self._format_summaries(summaries)
 
-        combined = (
-            model_text('Story so far (previous chapters summary):') + '\n'
-            + summaries_text + '\n\n'
-            + model_text('Glossary (use these exact translations):') + '\n'
-            + glossary_text)
+        def assemble():
+            text = (
+                model_text('Story so far (previous chapters summary):')
+                + '\n' + summaries_text + '\n\n'
+                + model_text('Glossary (use these exact translations):')
+                + '\n' + glossary_text)
+            if address_text:
+                text += '\n\n' + model_text(
+                    'Forms of address (how each speaker addresses each '
+                    'listener; settled for the whole book, follow them in '
+                    'every line the two exchange):') + '\n' + address_text
+            return text
 
+        combined = assemble()
         if len(combined) <= max_chars:
             return combined
+
+        # Progressively drop oldest summaries.
+        while len(summaries) > 1:
+            summaries = summaries[1:]
+            summaries_text = self._format_summaries(summaries)
+            combined = assemble()
+            if len(combined) <= max_chars:
+                return combined
+
+        # Still too big: truncate glossary lines.
+        glossary_lines = glossary_text.split('\n')
+        while glossary_lines and len(combined) > max_chars:
+            glossary_lines.pop()
+            glossary_text = '\n'.join(glossary_lines) \
+                or model_text('(truncated)')
+            combined = assemble()
+        return combined
 
         # Progressively drop oldest summaries.
         while len(summaries) > 1:
@@ -1045,10 +1218,12 @@ DEFAULT_NOVEL_TRANSLATION_PROMPT = (
     'vocabulary, syntax, register and conversational habits rather than '
     'through exaggerated dialect. Do not flatten the difference between '
     'educated and uneducated speech, or between formal and familiar '
-    'address. Where <tlang> distinguishes formal from familiar address, '
-    'choose the form the relationship between the two characters implies '
-    'and keep it stable for that pair until the story itself changes '
-    'it.\n\n'
+    'address. Where <tlang> has more than one way to address someone, '
+    'use the form the running context below settles for each speaker '
+    'and listener in every line they exchange: the rest of the book is '
+    'translated by other requests that follow it too. For a pair it does '
+    'not list, choose the form the relationship implies and keep it '
+    'stable until the story itself changes it.\n\n'
 
     'Nothing invented, nothing lost. Do not explain, expand, summarise, '
     'annotate, or make explicit what the original leaves implicit. Do '
@@ -1136,77 +1311,19 @@ DEFAULT_NOVEL_SUMMARY_PROMPT = (
     '{text}') % NOT_A_STORY_CHAPTER
 
 
-DEFAULT_NOVEL_GLOSSARY_PROMPT = (
-    'You extract named entities from a translated novel chapter. '
-    'List NEW entities not already in the existing list: characters, '
-    'places, unique objects, organizations.\n\n'
-    'Reply with ONLY a JSON object. No preamble, no explanation, no '
-    'markdown fences. Follow this exact schema:\n\n'
-    '{"entities": [\n'
-    '  {"source": "Aslan", "translation": "Aslan", "type": "character", '
-    '"notes": "the lion"},\n'
-    '  {"source": "Narnia", "translation": "Narnia", "type": "place", '
-    '"notes": ""}\n'
-    ']}\n\n'
-    'If no new entities, reply exactly: {"entities": []}\n\n'
-    'Hard limit: {max_entities} entries, the most important first; '
-    'count them and stop there. Never list the same name twice, and '
-    'never list a name that is already known.\n\n'
-    'Already known (skip these): {existing_keys}\n\n'
-    'Source:\n{source_text}\n\n'
-    'Translation:\n{translated_text}')
-
-
-# Asks in one request for what DEFAULT_NOVEL_SUMMARY_PROMPT and
-# DEFAULT_NOVEL_GLOSSARY_PROMPT ask in two. Both need the chapter that
-# was just translated, so keeping them apart means sending it twice: on
-# a measured book the summary call carried 7000 to 8000 tokens of
-# chapter text that the glossary call was about to send again. The
-# summary comes first in the reply on purpose -- it is the field that
-# survives if the answer is cut short.
-DEFAULT_NOVEL_CONTEXT_PROMPT = (
-    'You have just translated a chapter of a novel. Report on it with a '
-    'single JSON object holding a summary and the named entities it '
-    'introduced.\n\n'
-    'Reply with ONLY that JSON object. No preamble, no explanation, no '
-    'markdown fences. Follow this exact schema:\n\n'
-    '{"narrative": true, "summary": "...", "entities": [\n'
-    '  {"source": "Aslan", "translation": "Aslan", "type": "character", '
-    '"notes": "the lion"},\n'
-    '  {"source": "Narnia", "translation": "Narnia", "type": "place", '
-    '"notes": ""}\n'
-    ']}\n\n'
-    '"narrative" is true when the chapter is part of the story itself '
-    'and false for anything around it: a copyright page, a list of '
-    'other books, a dedication, a table of contents, a preface, an '
-    'afterword, notes, a biography of the author. When it is false, '
-    'make "summary" one sentence saying what the chapter is and '
-    '"entities" an empty list.\n\n'
-    '"summary" is 150 to 350 words in <tlang>. Focus on plot events, '
-    'character introductions and developments, key locations, and '
-    'anything that will help translate the following chapters '
-    'consistently (relationships between characters, unresolved '
-    'threads). No preamble, no metacommentary.\n\n'
-    '"entities" lists only the NEW characters, places, unique objects '
-    'and organizations, each with the translation you used for it, the '
-    'most important first. Hard limit: {max_entities} entries. Count '
-    'them and stop at {max_entities}, whatever is left out; a longer '
-    'list is cut off unread. Never list the same name twice, and never '
-    'list a name that is already known. Use an empty list when there '
-    'are none.\n\n'
-    'Write "narrative" and "summary" before "entities": a reply cut '
-    'short must still carry the summary.\n\n'
-    'Chapter {chapter_num}: "{chapter_title}"\n\n'
-    'Already known (skip these): {existing_keys}\n\n'
-    'Source:\n{source_text}\n\n'
-    'Translation:\n{translated_text}')
-
-
-# The same report, asked before the chapter is translated and from its
-# source alone (``novel_context_timing`` = 'before'). Half the tokens of
-# the report above, which sends the chapter twice, and the glossary it
-# yields is already in the prompt when the chapter's own chunks are
-# translated: a name is rendered the same way in chunk 1 and chunk 3.
+# The report on a chapter, asked before it is translated and from its
+# source alone: a summary for the chapters that follow, the names the
+# chapter introduces with the rendering each is to have, and (see
+# DEFAULT_NOVEL_ADDRESS_PROMPT) the forms of address of its characters.
+# What it settles is in the prompt of every chunk of the chapter, so the
+# chunks, translated apart and several at once, render a name or a form
+# of address the same way. Asking afterwards, from source and
+# translation together, sent the chapter twice, and what a chapter
+# introduced was settled only for the chapters after it: the first
+# chapter two characters spoke in was where their chunks disagreed.
+#
+# The summary comes first in the reply on purpose -- it is the field
+# that survives if the answer is cut short.
 DEFAULT_NOVEL_CONTEXT_SOURCE_PROMPT = (
     'You are about to translate a chapter of a novel into <tlang>. '
     'Before it is translated, report on it with a single JSON object '
@@ -1241,11 +1358,50 @@ DEFAULT_NOVEL_CONTEXT_SOURCE_PROMPT = (
     '{max_entities}, whatever is left out; a longer list is cut off '
     'unread. Never list the same name twice, and never list a name '
     'that is already known. Use an empty list when there are none.\n\n'
+    '{address}'
     'Write "narrative" and "summary" before "entities": a reply cut '
     'short must still carry the summary.\n\n'
     'Chapter {chapter_num}: "{chapter_title}"\n\n'
     'Already known (skip these): {existing_keys}\n\n'
+    '{address_settled}'
     'Source:\n{source_text}')
+
+
+# What the report adds when forms of address are settled pair by pair
+# (``novel_address_forms``). Each direction is its own item because the
+# two often differ: a servant says "Lei" to the master who says "tu"
+# back. The form is named by the word the target language uses, so the
+# same request serves tu and Lei, du and Sie, tu and vous, ты and вы,
+# and the speech levels of Japanese or Korean. Chunks translated apart,
+# several at once, each chose their own: GPT-6 Luna Pro had two friends
+# switch from "tu" to "voi" and back within a page. The pairs already
+# settled are left out of the answer, which keeps the first choice
+# from being asked again and chosen differently; a change the story
+# makes is the one exception, and it has to say so.
+DEFAULT_NOVEL_ADDRESS_PROMPT = (
+    'The object also holds "address", which settles how the characters '
+    'address each other in <tlang>, so that every part of the book '
+    'renders it alike. Make it an empty list if <tlang> addresses '
+    'everyone the same way. Otherwise list, for every two characters who '
+    'speak to each other in this chapter, one item for each direction: '
+    '{"speaker": "Lucy", "listener": "Aslan", "form": "...", "change": '
+    'false, "notes": ""}. Name "speaker" and "listener" as the glossary '
+    'does, or, for a character it does not list yet, by the name the '
+    'source uses most. "form" is the form the speaker uses for the '
+    'listener, named by the word <tlang> uses for it: a pronoun, or a '
+    'level of politeness. Decide from the relationship the story shows, '
+    'rank, age, kinship, intimacy, and from the brief below when there '
+    'is one; for a story set in the past, take the form a historical '
+    'novel in <tlang> would use.\n\n'
+    'Leave out every direction already settled below, unless this '
+    'chapter changes the relationship so plainly that the form changes '
+    'with it: one offers the other the familiar form, they become lovers '
+    'or marry, a disguise falls and a rank comes out. Then list that '
+    'direction again with the new form, "change": true, and in "notes" '
+    'the moment it happens. That is rare: never list a change to correct '
+    'or vary a form already settled. Hard limit: {max_address} items, '
+    'the main characters first. Write "address" after "summary" and '
+    'before "entities".\n\n')
 
 
 # Asked once per book, before the first chapter, when
@@ -1290,12 +1446,10 @@ DEFAULT_NOVEL_AUTHOR_CHECK_PROMPT = (
 # from the title alone they placed it in another series or credited it
 # to another writer's detective. The title is never evidence enough.
 #
-# The last paragraph settles formal and familiar address pair by pair.
-# The chunks of a chapter are translated apart, several at once, and
-# none sees what the others chose: asked only to "keep the form stable
-# for each pair", GPT-6 Luna Pro had two friends switch from "tu" to
-# "voi" and back within a page. The brief reaches every chunk, so the
-# decision taken once there is the one every chunk follows.
+# The brief says how the forms of address of the target language fit
+# the book, and not which form each pair uses: that is settled chapter
+# by chapter, as the pairs meet (see DEFAULT_NOVEL_ADDRESS_PROMPT), by
+# a request that reads the brief.
 DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT = (
     'You are preparing a brief for the translator of "{title}" by '
     '{author}, from <slang> into <tlang>. The translator works on the '
@@ -1321,9 +1475,9 @@ DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT = (
     'recurring oaths, titles, forms of address and period or foreign '
     'terms, the mannerisms of the main characters, and what a '
     'translation would most easily flatten. Then say what that means in '
-    '<tlang>: the register of the narration, how formal and familiar '
-    'address should be rendered between the kinds of characters the '
-    'book has, how titles, oaths and period words are best carried '
+    '<tlang>: the register of the narration, how the forms of address '
+    'of <tlang> fit the kinds of characters the book has and the '
+    'relationships between its recurring characters, how titles, oaths and period words are best carried '
     'over, and what must not be modernised, smoothed or made more '
     'literary. Leave the names of people and places as they are: the '
     'glossary settles them.\n\n'
@@ -1335,18 +1489,7 @@ DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT = (
     'Only if you know nothing reliable about how this author writes, or '
     'the name belongs to several writers and you cannot tell which one '
     'wrote this book, reply with exactly: %s\n\n'
-    'Write 200 to 350 words of plain prose in <tlang>. If <tlang> '
-    'distinguishes formal from familiar address, end with one more '
-    'paragraph, which is a decision for this translation rather than a '
-    'description: for each pair of main or recurring characters who '
-    'speak to each other, the form each uses with the other, one pair '
-    'per sentence, as in "A and B: familiar both ways." or "A to C: '
-    'formal; C to A: familiar.", naming each form by the pronoun '
-    '<tlang> uses for it. Decide from the relationship the series and '
-    'the excerpts show, rank, age, friendship; for a story set in the '
-    'past, take the formal form a historical novel in <tlang> would '
-    'use. Cover every such pair you can name, the protagonist and '
-    'their closest companions first. Reply with the '
+    'Write 200 to 350 words of plain prose in <tlang>. Reply with the '
     'brief itself and nothing else: no preamble, no headings, no lists, '
     'no citations, no closing remarks.\n\n'
     'Author: {author}\n'
@@ -2643,23 +2786,23 @@ class NovelTranslator:
         except (TypeError, ValueError):
             return 50
 
-    def _entities_schema(self):
-        """The entity list of the schemas, capped at
-        :attr:`glossary_chapter_max_entries`."""
-        schema = dict(self._GLOSSARY_RESPONSE_SCHEMA['properties']['entities'])
-        schema['maxItems'] = self.glossary_chapter_max_entries
-        return schema
-
-    def _glossary_schema(self):
-        schema = dict(self._GLOSSARY_RESPONSE_SCHEMA)
-        schema['properties'] = dict(schema['properties'])
-        schema['properties']['entities'] = self._entities_schema()
-        return schema
-
     def _context_schema(self):
+        """The schema of the report, with the entity list capped at
+        :attr:`glossary_chapter_max_entries` and, when
+        :attr:`address_forms` is on, the forms of address before it."""
         schema = dict(self._CONTEXT_RESPONSE_SCHEMA)
-        schema['properties'] = dict(schema['properties'])
-        schema['properties']['entities'] = self._entities_schema()
+        properties = dict(schema['properties'])
+        entities = dict(properties.pop('entities'))
+        entities['maxItems'] = self.glossary_chapter_max_entries
+        required = list(schema['required'])
+        if self.address_forms:
+            address = dict(self._ADDRESS_SCHEMA)
+            address['maxItems'] = self.ADDRESS_MAX_ITEMS
+            properties['address'] = address
+            required.insert(required.index('entities'), 'address')
+        properties['entities'] = entities
+        schema['properties'] = properties
+        schema['required'] = required
         return schema
 
     @property
@@ -2703,9 +2846,8 @@ class NovelTranslator:
     # than it improved the answer. The translation prompt stays a
     # setting, because its output is prose.
     summary_prompt = DEFAULT_NOVEL_SUMMARY_PROMPT
-    glossary_prompt = DEFAULT_NOVEL_GLOSSARY_PROMPT
-    context_prompt = DEFAULT_NOVEL_CONTEXT_PROMPT
     context_source_prompt = DEFAULT_NOVEL_CONTEXT_SOURCE_PROMPT
+    address_prompt = DEFAULT_NOVEL_ADDRESS_PROMPT
     author_style_prompt = DEFAULT_NOVEL_AUTHOR_STYLE_PROMPT
     author_check_prompt = DEFAULT_NOVEL_AUTHOR_CHECK_PROMPT
 
@@ -2800,13 +2942,24 @@ class NovelTranslator:
         return (value or '').strip()
 
     @property
-    def combined_context_call(self):
-        """Whether the summary and the glossary are asked for at once.
+    def address_forms(self):
+        """Whether the report on each chapter also settles how its
+        characters address each other (see
+        ``DEFAULT_NOVEL_ADDRESS_PROMPT``), and every chunk is told.
 
-        On by default: the two tasks read the same chapter, so keeping
-        them apart sends it twice.
+        On by default. A target language that addresses everyone alike
+        gets an empty list back and nothing in the prompts; one that has
+        tu and Lei, du and Sie, or levels of politeness gets one form per
+        speaker and listener, kept for the whole book unless the story
+        changes it. Without it the chunks of a chapter, translated apart,
+        each chose their own.
         """
-        return bool(self._cfg('novel_combined_context_call', True))
+        return bool(self._cfg('novel_address_forms', True))
+
+    # How many forms of address one report may add. A chapter with a
+    # crowd in it does not need every pair of the crowd settled, and a
+    # list that runs on pushes the names out of the reply.
+    ADDRESS_MAX_ITEMS = 30
 
     @property
     def context_narrative_only(self):
@@ -2823,14 +2976,17 @@ class NovelTranslator:
 
     @property
     def skip_context_last_chapter(self):
-        """Whether the last chapter skips the summary and glossary call.
+        """Whether the last chapter skips the report on it.
 
-        On by default: nothing ever reads them. The context of a chapter
-        is built for the chapters that follow it, and after the last one
-        there are none -- the call is one full copy of the chapter sent
-        for an answer that is stored and never looked at again.
+        Off by default. The report is asked before the chapter is
+        translated, and what it settles -- the names the chapter
+        introduces, the forms of address of the characters who meet in
+        it -- is what keeps its chunks agreeing with one another; only
+        its summary is never read. Skipping it saves one request per
+        book. It used to be on by default, when the report was asked
+        after the chapter and served only the chapters that follow.
         """
-        return bool(self._cfg('novel_skip_context_last_chapter', True))
+        return bool(self._cfg('novel_skip_context_last_chapter', False))
 
     # A chunk is answered with the same text in another language, plus
     # the JSON scaffolding around it: the reply is about as long as what
@@ -3034,16 +3190,6 @@ class NovelTranslator:
         ``UNTRANSLATED_TITLES``)."""
         value = self._cfg('novel_untranslated_titles', None)
         return UNTRANSLATED_TITLES if value is None else str(value)
-
-    @property
-    def context_timing(self):
-        """'before': the summary and the glossary of a chapter are asked
-        from its source before it is translated, at half the tokens,
-        and the glossary guides every chunk of the chapter itself.
-        'after': from source and translation together once the chapter
-        is done, as before."""
-        value = str(self._cfg('novel_context_timing', 'before') or 'before')
-        return 'after' if value == 'after' else 'before'
 
     @property
     def parallel_chunks(self):
@@ -3314,10 +3460,7 @@ class NovelTranslator:
             'How this book is written. The brief below describes the '
             'author and this novel. Reproduce the manner it describes, '
             'except where the text in front of you plainly contradicts '
-            'it: the text always wins. Where it settles how two '
-            'characters address each other, formal or familiar, follow '
-            'it in every line they exchange: the rest of the book is '
-            'translated by other requests that follow it too.'), style)
+            'it: the text always wins.'), style)
 
     def _ensure_author_style(self):
         """Research once, before the first chapter, how the book is written.
@@ -4582,37 +4725,41 @@ class NovelTranslator:
         'required': ['paragraphs'],
     }
 
-    # Same idea as the translation schema, for the entity extraction
-    # call: a server that enforces the shape cannot answer with prose,
+    # Same idea as the translation schema, for the entity list of the
+    # report: a server that enforces the shape cannot answer with prose,
     # cannot preface the JSON, and cannot drift into re-listing the
     # names it was told to skip until it exhausts its output limit.
-    _GLOSSARY_RESPONSE_SCHEMA = {
-        'type': 'object',
-        'additionalProperties': False,
-        'properties': {
-            'entities': {
-                'type': 'array',
-                'items': {
-                    'type': 'object',
-                    'additionalProperties': False,
-                    'properties': {
-                        'source': {'type': 'string'},
-                        'translation': {'type': 'string'},
-                        'type': {'type': 'string'},
-                        'notes': {'type': 'string'},
-                    },
-                    'required': [
-                        'source', 'translation', 'type', 'notes'],
-                },
+    _ENTITIES_SCHEMA = {
+        'type': 'array',
+        'items': {
+            'type': 'object',
+            'additionalProperties': False,
+            'properties': {
+                'source': {'type': 'string'},
+                'translation': {'type': 'string'},
+                'type': {'type': 'string'},
+                'notes': {'type': 'string'},
             },
+            'required': ['source', 'translation', 'type', 'notes'],
         },
-        'required': ['entities'],
     }
 
-    # The combined summary + glossary reply. "summary" is declared
-    # first so a model that follows the schema order writes it before
-    # the entity list: if the answer is cut short, the field that cannot
-    # be salvaged from a broken object is the one already finished.
+    _ADDRESS_SCHEMA = {
+        'type': 'array',
+        'items': {
+            'type': 'object',
+            'additionalProperties': False,
+            'properties': {
+                'speaker': {'type': 'string'},
+                'listener': {'type': 'string'},
+                'form': {'type': 'string'},
+                'change': {'type': 'boolean'},
+                'notes': {'type': 'string'},
+            },
+            'required': ['speaker', 'listener', 'form', 'change', 'notes'],
+        },
+    }
+
     _AUTHOR_CHECK_SCHEMA = {
         'type': 'object',
         'additionalProperties': False,
@@ -4625,13 +4772,18 @@ class NovelTranslator:
         'required': ['recognised', 'works', 'shared_name', 'note'],
     }
 
+    # The report on a chapter. "summary" is declared first so a model
+    # that follows the schema order writes it before the entity list: if
+    # the answer is cut short, the field that cannot be salvaged from a
+    # broken object is the one already finished. The forms of address go
+    # in between (see ``_context_schema``).
     _CONTEXT_RESPONSE_SCHEMA = {
         'type': 'object',
         'additionalProperties': False,
         'properties': {
             'narrative': {'type': 'boolean'},
             'summary': {'type': 'string'},
-            'entities': _GLOSSARY_RESPONSE_SCHEMA['properties']['entities'],
+            'entities': _ENTITIES_SCHEMA,
         },
         'required': ['narrative', 'summary', 'entities'],
     }
@@ -4975,16 +5127,6 @@ class NovelTranslator:
 
     # -- summary / glossary extraction -------------------------------------
 
-    def _build_translated_chapter_text(self, paragraphs, translations):
-        parts = []
-        for i, p in enumerate(paragraphs, start=1):
-            if getattr(p, 'ignored', False):
-                continue
-            t = translations.get(i)
-            if t:
-                parts.append(t)
-        return '\n\n'.join(parts)
-
     def _build_source_chapter_text(self, paragraphs):
         parts = []
         for p in paragraphs:
@@ -5020,15 +5162,17 @@ class NovelTranslator:
         default = 40000  # ~10000 words in Latin text
         return int(self._cfg('novel_summary_input_max_chars', default))
 
-    def _generate_summary(self, chapter, translated_text):
-        if not translated_text.strip():
+    def _generate_summary(self, chapter, text):
+        """Ask for the summary of ``chapter`` alone: what the report
+        falls back on when its reply was cut before the summary."""
+        if not text.strip():
             return ''
         max_chars = self._summary_input_budget_chars()
-        clipped = self._head(translated_text, max_chars)
-        if len(clipped) < len(translated_text):
+        clipped = self._head(text, max_chars)
+        if len(clipped) < len(text):
             self.log(_(
                 'Summary input truncated: {} -> {} chars.').format(
-                    len(translated_text), len(clipped)))
+                    len(text), len(clipped)))
         system_prompt = self._fill_placeholders(model_text(
             'You are a helpful assistant that produces concise '
             'summaries.'))
@@ -5075,44 +5219,6 @@ class NovelTranslator:
             'follow.').format(
                 chapter.index, len(summary), limit, len(clipped)), True)
         return clipped.strip()
-
-    def _extract_glossary_updates(self, chapter, source_text, translated_text):
-        if not source_text.strip() or not translated_text.strip():
-            return []
-        max_chars = self._summary_input_budget_chars()
-        src_clipped = self._head(source_text, max_chars)
-        tgt_clipped = self._head(translated_text, max_chars)
-        known, existing_keys = self._glossary_prompt_keys(
-            chapter, '%s\n%s' % (src_clipped, tgt_clipped))
-        system_prompt = self._fill_placeholders(model_text(
-            'You are a helpful assistant. Answer with strict JSON '
-            'only.'))
-        user_prompt = self._compose_prompt(
-            self.glossary_prompt,
-            {
-                '{existing_keys}': (
-                    model_text('Already known (skip these):'),
-                    existing_keys),
-                '{max_entities}': (
-                    None, str(self.glossary_chapter_max_entries)),
-                '{source_text}': (model_text('Source:'), src_clipped),
-                '{translated_text}': (
-                    model_text('Translation:'), tgt_clipped),
-            },
-            required=(
-                '{existing_keys}', '{source_text}', '{translated_text}'))
-        try:
-            response = self._translate_context_call(
-                system_prompt, user_prompt,
-                _('glossary of chapter {}').format(chapter.index),
-                schema=self._glossary_schema())
-        except TranslationFailed as e:
-            self.log(
-                _('Glossary extraction failed: {}').format(e), True)
-            return []
-
-        return self._new_entities(
-            self._parse_entities(response, obj=None), known, chapter)
 
     def _parse_entities(self, response, obj=None):
         """Return the entities of a reply, deduplicated.
@@ -5214,66 +5320,65 @@ class NovelTranslator:
         return known, ', '.join(sorted(relevant.keys())) \
             or model_text('(none)')
 
-    def _generate_context(self, chapter, source_text, translated_text):
-        """Ask for the summary and the glossary of a chapter at once.
+    def _address_blocks(self, chapter, text):
+        """The ``{address}`` and ``{address_settled}`` parts of the
+        report on ``chapter``: what to ask, and the forms already
+        settled between the characters ``text`` names, with the author
+        brief the new ones are to agree with. Both empty when
+        :attr:`address_forms` is off."""
+        if not self.address_forms:
+            return '', ''
+        ask = self._fill_placeholders(self.address_prompt, extra={
+            '{max_address}': str(self.ADDRESS_MAX_ITEMS)})
+        pairs = self.ctx.address_for(
+            chapter.index, text if self.glossary_relevant_only else None)
+        settled = self.ctx.format_address(
+            [(entry, None) for entry, _previous in pairs]) \
+            or model_text('(none)')
+        parts = ['%s\n%s' % (model_text('Forms of address already settled:'),
+                              settled)]
+        style = self.author_style
+        if style:
+            parts.append('%s\n%s' % (model_text(
+                'The brief on how the book is written, which the forms of '
+                'address are to agree with:'), style))
+        return ask, '\n\n'.join(parts) + '\n\n'
 
-        Returns ``(summary, new_entities)``, the same pair the two
-        separate calls produce. See :attr:`combined_context_call`.
+    def _generate_context(self, chapter, source_text):
+        """Report on a chapter from its source, before it is translated.
 
-        With ``translated_text`` None the chapter has not been translated
-        yet: the report is asked from the source alone, and the glossary
-        it yields says how the names are to be rendered (see
-        :attr:`context_timing`).
+        Returns ``(summary, new_entities, new_address)``: the summary,
+        the glossary entries the chapter introduces with the rendering
+        each is to have, and the forms of address it settles or changes
+        (see :meth:`_new_address`). What it yields is in the prompt of
+        every chunk of the chapter.
         """
-        from_source = translated_text is None
-        if not from_source and not translated_text.strip():
-            return '', []
         max_chars = self._summary_input_budget_chars()
         src_clipped = self._head(source_text, max_chars)
         system_prompt = self._fill_placeholders(model_text(
             'You are a helpful assistant. Answer with strict JSON '
             'only.'))
-        if from_source:
-            known, existing_keys = self._glossary_prompt_keys(
-                chapter, src_clipped)
-            user_prompt = self._compose_prompt(
-                self.context_source_prompt,
-                {
-                    '{chapter_num}': (None, str(chapter.index)),
-                    '{chapter_title}': (None, chapter.title or ''),
-                    '{existing_keys}': (
-                        model_text('Already known (skip these):'),
-                        existing_keys),
-                    '{max_entities}': (
-                        None, str(self.glossary_chapter_max_entries)),
-                    '{source_text}': (model_text('Source:'), src_clipped),
-                },
-                required=('{existing_keys}', '{source_text}'))
-            label = _('summary + glossary of chapter {}, from the '
-                      'source').format(chapter.index)
-        else:
-            tgt_clipped = self._head(translated_text, max_chars)
-            known, existing_keys = self._glossary_prompt_keys(
-                chapter, '%s\n%s' % (src_clipped, tgt_clipped))
-            user_prompt = self._compose_prompt(
-                self.context_prompt,
-                {
-                    '{chapter_num}': (None, str(chapter.index)),
-                    '{chapter_title}': (None, chapter.title or ''),
-                    '{existing_keys}': (
-                        model_text('Already known (skip these):'),
-                        existing_keys),
-                    '{max_entities}': (
-                        None, str(self.glossary_chapter_max_entries)),
-                    '{source_text}': (model_text('Source:'), src_clipped),
-                    '{translated_text}': (
-                        model_text('Translation:'), tgt_clipped),
-                },
-                required=(
-                    '{existing_keys}', '{source_text}',
-                    '{translated_text}'))
-            label = _('summary + glossary of chapter {}').format(
-                chapter.index)
+        known, existing_keys = self._glossary_prompt_keys(
+            chapter, src_clipped)
+        address_ask, address_settled = self._address_blocks(
+            chapter, src_clipped)
+        user_prompt = self._compose_prompt(
+            self.context_source_prompt,
+            {
+                '{chapter_num}': (None, str(chapter.index)),
+                '{chapter_title}': (None, chapter.title or ''),
+                '{existing_keys}': (
+                    model_text('Already known (skip these):'),
+                    existing_keys),
+                '{max_entities}': (
+                    None, str(self.glossary_chapter_max_entries)),
+                '{address}': (None, address_ask),
+                '{address_settled}': (None, address_settled),
+                '{source_text}': (model_text('Source:'), src_clipped),
+            },
+            required=('{existing_keys}', '{source_text}'))
+        label = _('summary + glossary of chapter {}, from the '
+                  'source').format(chapter.index)
         try:
             response = self._translate_context_call(
                 system_prompt, user_prompt, label,
@@ -5281,7 +5386,7 @@ class NovelTranslator:
         except TranslationFailed as e:
             self.log(_(
                 'Summary + glossary extraction failed: {}').format(e), True)
-            return '', []
+            return '', [], []
 
         obj = _extract_json_object(response)
         if obj and isinstance(obj.get('summary'), str):
@@ -5296,9 +5401,12 @@ class NovelTranslator:
         if obj is not None and obj.get('narrative') is False \
                 and self.context_narrative_only:
             self._discard_context(chapter, summary)
-            return '', []
+            return '', [], []
         entities = self._new_entities(
             self._parse_entities(response, obj=obj), known, chapter)
+        address = self._new_address(
+            self._parse_address(response, obj=obj), chapter) \
+            if self.address_forms else []
         if not summary.strip() and entities:
             # The reply listed the names first and was cut before the
             # summary: a chapter without one is a hole in every later
@@ -5306,9 +5414,111 @@ class NovelTranslator:
             self.log(_(
                 'The reply carried the glossary but no summary; asking '
                 'for the summary on its own.'))
-            summary = self._generate_summary(
-                chapter, source_text if from_source else translated_text)
-        return self._clip_summary(summary, chapter), entities
+            summary = self._generate_summary(chapter, source_text)
+        return self._clip_summary(summary, chapter), entities, address
+
+    def _parse_address(self, response, obj=None):
+        """Return the forms of address of a report, one per direction.
+
+        :obj: the decoded reply, ``None`` when it never closed: then the
+            items that did complete are salvaged, as for the entities.
+        """
+        if obj is not None:
+            items = obj.get('address')
+            items = items if isinstance(items, list) else []
+        else:
+            items = [item for item in _iter_json_objects(response)
+                     if item.get('speaker') and item.get('listener')]
+        address = []
+        seen = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            speaker = str(item.get('speaker') or '').strip()
+            listener = str(item.get('listener') or '').strip()
+            form = str(item.get('form') or '').strip()
+            key = address_key(speaker, listener)
+            if not speaker or not listener or not form \
+                    or key[0] == key[1] or key in seen:
+                continue
+            seen.add(key)
+            address.append({
+                'speaker': speaker,
+                'listener': listener,
+                'form': form,
+                'change': item.get('change') is True,
+                'notes': str(item.get('notes') or '').strip(),
+            })
+        return address[:self.ADDRESS_MAX_ITEMS]
+
+    def _new_address(self, items, chapter):
+        """Judge the forms of address a report gave against the ones
+        already settled, and return the entries to store.
+
+        The first form settled for a speaker and a listener holds for
+        the whole book. A report may give another one only as a change
+        the story makes -- "change": true, and the moment it happens in
+        the notes -- and the new form holds from this chapter on. A
+        different form without that flag is a second opinion on a
+        settled question and is dropped, and so is anything about a
+        form the user wrote in the window. Chunks translated apart
+        would otherwise each follow whichever answer they were given.
+        """
+        current = {
+            address_key(entry['speaker'], entry['listener']): entry
+            for entry, _previous in self.ctx.address_for(chapter.index)}
+        added = []
+        for item in items:
+            entry = current.get(address_key(item['speaker'],
+                                            item['listener']))
+            record = {
+                'speaker': item['speaker'],
+                'listener': item['listener'],
+                'form': item['form'],
+                'since': int(chapter.index),
+            }
+            if item['notes']:
+                record['notes'] = item['notes']
+            if entry is None:
+                added.append(record)
+                continue
+            if entry['form'].casefold() == item['form'].casefold():
+                continue
+            if entry.get('user'):
+                self.log(_(
+                    'Forms of address: the report on chapter {} gives '
+                    '"{}" for {} to {}; kept "{}", which you set.').format(
+                        chapter.index, item['form'], entry['speaker'],
+                        entry['listener'], entry['form']))
+                continue
+            if not item['change']:
+                self.log(_(
+                    'Forms of address: the report on chapter {} gives '
+                    '"{}" for {} to {}; kept "{}", settled in chapter '
+                    '{}.').format(
+                        chapter.index, item['form'], entry['speaker'],
+                        entry['listener'], entry['form'],
+                        _address_since(entry)))
+                continue
+            # A change keeps the names the pair was settled under, so the
+            # two entries read as one history in the window.
+            record['speaker'] = entry['speaker']
+            record['listener'] = entry['listener']
+            self.log(_(
+                'Forms of address: {} to {} changes from "{}" to "{}" in '
+                'chapter {}{}.').format(
+                    entry['speaker'], entry['listener'], entry['form'],
+                    item['form'], chapter.index,
+                    ': %s' % item['notes'] if item['notes'] else ''))
+            added.append(record)
+        new = sum(1 for record in added
+                  if address_key(record['speaker'], record['listener'])
+                  not in current)
+        if new:
+            self.log(_(
+                'Forms of address: +{} settled (chapter {}).').format(
+                    new, chapter.index))
+        return added
 
     def _discard_context(self, chapter, summary):
         """Log that a chapter is not part of the story and that nothing
@@ -5509,38 +5719,38 @@ class NovelTranslator:
                     '  Nothing left to translate in this chapter.'))
 
         source_text = self._build_source_chapter_text(chapter.paragraphs)
+        relevant_to = source_text if self.glossary_relevant_only else None
         context_text = self.ctx.context_text(
             budget_tokens=self.context_tokens,
-            relevant_to=source_text if self.glossary_relevant_only else None,
-            glossary_limit=self.glossary_prompt_max_entries)
+            relevant_to=relevant_to,
+            glossary_limit=self.glossary_prompt_max_entries,
+            chapter=chapter.index)
 
+        # The report on the chapter, from its source, before it is
+        # translated: the names it introduces and the forms of address
+        # it settles are rendered the same way in every chunk of it.
+        # A chapter whose paragraphs all came from the cache still gets
+        # one: it was cancelled between its last chunk and its end.
         summary = ''
         glossary_delta = []
-        context_done = front_matter
-        # Summary + glossary from the source, before the chapter is
-        # translated: half the tokens of asking afterwards with the
-        # translation alongside, and the names the chapter introduces
-        # are rendered the same way in every chunk of it.
-        if not context_done and pending and self.context_timing == 'before' \
-                and self._context_wanted(chapter, source_text):
+        address_delta = []
+        if not front_matter and self._context_wanted(chapter, source_text):
             self._chapter_is_narrative = True
-            summary, glossary_delta = self._generate_context(
-                chapter, source_text, None)
-            context_done = True
+            summary, glossary_delta, address_delta = self._generate_context(
+                chapter, source_text)
             if self._chapter_is_narrative:
                 self._log_summary(chapter, summary)
-                if summary or glossary_delta:
+                if summary or glossary_delta or address_delta:
                     context_text = self.ctx.context_text(
                         budget_tokens=self.context_tokens,
-                        relevant_to=(
-                            source_text if self.glossary_relevant_only
-                            else None),
+                        relevant_to=relevant_to,
                         glossary_limit=self.glossary_prompt_max_entries,
                         pending=(
                             {'chapter': chapter.index,
                              'title': chapter.title or '',
                              'summary': summary},
-                            glossary_delta))
+                            glossary_delta, address_delta),
+                        chapter=chapter.index)
 
         reserved = (self.context_tokens + self.summary_tokens
                     + self.overlap_paragraphs * 80)
@@ -5550,41 +5760,22 @@ class NovelTranslator:
         self._settle_missing(chapter, missing, context_text, position,
                              translations, reserved)
 
-        # Summary + glossary from the translation, once it is there.
-        translated_text = self._build_translated_chapter_text(
-            chapter.paragraphs, translations)
-        if not context_done \
-                and self._context_wanted(chapter, translated_text):
-            if self.combined_context_call:
-                self._chapter_is_narrative = True
-                summary, glossary_delta = self._generate_context(
-                    chapter, source_text, translated_text)
-                if self._chapter_is_narrative:
-                    self._log_summary(chapter, summary)
-            else:
-                self._chapter_is_narrative = True
-                summary = self._generate_summary(chapter, translated_text)
-                if self._chapter_is_narrative:
-                    self._log_summary(chapter, summary)
-                    glossary_delta = self._extract_glossary_updates(
-                        chapter, source_text, translated_text)
-
         # Persist context (marks chapter as done, bumps progress). The
         # report is written before the window hears that the chapter is
         # done, because that is when it reads the report back.
         self.ctx.append_chapter(
-            chapter.index, chapter.title, summary, glossary_delta)
+            chapter.index, chapter.title, summary, glossary_delta,
+            address_delta)
         self._publish_report()
         self.chapter_done(chapter, summary, glossary_delta)
         self._report_progress()
 
     def _context_wanted(self, chapter, text):
-        """Whether a summary and a glossary are asked for ``chapter``,
-        judged on ``text`` -- its source or its translation, whichever
-        the timing gives. Trivially short chapters (a copyright page, a
-        dedication) are translated but not summarised, and neither is
-        the last chapter when the setting says so: nothing comes after
-        it."""
+        """Whether the report is asked for ``chapter``, judged on its
+        source ``text``. Trivially short chapters (a copyright page, a
+        dedication) are translated but not reported on, and neither is
+        the last chapter when the setting says so (see
+        :attr:`skip_context_last_chapter`)."""
         length = len((text or '').strip())
         threshold = self.min_chars_for_context
         if length < threshold:

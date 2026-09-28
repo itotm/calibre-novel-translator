@@ -3,7 +3,7 @@
 It runs the chapter-aware sequential pipeline defined in ``lib/novel.py``
 on a single ebook. The model operates on whole chapters, so the window
 shows chapter-level progress plus tabs for the running summaries, the
-dynamic glossary, the author brief and the log.
+dynamic glossary, the forms of address, the author brief and the log.
 
 """
 import time
@@ -39,7 +39,7 @@ from .lib.exception import TranslationCanceled, TranslationFailed
 from .lib.novel import (
     Chapter, ChapterBuilder, ContextManager, NovelTranslator,
     INFO_NOVEL_CHAPTERS, INFO_NOVEL_LOG, INFO_NOVEL_STYLE,
-    INFO_NOVEL_STYLE_NOTE, INFO_NOVEL_REPORT)
+    INFO_NOVEL_STYLE_NOTE, INFO_NOVEL_REPORT, INFO_NOVEL_ADDRESS)
 from .lib.conversion import get_novel_config
 from .lib.book_translations import (
     INFO_MODEL, INFO_PROVIDER, INFO_SERVICE_TIER, configure_translator,
@@ -223,7 +223,8 @@ class NovelTranslationWorker(QObject):
     logging = pyqtSignal(str, bool)
     progress = pyqtSignal(float, str)
     chapter_started = pyqtSignal(int)          # chapter index
-    chapter_done = pyqtSignal(int, str, list)  # index, summary, glossary
+    # index, summary, glossary delta, forms of address (all of them)
+    chapter_done = pyqtSignal(int, str, list, list)
     report = pyqtSignal(str)                   # the report, rewritten
     finished = pyqtSignal(bool, str)           # success, message
 
@@ -436,7 +437,8 @@ class NovelTranslationWorker(QObject):
                 line for line in lines if line)[-300000:])
 
         def chapter_done(chapter, summary, delta):
-            self.chapter_done.emit(chapter.index, summary, delta or [])
+            self.chapter_done.emit(
+                chapter.index, summary, delta or [], ctx.get_address())
             store_log()
         logging(_('Engine: {engine}, model: {model}{tier}.').format(
             engine=translator.name, model=model or _('(none)'),
@@ -1012,7 +1014,8 @@ class NovelTranslation(QDialog):
         metadata, the table of contents, the front matter).
       * Right column: the engine, model and tier of the translation, the
         progress bar and the tabs: the text, to read and correct; the
-        author brief, the summaries, the glossary, the log, the report.
+        author brief, the summaries, the glossary, the forms of address,
+        the log, the report.
       * Bottom: Start / Cancel, the output format, Build, Close.
     """
 
@@ -1024,6 +1027,10 @@ class NovelTranslation(QDialog):
     # The entry of the chapter list that stands for what no chapter
     # holds: metadata, table of contents, front matter.
     AUX_SECTION = TranslationText.AUX_SECTION
+
+    # The fields of a form of address, in the order of the columns of
+    # the Address tab.
+    ADDRESS_COLUMNS = ('speaker', 'listener', 'form', 'since', 'notes')
 
     def __init__(self, plugin, parent, worker, ebook, cache_id,
                  library_id=None):
@@ -1269,11 +1276,12 @@ class NovelTranslation(QDialog):
         self.progress_label = secondary(QLabel(_('Ready.')))
         right_layout.addWidget(self.progress_label)
 
-        # Shown when the brief or the glossary is edited once paragraphs
-        # are already translated, and until the translation starts again.
+        # Shown when the brief, the glossary or the forms of address are
+        # edited once paragraphs are already translated, and until the
+        # translation starts again.
         self.context_warning = MessageBanner(_(
-            'You changed the author brief or the glossary after the '
-            'translation had started. What is already translated followed '
+            'You changed the author brief, the glossary or the forms of '
+            'address after the translation had started. What is already translated followed '
             'the previous version, so the book may not read consistently. '
             'Once every chapter is done, "Re-run all" translates it again '
             'with what you wrote.'), 'warning')
@@ -1374,6 +1382,47 @@ class NovelTranslation(QDialog):
         # Glossary tab would then show its buttons and no table at all.
         self.tabs.addTab(glossary_wrap, _('Glossary'))
 
+        # Forms of address tab: who addresses whom, and how, as the
+        # reports settled it; editable between runs like the glossary.
+        self.address_table = QTableWidget()
+        self.address_table.setColumnCount(len(self.ADDRESS_COLUMNS))
+        self.address_table.setHorizontalHeaderLabels(
+            [_('Speaker'), _('Listener'), _('Form'), _('From chapter'),
+             _('Notes')])
+        header = self.address_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents)
+        self.address_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.address_table.itemChanged.connect(self._on_address_edited)
+        self.address_table.installEventFilter(
+            EnterFilter(self._edit_address_entry, self))
+        address_actions = QHBoxLayout()
+        self.address_add_button = with_icon(
+            QPushButton(_('Add form')), 'plus')
+        self.address_add_button.setToolTip(_(
+            'Say how one character addresses another: the speaker and '
+            'the listener as the glossary names them, the form, and the '
+            'chapter it holds from. A form written or corrected here is '
+            'used as it is: the model never changes it.'))
+        self.address_add_button.clicked.connect(self._add_address_entry)
+        self.address_remove_button = with_icon(
+            QPushButton(_('Remove')), 'minus')
+        self.address_remove_button.setToolTip(_(
+            'Remove the forms selected. The model settles the pair again '
+            'the next time the two speak to each other.'))
+        self.address_remove_button.clicked.connect(
+            self._remove_address_entries)
+        address_actions.addWidget(self.address_add_button)
+        address_actions.addWidget(self.address_remove_button)
+        address_actions.addStretch(1)
+        address_wrap = QWidget()
+        address_wrap_layout = QVBoxLayout(address_wrap)
+        address_wrap_layout.addWidget(self.address_table, 1)
+        address_wrap_layout.addLayout(address_actions)
+        self.tabs.addTab(address_wrap, _('Address'))
+
         # Log tab.
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -1435,6 +1484,9 @@ class NovelTranslation(QDialog):
         # chapter_done signal so the UI never needs to read back from SQLite
         # (which can miss in-flight transactions from the worker thread).
         self._ui_glossary = {}
+        # The forms of address, as the worker last sent them; None until
+        # read from the cache.
+        self._ui_address = None
 
         self.text_view.bind_chapter_list(self.chapter_list)
         self._set_context_locked(False)
@@ -1519,7 +1571,7 @@ class NovelTranslation(QDialog):
             self._set_start_button(rerun=True)
 
     def _refresh_context_views(self, cache=None):
-        """Refresh the Summaries, Author and Glossary tabs.
+        """Refresh the Summaries, Author, Glossary and Address tabs.
 
         Summaries are always read from the SQLite cache (they are long
         strings, writing them into the signal payload would be wasteful).
@@ -1536,7 +1588,8 @@ class NovelTranslation(QDialog):
         When ``cache`` is supplied (e.g. from the initial load in
         :meth:`_refresh_chapter_list_from_cache`), both summaries AND the
         glossary initial state are read from it so the UI is correctly
-        restored on re-open.
+        restored on re-open. The forms of address are handled the same
+        way, with ``self._ui_address``.
         """
         should_close = False
         if cache is None:
@@ -1588,6 +1641,17 @@ class NovelTranslation(QDialog):
                     self._ui_glossary = {}
 
             self._redraw_glossary_table()
+
+            if self._ui_address is None:
+                raw = cache.get_info(INFO_NOVEL_ADDRESS)
+                try:
+                    address = _json.loads(raw) if raw else []
+                except (ValueError, TypeError):
+                    address = []
+                self._ui_address = [
+                    entry for entry in address if isinstance(entry, dict)] \
+                    if isinstance(address, list) else []
+            self._redraw_address_table()
         finally:
             if should_close:
                 cache.close()
@@ -1612,19 +1676,54 @@ class NovelTranslation(QDialog):
         finally:
             self._loading_context = False
 
-    # -- editing the brief and the glossary ------------------------------
+    def _redraw_address_table(self):
+        """Repopulate the Address tab from ``self._ui_address``: the
+        forms of each pair in the order they took effect."""
+        address = sorted(
+            self._ui_address or [],
+            key=lambda entry: (
+                (entry.get('speaker') or '').casefold(),
+                (entry.get('listener') or '').casefold(),
+                self._since(entry)))
+        table = self.address_table
+        self._loading_context = True
+        try:
+            table.setRowCount(len(address))
+            for row, entry in enumerate(address):
+                for column, field in enumerate(self.ADDRESS_COLUMNS):
+                    value = entry.get(field, '')
+                    if field == 'since':
+                        value = self._since(entry) or ''
+                    table.setItem(row, column, QTableWidgetItem(
+                        str(value) if value else ''))
+                if entry.get('user'):
+                    self._mark_user_row(row, table)
+        finally:
+            self._loading_context = False
+
+    @staticmethod
+    def _since(entry):
+        try:
+            return int(entry.get('since') or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    # -- editing the brief, the glossary and the forms of address --------
 
     def _set_context_locked(self, locked):
-        """The brief and the glossary are the worker's while it runs,
-        and the user's the rest of the time."""
+        """The brief, the glossary and the forms of address are the
+        worker's while it runs, and the user's the rest of the time."""
         self.style_view.setReadOnly(locked)
         triggers = QAbstractItemView.EditTrigger
-        self.glossary_table.setEditTriggers(
-            triggers.NoEditTriggers if locked else (
-                triggers.DoubleClicked | triggers.EditKeyPressed
-                | triggers.AnyKeyPressed))
+        for table in (self.glossary_table, self.address_table):
+            table.setEditTriggers(
+                triggers.NoEditTriggers if locked else (
+                    triggers.DoubleClicked | triggers.EditKeyPressed
+                    | triggers.AnyKeyPressed))
         for button in (self.glossary_add_button,
                        self.glossary_remove_button,
+                       self.address_add_button,
+                       self.address_remove_button,
                        self.reset_context_button):
             button.setEnabled(not locked)
 
@@ -1681,27 +1780,29 @@ class NovelTranslation(QDialog):
             self._save_style()
 
     def _commit_context_edits(self):
-        """Save what is being typed in the Author and Glossary tabs: a
-        brief not saved yet, and a glossary cell still open in its
-        editor. Locking the table stops new edits but leaves an open
+        """Save what is being typed in the Author, Glossary and Address
+        tabs: a brief not saved yet, and a cell still open in its
+        editor. Locking a table stops new edits but leaves an open
         editor open, and what it committed later was written to the
         cache while the run held its own copy of the glossary."""
         focus = QApplication.focusWidget()
-        if focus is not None and self.glossary_table.isAncestorOf(focus):
+        if focus is not None and (
+                self.glossary_table.isAncestorOf(focus)
+                or self.address_table.isAncestorOf(focus)):
             # The editor commits its cell when it loses the focus.
             focus.clearFocus()
         self._flush_style()
 
-    def _mark_user_row(self, row):
-        """Mark ``row`` as written by the user, whose entries the model
-        never changes."""
+    def _mark_user_row(self, row, table=None):
+        """Mark ``row`` of ``table`` (the glossary by default) as
+        written by the user, whose entries the model never changes."""
+        table = table or self.glossary_table
         loading, self._loading_context = self._loading_context, True
         try:
-            for column in range(self.glossary_table.columnCount()):
-                if self.glossary_table.item(row, column) is None:
-                    self.glossary_table.setItem(
-                        row, column, QTableWidgetItem(''))
-            head = self.glossary_table.item(row, 0)
+            for column in range(table.columnCount()):
+                if table.item(row, column) is None:
+                    table.setItem(row, column, QTableWidgetItem(''))
+            head = table.item(row, 0)
             head.setData(Qt.UserRole, True)
             head.setToolTip(_(
                 'Written or corrected by you: the model never changes it.'))
@@ -1790,6 +1891,95 @@ class NovelTranslation(QDialog):
         if self._save_glossary():
             self._context_edited()
 
+    @staticmethod
+    def _clean_address(address):
+        """``address`` as it is saved and compared: no empty fields,
+        in a stable order."""
+        cleaned = [{key: value for key, value in entry.items() if value}
+                   for entry in address]
+        return sorted(cleaned, key=lambda entry: (
+            (entry.get('speaker') or '').casefold(),
+            (entry.get('listener') or '').casefold(),
+            NovelTranslation._since(entry)))
+
+    def _table_address(self):
+        """The forms of address the table shows. A row without a
+        speaker, a listener or a form is left out until it has all
+        three; a chapter that is not a number reads as the first."""
+        address = []
+        table = self.address_table
+        for row in range(table.rowCount()):
+            cells = [table.item(row, column)
+                     for column in range(len(self.ADDRESS_COLUMNS))]
+            values = dict(zip(self.ADDRESS_COLUMNS, [
+                item.text().strip() if item is not None else ''
+                for item in cells]))
+            if not (values['speaker'] and values['listener']
+                    and values['form']):
+                continue
+            try:
+                values['since'] = max(1, int(values['since']))
+            except ValueError:
+                values['since'] = 1
+            if cells[0].data(Qt.UserRole):
+                values['user'] = True
+            address.append(values)
+        return self._clean_address(address)
+
+    def _save_address(self):
+        """Write the table into the cache; whether that changed it."""
+        address = self._table_address()
+        if address == self._clean_address(self._ui_address or []):
+            return False
+        cache = get_cache(self.cache_id)
+        try:
+            ContextManager(cache).load().replace_address(address)
+        finally:
+            cache.close()
+        self._ui_address = address
+        return True
+
+    def _on_address_edited(self, item):
+        if self._loading_context or self.translating:
+            return
+        self._mark_user_row(item.row(), self.address_table)
+        if self._save_address():
+            self._context_edited()
+
+    def _edit_address_entry(self):
+        item = self.address_table.currentItem()
+        if item is not None and not self.translating:
+            self.address_table.editItem(item)
+
+    def _add_address_entry(self):
+        table = self.address_table
+        row = table.rowCount()
+        self._loading_context = True
+        try:
+            table.insertRow(row)
+        finally:
+            self._loading_context = False
+        self._mark_user_row(row, table)
+        table.scrollToBottom()
+        table.setCurrentCell(row, 0)
+        table.editItem(table.item(row, 0))
+
+    def _remove_address_entries(self):
+        table = self.address_table
+        rows = sorted({index.row() for index in
+                       table.selectionModel().selectedRows()},
+                      reverse=True)
+        if not rows:
+            return
+        self._loading_context = True
+        try:
+            for row in rows:
+                table.removeRow(row)
+        finally:
+            self._loading_context = False
+        if self._save_address():
+            self._context_edited()
+
     # -- controls ----------------------------------------------------------
 
     def _set_start_button(self, rerun):
@@ -1815,8 +2005,9 @@ class NovelTranslation(QDialog):
             # which found every chapter done and stopped at once.
             question = _(
                 'Every chapter is done. Translate the whole book again?\n\n'
-                'The summaries, the glossary and the author brief are '
-                'kept; every paragraph is sent to the model again.')
+                'The summaries, the glossary, the forms of address and the '
+                'author brief are kept; every paragraph is sent to the '
+                'model again.')
             cache = get_cache(self.cache_id)
             try:
                 edited = len(edited_paragraphs(cache))
@@ -1872,8 +2063,8 @@ class NovelTranslation(QDialog):
         self.trans_worker.chapter_done.connect(self._on_chapter_done)
         self.trans_worker.report.connect(self.report_view.setHtml)
         self.trans_worker.finished.connect(self._on_worker_finished)
-        # What is being typed in the Author and Glossary tabs goes into
-        # this run.
+        # What is being typed in the Author, Glossary and Address tabs
+        # goes into this run.
         self._commit_context_edits()
         self._set_context_locked(True)
         self.context_warning.setVisible(False)
@@ -1915,7 +2106,7 @@ class NovelTranslation(QDialog):
         if stored:
             self.report_view.setHtml(stored)
 
-    def _on_chapter_done(self, index, summary, glossary_delta):
+    def _on_chapter_done(self, index, summary, glossary_delta, address):
         self._set_chapter_status(index, self.STATUS_DONE)
         self._refresh_report_from_cache()
         # Merge the glossary delta received directly from the worker signal
@@ -1937,6 +2128,8 @@ class NovelTranslation(QDialog):
                     'type': (item.get('type') or '').strip(),
                     'notes': (item.get('notes') or '').strip(),
                 }
+        # The forms of address come whole: they are few.
+        self._ui_address = list(address or [])
         self._refresh_context_views()
         # The chapter on show is read again when it is the one just
         # translated; any other view is left as the reader has it.
@@ -1953,6 +2146,7 @@ class NovelTranslation(QDialog):
         # it: the cap may have dropped entries they never mentioned.
         # Edits start from what is actually stored.
         self._ui_glossary = {}
+        self._ui_address = None
         self._started = None   # the run may have translated something
         self._refresh_context_views()
         self._set_context_locked(False)
@@ -2041,8 +2235,9 @@ class NovelTranslation(QDialog):
     def _reset_context(self):
         ret = QMessageBox.question(
             self, _('Reset context'),
-            _('This will discard all summaries, the glossary and the '
-              'author brief, and reset chapter progress to 0. The '
+            _('This will discard all summaries, the glossary, the forms '
+              'of address and the author brief, and reset chapter '
+              'progress to 0. The '
               'already-translated paragraphs will remain in cache. '
               'Continue?'),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
@@ -2056,6 +2251,7 @@ class NovelTranslation(QDialog):
         finally:
             cache.close()
         self._ui_glossary = {}
+        self._ui_address = []
         for idx in list(self.status_by_chapter.keys()):
             self._set_chapter_status(idx, self.STATUS_PENDING)
         self.progress_bar.setValue(0)
